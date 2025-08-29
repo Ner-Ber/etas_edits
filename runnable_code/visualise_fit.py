@@ -3,12 +3,14 @@ import json
 import os
 
 from etas.plots import ETASFitVisualisation
+from etas.utility_functions import path_rel_to_file
 
 if __name__ == '__main__':
-    with open("../config/visualisation_config.json", 'r') as f:
+    vis_path = path_rel_to_file("../config/visualisation_config.json")
+    with open(vis_path, 'r') as f:
         visualisation_config = json.load(f)
 
-    with open(visualisation_config["fn_parameters"], 'r') as f:
+    with open(path_rel_to_file(visualisation_config["fn_parameters"]), 'r') as f:
         etas_output = json.load(f)
 
     store_path = \
@@ -29,3 +31,4 @@ if __name__ == '__main__':
 
     fit_vis = ETASFitVisualisation(metadata)
     fit_vis.all_plots()
+    pass
