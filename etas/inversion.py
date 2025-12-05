@@ -900,7 +900,7 @@ class ETASParameterCalculation:
 
     if obj.fn_catalog is not None:
       obj.catalog = pd.read_csv(
-          obj.fn_catalog,
+          path_rel_to_file(obj.fn_catalog),
           index_col=0,
           parse_dates=["time"],
           dtype={"url": str, "alert": str},
