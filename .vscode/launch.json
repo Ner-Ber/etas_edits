@@ -1,0 +1,22 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python Debugger: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "args": [
+                "/mnt/g/My Drive/Projects/eq_mag_prediction/results/catalogs/ingested/nz_geonet.csv", // The input_file argument (MANDATORY)
+                // "-o", // The output flag
+                // "results/converted_output.csv", // The custom output path
+                "--start_id", // The start_id flag
+                "0" // The start_id value
+            ]
+        }
+    ]
+}

@@ -23,7 +23,7 @@ set_up_logger(level=logging.DEBUG)
 
 if __name__ == '__main__':
   # reads configuration for example ETAS parameter inversion
-  config_path = path_rel_to_file("../config/invert_etas_config.json")
+  config_path = path_rel_to_file("../config/invert_etas_configmodified.json")
   with open(config_path, 'r') as f:
     inversion_config = json.load(f)
 
