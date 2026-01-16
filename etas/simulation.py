@@ -28,9 +28,20 @@ from etas.inversion import (ETASParameterCalculation, branching_integral,
                             branching_ratio, expected_aftershocks, haversine,
                             parameter_dict2array, round_half_up, to_days,
                             upper_gamma_ext)
-from etas.mc_b_est import simulate_magnitudes, simulate_magnitudes_from_zone
+from etas.mc_b_est import simulate_magnitudes, simulate_magnitudes_from_zone, MAGNET_magnitude
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_magnitude_generator(magnitude_generator):
+    if callable(magnitude_generator):
+        return magnitude_generator
+    if isinstance(magnitude_generator, str):
+        if magnitude_generator == 'MAGNET_magnitude':
+            return MAGNET_magnitude
+        if magnitude_generator == 'simulate_magnitudes':
+            return simulate_magnitudes
+    return simulate_magnitudes
 
 
 def bin_to_precision(x: np.ndarray | list, delta_x: float = 0.1) -> np.ndarray:
@@ -360,6 +371,8 @@ def generate_background_events(
     grid=False,
     mfd_zones=None,
     zones_from_latlon=None,
+    magnitude_generator=simulate_magnitudes,
+    catalog=None,
 ):
     from etas.inversion import polygon_surface, to_days
 
@@ -465,11 +478,13 @@ def generate_background_events(
         zones = zones_from_latlon(catalog["latitude"], catalog["longitude"])
         catalog["magnitude"] = simulate_magnitudes_from_zone(zones, mfd_zones)
     else:
+        # catalog["magnitude"] = magnitude_generator(
         catalog["magnitude"] = simulate_magnitudes(
             n_background,
             beta=beta,
             mc=mc - delta_m / 2,
             m_max=m_max + delta_m / 2 if m_max is not None else None,
+            catalog=catalog,
         )
 
     # info about origin of event
@@ -512,6 +527,8 @@ def generate_aftershocks(
     approx_times=False,
     mfd_zones=None,
     zones_from_latlon=None,
+    magnitude_generator=simulate_magnitudes,
+    catalog=None,
 ):
     theta = parameter_dict2array(parameters)
     theta_without_mu = theta[2:]
@@ -614,11 +631,13 @@ def generate_aftershocks(
         zones = zones_from_latlon(aadf["latitude"], aadf["longitude"])
         aadf["magnitude"] = simulate_magnitudes_from_zone(zones, mfd_zones)
     else:
-        aadf["magnitude"] = simulate_magnitudes(
+        aadf["magnitude"] = magnitude_generator(
             n_total_aftershocks,
             beta=beta,
             mc=mc - delta_m / 2,
             m_max=m_max + delta_m / 2 if m_max is not None else None,
+            catalog=catalog,
+            aftershock_df=aadf.copy(),
         )
 
     # info about generation and being background
@@ -689,6 +708,7 @@ def generate_catalog(
     background_probs=None,
     gaussian_scale=None,
     approx_times=False,
+    magnitude_generator=simulate_magnitudes,
 ):
     """
     Simulates an earthquake catalog.
@@ -733,6 +753,8 @@ def generate_catalog(
         making it much faster.
     """
 
+    magnitude_generator = resolve_magnitude_generator(magnitude_generator)
+
     if beta_aftershock is None:
         beta_aftershock = beta_main
 
@@ -751,6 +773,7 @@ def generate_catalog(
         background_lons=background_lons,
         background_probs=background_probs,
         gaussian_scale=gaussian_scale,
+        magnitude_generator=magnitude_generator,
     )
 
     theta = parameter_dict2array(parameters)
@@ -791,6 +814,8 @@ def generate_catalog(
             timewindow_end=timewindow_end,
             timewindow_length=timewindow_length,
             approx_times=approx_times,
+            magnitude_generator=magnitude_generator,
+            catalog=catalog,
         )
 
         aftershocks.index += catalog.index.max() + 1
@@ -843,6 +868,7 @@ def simulate_catalog_continuation(
     induced_bsla=None,
     induced_bslo=None,
     n_induced=None,
+    magnitude_generator=simulate_magnitudes,
 ):
     """
     auxiliary_catalog : pd.DataFrame
@@ -904,6 +930,8 @@ def simulate_catalog_continuation(
     n_induced : float, optional
         Expected number of induced earthquakes.
     """
+    magnitude_generator = resolve_magnitude_generator(magnitude_generator)
+
     # preparing betas
     if beta_aftershock is None:
         beta_aftershock = beta_main
@@ -926,6 +954,8 @@ def simulate_catalog_continuation(
         grid=bg_grid,
         mfd_zones=mfd_zones,
         zones_from_latlon=zones_from_latlon,
+        magnitude_generator=magnitude_generator,
+        catalog=auxiliary_catalog,
     )
     background["evt_id"] = ""
     background["xi_plus_1"] = 1
@@ -953,6 +983,8 @@ def simulate_catalog_continuation(
             bsla=induced_bsla,
             bslo=induced_bslo,
             grid=True,
+            magnitude_generator=magnitude_generator,
+            catalog=auxiliary_catalog,
         )
         induced["is_background"] = "induced"
         induced["evt_id"] = ""
@@ -1009,6 +1041,8 @@ def simulate_catalog_continuation(
             approx_times=approx_times,
             mfd_zones=mfd_zones,
             zones_from_latlon=zones_from_latlon,
+            magnitude_generator=magnitude_generator,
+            catalog=catalog,
         )
 
         aftershocks.index += catalog.index.max() + 1
@@ -1166,7 +1200,9 @@ class ETASSimulation:
             filter_polygon: bool = True,
             chunksize: int = 100,
             info_cols: list = ["is_background"],
-            i_start: int = 0):
+            i_start: int = 0,
+            magnitude_generator=simulate_magnitudes):
+        magnitude_generator = resolve_magnitude_generator(magnitude_generator)
         start = dt.datetime.now()
         np.random.seed()
         logger.debug("induced info: {}".format(self.induced))
@@ -1219,6 +1255,7 @@ class ETASSimulation:
                 induced_bsla=self.induced_bsla,
                 induced_bslo=self.induced_bslo,
                 n_induced=self.n_induced,
+                magnitude_generator=magnitude_generator,
             )
 
             continuation["catalog_id"] = sim_id
@@ -1270,6 +1307,7 @@ class ETASSimulation:
         chunksize: int = 100,
         info_cols: list = [],
         i_start: int = 0,
+        magnitude_generator=simulate_magnitudes,
     ) -> None:
         i_end = i_start + n_simulations
 
@@ -1285,6 +1323,7 @@ class ETASSimulation:
                 chunksize,
                 info_cols,
                 i_start=i_start,
+                magnitude_generator=magnitude_generator,
             )
 
             next(generator).to_csv(fn_store, mode="w", header=True, index=True)
@@ -1331,6 +1370,7 @@ class ETASSimulation:
                     chunksize,
                     info_cols,
                     i_start=i_next,
+                    magnitude_generator=magnitude_generator,
                 )
 
         # append rest of chunks to file
@@ -1345,6 +1385,7 @@ class ETASSimulation:
         filter_polygon: bool = True,
         chunksize: int = 100,
         info_cols: list = [],
+        magnitude_generator=simulate_magnitudes,
     ) -> ForecastCatalog:
         store = pd.DataFrame()
         for chunk in self.simulate(
@@ -1354,6 +1395,7 @@ class ETASSimulation:
             filter_polygon,
             chunksize,
             info_cols,
+            magnitude_generator=magnitude_generator,
         ):
             store = pd.concat([store, chunk], ignore_index=False)
         return ForecastCatalog(data=store)
