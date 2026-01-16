@@ -6,6 +6,8 @@ import numpy as np
 import pandas as pd
 from shapely.geometry import Polygon
 
+from eq_mag_prediction.utilities import catalog_methods
+
 from etas import set_up_logger
 from etas.inversion import round_half_up
 from etas.simulation import generate_catalog
@@ -14,10 +16,10 @@ from etas.utility_functions import path_rel_to_file
 set_up_logger(level=logging.INFO)
 
 
-
 if __name__ == '__main__':
     # reads configuration for example ETAS parameter inversion
-    config_path = path_rel_to_file("../config/simulate_catalog_config.json")
+    # config_path = path_rel_to_file("../config/simulate_catalog_config.json")
+    config_path = path_rel_to_file("../config/simulate_catalog_config_test.json")
     with open(config_path, 'r') as f:
         simulation_config = json.load(f)
 
@@ -32,7 +34,9 @@ if __name__ == '__main__':
         parameters=simulation_config["parameters"],
         mc=simulation_config["mc"],
         beta_main=simulation_config["beta"],
-        delta_m=simulation_config["delta_m"]
+        delta_m=simulation_config["delta_m"],
+        magnitude_generator=simulation_config.get(
+            "magnitude_generator", "simulate_magnitudes")
     )
 
     synthetic.magnitude = round_half_up(synthetic.magnitude, 1)

@@ -12,7 +12,22 @@
 # inspired by method of Clauset et al., 2009
 ##############################################################################
 
+from eq_mag_prediction.utilities import data_utils
+from eq_mag_prediction.utilities import simulate_catalog
+from eq_mag_prediction.utilities import catalog_analysis
+from eq_mag_prediction.utilities import statistics_utils as statistics
+from eq_mag_prediction.utilities import geometry
+from eq_mag_prediction.forecasting import one_region_model
+from eq_mag_prediction.forecasting import encoders
+from eq_mag_prediction.forecasting import metrics, training_examples
+from eq_mag_prediction.scripts import magnitude_predictor_trainer
+# import tf_keras
+import tensorflow as tf
+import os
 import numpy as np
+import joblib
+os.environ["TF_USE_LEGACY_KERAS"] = "1"
+# import unused for gin config
 
 # mc is the binned completeness magnitude,
 # so the 'true' completeness magnitude is mc - delta_m / 2
@@ -66,7 +81,7 @@ def estimate_beta_positive(magnitudes: np.ndarray, delta_m: float = 0
     return beta
 
 
-def simulate_magnitudes(n, beta, mc, m_max=None):
+def simulate_magnitudes(n, beta, mc, m_max=None, **kwargs):
     if m_max is not None:
         norm_factor = (1 - np.exp(-beta * (m_max - mc)))
     else:
@@ -233,3 +248,57 @@ def estimate_mc(sample,
             print("None of the mcs passed the test.")
 
     return mcs_test, ks_ds, ps, best_mc, beta
+
+
+def MAGNET_magnitude(n, beta, mc, m_max=None, catalog=None, aftershock_df=None):
+    """
+    Alternative to simulate_magnitudes that uses the catalog history.
+
+    Args:
+      n: number of magnitudes to simulate
+      beta: beta value
+      mc: completeness magnitude
+      m_max: maximum magnitude
+      catalog: pandas DataFrame containing the catalog history
+    """
+    # MODEL_NAME = 'Hauksson'
+    MODEL_NAME = 'Hauksson_recreate'
+    # experiment_dir = os.path.join(os.getcwd(), '..', 'results/trained_models/', MODEL_NAME)
+    # experiment_dir = os.path.join(os.getcwd(), 'results/trained_models/', MODEL_NAME)
+    experiment_dir = os.path.join(
+        '/home/neriberman/REPOS/eq_mag_pred_clean_test_20251104/results/trained_models/', MODEL_NAME)
+    custom_objects = {
+        '_repeat': encoders._repeat,
+    }
+    # tf load model
+    loaded_model = tf.keras.models.load_model(
+        os.path.join(experiment_dir, 'model'),
+        custom_objects={'_repeat': encoders._repeat},
+        compile=False,
+        # safe_mode=True
+    )
+
+    CatalogDomain = training_examples.CatalogDomain
+
+    with open(os.path.join(experiment_dir, 'domain'), 'rb') as f:
+        domain = joblib.load(f)
+    scaler_saving_dir = os.path.join(
+        os.getcwd(), '..', 'results/trained_models', MODEL_NAME, 'scalers')
+    all_encoders = one_region_model.build_encoders(domain)
+    features_and_models = one_region_model.load_features_and_construct_models(
+        domain, all_encoders, scaler_saving_dir)
+
+    one_region_model.compute_and_cache_features_scaler_encoder(
+        domain,
+        all_encoders,
+        force_recalculate=False,
+    )
+    features_and_models = one_region_model.load_features_and_construct_models(
+        domain, all_encoders, scaler_saving_dir
+    )
+    train_features = one_region_model.features_in_order(features_and_models, 0)
+    validation_features = one_region_model.features_in_order(features_and_models, 1)
+    test_features = one_region_model.features_in_order(features_and_models, 2)
+
+    forecasts[set_name] = loaded_model.predict(locals()[f'{set_name}_features'])
+    return None
