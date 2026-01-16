@@ -10,13 +10,9 @@
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal",
-            "args": [
-                "/mnt/g/My Drive/Projects/eq_mag_prediction/results/catalogs/ingested/nz_geonet.csv", // The input_file argument (MANDATORY)
-                // "-o", // The output flag
-                // "results/converted_output.csv", // The custom output path
-                "--start_id", // The start_id flag
-                "0" // The start_id value
-            ]
+            "env": {
+                "MPLBACKEND": "TkAgg"
+            }
         }
     ]
 }

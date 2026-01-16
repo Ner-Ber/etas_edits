@@ -30,10 +30,14 @@ dependencies = [
     "tabulate",
 ]
 
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 
 [project.optional-dependencies]
 hermes = [
     "hermes-model @ git+https://gitlab.seismo.ethz.ch/indu/hermes-model.git",
     "seismostats @ git+https://github.com/swiss-seismological-service/SeismoStats.git",
 ]
+
+[tool.pylint.format]
+indent-string = "  "
+indent-after-paren = 2
