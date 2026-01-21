@@ -1,0 +1,5 @@
+{
+  "forecast_duration": 100,
+  "fn_store_simulation": "../output_data/simulated_JMA_catalog_continuation.csv",
+  "fn_inversion_output": "../output_data/parameters_JMA_invert.json"
+}

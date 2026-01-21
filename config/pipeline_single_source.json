@@ -1,0 +1,18 @@
+{
+    "templates": {
+        "general_gin_config_path": "/home/neriberman/REPOS/eq_mag_pred_clean_test_20251104/eq_mag_prediction/forecasting/configs/magnitude_prediction/magnitude_prediction_general.gin",
+        "local_gin_config_path": "/home/neriberman/REPOS/eq_mag_pred_clean_test_20251104/eq_mag_prediction/forecasting/configs/magnitude_prediction/hauksson_etas_pipeline_test.gin",
+        "invert_etas_config_json_path": "/home/neriberman/REPOS/etas_edits/config/invert_etas_config_hauksson_etas_pipeline_test.json",
+        "etas_catalog_continuation_config_json_path": "/home/neriberman/REPOS/etas_edits/config/simulate_catalog_continuation_config_hauksson_etas_pipeline_test.json"
+    },
+    "overrides": {
+        "auxiliary_start": "1981-01-01 00:00:00",
+        "timewindow_start": "1987-01-01 00:00:00",
+        "timewindow_end": "2016-05-23 00:00:00",
+        "testwindow_end": "2020-01-01 00:00:00",
+        "catalog": {
+            "format": "magnet",
+            "path": "/home/neriberman/REPOS/eq_mag_pred_clean_test_20251104/results/catalogs/ingested/hauksson.csv"
+        }
+    }
+}
