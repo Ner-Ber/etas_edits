@@ -43,8 +43,20 @@ def run_subprocess(process_path, gin_path, **flags):
         # Run from etas_edits directory to avoid numpy source directory conflicts
         # The scripts should work regardless of CWD since they use absolute paths
         script_dir = Path(__file__).resolve().parent
+        env = os.environ.copy()
+        # Ensure LD_LIBRARY_PATH includes conda's lib directory for proper libstdc++ resolution
+        # This helps with GLIBCXX version issues
+        conda_env = os.environ.get('CONDA_PREFIX', '')
+        if conda_env:
+            lib_path = os.path.join(conda_env, 'lib')
+            existing_ld_path = env.get('LD_LIBRARY_PATH', '')
+            if existing_ld_path:
+                if lib_path not in existing_ld_path:
+                    env['LD_LIBRARY_PATH'] = lib_path + os.pathsep + existing_ld_path
+            else:
+                env['LD_LIBRARY_PATH'] = lib_path
         # No capture_output=True, so it prints directly to console
-        subprocess.run(command, check=True, cwd=str(script_dir))
+        subprocess.run(command, check=True, cwd=str(script_dir), env=env)
         print("--- Subprocess Finished Successfully ---")
 
     except subprocess.CalledProcessError as e:
@@ -69,7 +81,18 @@ def run_python_script(script_path: str, **flags):
     try:
         # Run from etas_edits directory to avoid numpy source directory conflicts
         script_dir = Path(__file__).resolve().parent
-        subprocess.run(command, check=True, cwd=str(script_dir))
+        env = os.environ.copy()
+        # Ensure LD_LIBRARY_PATH includes conda's lib directory for proper libstdc++ resolution
+        conda_env = os.environ.get('CONDA_PREFIX', '')
+        if conda_env:
+            lib_path = os.path.join(conda_env, 'lib')
+            existing_ld_path = env.get('LD_LIBRARY_PATH', '')
+            if existing_ld_path:
+                if lib_path not in existing_ld_path:
+                    env['LD_LIBRARY_PATH'] = lib_path + os.pathsep + existing_ld_path
+            else:
+                env['LD_LIBRARY_PATH'] = lib_path
+        subprocess.run(command, check=True, cwd=str(script_dir), env=env)
         print('--- Subprocess Finished Successfully ---')
 
     except subprocess.CalledProcessError as e:
@@ -977,15 +1000,32 @@ def run_feature_computation(gin_path, **flags):
 
 # 2c. Train model and save it.
 
-def run_magnet_trainer(gin_path, **flags):
+def run_magnet_trainer(gin_path, output_dir=None, **flags):
+    """
+    Run MAGNET trainer.
+
+    Args:
+        gin_path: Path to gin config file
+        output_dir: Directory for saving trained model (required)
+        **flags: Additional flags to pass to the subprocess
+    """
+    if output_dir is None:
+        raise ValueError("output_dir is required for run_magnet_trainer")
+
     # Resolve script path relative to this file's location
     script_dir = Path(__file__).resolve().parent
     script_path = (script_dir / ".." / ".." / "eq_mag_pred_clean_test_20251104" / "eq_mag_prediction" / "scripts" / "magnitude_predictor_trainer.py").resolve()
     if not script_path.exists():
         raise FileNotFoundError(f"MAGNET trainer script not found: {script_path}")
+
+    # Ensure output_dir exists
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     run_subprocess(
         str(script_path),
         gin_path,
+        output_dir=str(output_dir),
         **flags
     )
 
@@ -1179,7 +1219,11 @@ if __name__ == "__main__":
     # ---- MAGNET stages (feature computation + training)
     # Hardcoded to current local gin config; add flags as needed.
     run_feature_computation(local_gin_config_path)
-    run_magnet_trainer(local_gin_config_path)
+
+    # Create output directory for trained model in temp workspace
+    tmp_root = Path(temp_paths['tmp_root'])
+    magnet_output_dir = tmp_root / "magnet_output"
+    run_magnet_trainer(local_gin_config_path, output_dir=str(magnet_output_dir))
 
     # ---- ETAS stages (inversion + catalog continuation simulation)
     # These scripts read their own JSON configs (hardcoded inside those scripts).
