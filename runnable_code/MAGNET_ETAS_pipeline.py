@@ -23,7 +23,6 @@ from etas.simulation import ETASSimulation
 
 
 def run_subprocess(process_path, gin_path, **flags):
-
     gin_flag = 'gin_config' if process_path.endswith("magnitude_predictor_trainer.py") else 'gin_path'
 
     # set flag for subprocess
@@ -43,7 +42,16 @@ def run_subprocess(process_path, gin_path, **flags):
         # Run from etas_edits directory to avoid numpy source directory conflicts
         # The scripts should work regardless of CWD since they use absolute paths
         script_dir = Path(__file__).resolve().parent
+
         env = os.environ.copy()
+
+        # --- CRITICAL FIX START ---
+        # Explicitly remove the legacy flag if it exists. 
+        # This forces the subprocess to use the standard Keras 2.15 bundled with TF 2.15.
+        if "TF_USE_LEGACY_KERAS" in env:
+            del env["TF_USE_LEGACY_KERAS"]
+        # --- CRITICAL FIX END ---
+
         # Ensure LD_LIBRARY_PATH includes conda's lib directory for proper libstdc++ resolution
         # This helps with GLIBCXX version issues
         conda_env = os.environ.get('CONDA_PREFIX', '')
@@ -55,6 +63,7 @@ def run_subprocess(process_path, gin_path, **flags):
                     env['LD_LIBRARY_PATH'] = lib_path + os.pathsep + existing_ld_path
             else:
                 env['LD_LIBRARY_PATH'] = lib_path
+
         # No capture_output=True, so it prints directly to console
         subprocess.run(command, check=True, cwd=str(script_dir), env=env)
         print("--- Subprocess Finished Successfully ---")
@@ -988,7 +997,7 @@ def update_json_parameters(json_path: str, params_dict: dict):
 def run_feature_computation(gin_path, **flags):
     # Resolve script path relative to this file's location
     script_dir = Path(__file__).resolve().parent
-    script_path = (script_dir / ".." / ".." / "eq_mag_pred_clean_test_20251104" / "eq_mag_prediction" / "scripts" / "magnitude_prediction_compute_features.py").resolve()
+    script_path = (script_dir / ".." / ".." / "eq_mag_prediction" / "eq_mag_prediction" / "scripts" / "magnitude_prediction_compute_features.py").resolve()
     if not script_path.exists():
         raise FileNotFoundError(f"MAGNET feature computation script not found: {script_path}")
     run_subprocess(
@@ -1014,7 +1023,7 @@ def run_magnet_trainer(gin_path, output_dir=None, **flags):
 
     # Resolve script path relative to this file's location
     script_dir = Path(__file__).resolve().parent
-    script_path = (script_dir / ".." / ".." / "eq_mag_pred_clean_test_20251104" / "eq_mag_prediction" / "scripts" / "magnitude_predictor_trainer.py").resolve()
+    script_path = (script_dir / ".." / ".." / "eq_mag_prediction" / "eq_mag_prediction" / "scripts" / "magnitude_predictor_trainer.py").resolve()
     if not script_path.exists():
         raise FileNotFoundError(f"MAGNET trainer script not found: {script_path}")
 
