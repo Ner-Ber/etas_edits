@@ -12,11 +12,15 @@ import inspect
 import tempfile
 import shutil
 import argparse
+import gin
+import pandas as pd
+import numpy as np
 
 from eq_mag_prediction.ingestion import catalog_format_converter as cfc
 from eq_mag_prediction.utilities import data_utils
-import pandas as pd
-import numpy as np
+from eq_mag_prediction.forecasting import one_region_model
+from eq_mag_prediction.forecasting import training_examples
+from eq_mag_prediction.utilities import catalog_processing
 
 from etas.inversion import ETASParameterCalculation
 from etas.simulation import ETASSimulation
@@ -134,11 +138,15 @@ def _build_temp_configs_from_single_source(
         "etas_catalog_continuation_config_json_path": "..."
       },
       "overrides": {
-        "auxiliary_start": "YYYY-mm-dd HH:MM:SS",
-        "timewindow_start": "YYYY-mm-dd HH:MM:SS",
-        "timewindow_end": "YYYY-mm-dd HH:MM:SS",
-        "testwindow_end": "YYYY-mm-dd HH:MM:SS",
-        "catalog": { "format": "etas" | "magnet", "path": "/abs/or/rel/path/to/catalog.csv" }
+        "set_times": {
+          "auxiliary_start": "YYYY-mm-dd HH:MM:SS",
+          "timewindow_start": "YYYY-mm-dd HH:MM:SS",
+          "timewindow_end": "YYYY-mm-dd HH:MM:SS",
+          "testwindow_end": "YYYY-mm-dd HH:MM:SS"
+        },
+        "catalog": { "format": "etas" | "magnet", "path": "/abs/or/rel/path/to/catalog.csv" },
+        "train_and_evaluate_magnitude_prediction_model": { "learning_rate": 1e-4, ... },
+        ... (other gin parameters)
       }
     }
     """
@@ -208,8 +216,7 @@ def _build_temp_configs_from_single_source(
             etas_output_dir=etas_catalog_dir,
             original_catalog_name=persistent_magnet_catalog.name,
         )
-        # Use persistent ETAS catalog path (relative to temp config)
-        tmp_etas_catalog_rel = os.path.relpath(persistent_etas_catalog, tmp_cfg_dir)
+        tmp_etas_catalog_rel = str(persistent_etas_catalog)
     elif catalog_format == "etas":
         # User provided ETAS catalog; create MAGNET catalog from it (already done above)
         # Use the provided ETAS catalog (relative to temp config)
@@ -218,11 +225,13 @@ def _build_temp_configs_from_single_source(
         raise ValueError(f"Unsupported catalog.format: {catalog_format} (expected 'magnet' or 'etas')")
 
     # --- Update temp LOCAL gin: times + catalog binding (absolute path so look_for_file works)
+    # Get timing fields from "set_times" subfield
+    set_times = overrides["set_times"]
     update_gin = {
-        "feature_prep_start": _dt_string_to_epoch_seconds_utc(overrides["auxiliary_start"]),
-        "train_start_time": _dt_string_to_epoch_seconds_utc(overrides["timewindow_start"]),
-        "test_start_time": _dt_string_to_epoch_seconds_utc(overrides["timewindow_end"]),
-        "test_end_time": _dt_string_to_epoch_seconds_utc(overrides["testwindow_end"]),
+        "feature_prep_start": _dt_string_to_epoch_seconds_utc(set_times["auxiliary_start"]),
+        "train_start_time": _dt_string_to_epoch_seconds_utc(set_times["timewindow_start"]),
+        "test_start_time": _dt_string_to_epoch_seconds_utc(set_times["timewindow_end"]),
+        "test_end_time": _dt_string_to_epoch_seconds_utc(set_times["testwindow_end"]),
     }
     update_gin["validation_start_time"] = int((1 - val_to_train_time_ratio) * update_gin["train_start_time"] + val_to_train_time_ratio * update_gin["test_start_time"])
 
@@ -240,16 +249,39 @@ def _build_temp_configs_from_single_source(
     update_gin["catalog"] = f"@{func_name}()"
     update_gin[f"{func_name}.{file_param_name}"] = persistent_magnet_catalog.name
 
+    # Add other overrides (not "set_times" or "catalog") to gin file
+    # Flatten nested dictionaries using dot notation for gin parameters
+    def flatten_dict(d, parent_key='', sep='.'):
+        """Flatten nested dictionary using dot notation."""
+        items = []
+        for k, v in d.items():
+            new_key = f"{parent_key}{sep}{k}" if parent_key else k
+            if isinstance(v, dict):
+                items.extend(flatten_dict(v, new_key, sep=sep).items())
+            else:
+                items.append((new_key, v))
+        return dict(items)
+
+    for key, value in overrides.items():
+        if key not in ["set_times", "catalog"]:
+            if isinstance(value, dict):
+                # Flatten nested dictionaries
+                flattened = flatten_dict(value, parent_key=key)
+                update_gin.update(flattened)
+            else:
+                # Simple key-value pair
+                update_gin[key] = value
+
     update_gin_parameters(str(tmp_local_gin), update_gin)
 
     # --- Update temp ETAS inversion json: times + fn_catalog + data_path (temp output dir)
     etas_out_dir = tmp_root / "etas_output"
     etas_out_dir.mkdir(parents=True, exist_ok=True)
     update_json = {
-        "auxiliary_start": overrides["auxiliary_start"],
-        "timewindow_start": overrides["timewindow_start"],
-        "timewindow_end": overrides["timewindow_end"],
-        "testwindow_end": overrides["testwindow_end"],
+        "auxiliary_start": set_times["auxiliary_start"],
+        "timewindow_start": set_times["timewindow_start"],
+        "timewindow_end": set_times["timewindow_end"],
+        "testwindow_end": set_times["testwindow_end"],
         "fn_catalog": tmp_etas_catalog_rel,
         "data_path": str(etas_out_dir) + os.sep,
     }
@@ -1009,6 +1041,75 @@ def run_feature_computation(gin_path, **flags):
 
 # 2c. Train model and save it.
 
+def _get_model_id_from_gin_config(gin_path: str) -> str | None:
+    """
+    Generate model ID from gin config without actually training.
+
+    Args:
+        gin_path: Path to gin config file
+
+    Returns:
+        Model ID string if successful, None if generation fails
+    """
+    try:
+        gin.parse_config_file(gin_path, skip_unknown=True)
+        # Create domain from gin config
+        domain = training_examples.CatalogDomain()
+        # Hash catalog if available
+        if hasattr(domain, 'earthquakes_catalog') and domain.earthquakes_catalog is not None:
+            catalog_hash = catalog_processing.hash_pandas_object(domain.earthquakes_catalog)
+        domain_id = domain.domain_examples_uuid()
+        all_encoders = one_region_model.build_encoders(domain)
+        encoder_ids = []
+        for name in sorted(all_encoders.keys()):
+            encoder = all_encoders[name]
+            encoder_identifier = encoder.uuid()
+            build_features_identifier = encoder.build_features_uuid()
+            encoder_ids.append(f'{name}_{encoder_identifier}_build_features_{build_features_identifier}')
+        encoders_id = '_'.join(encoder_ids)
+
+        # Extract hyperparameters from gin config
+        try:
+            learning_rate = gin.query_parameter('train_and_evaluate_magnitude_prediction_model.learning_rate')
+        except ValueError:
+            learning_rate = None
+
+        try:
+            batch_size = gin.query_parameter('train_and_evaluate_magnitude_prediction_model.batch_size')
+        except ValueError:
+            batch_size = None
+
+        try:
+            epochs = gin.query_parameter('train_and_evaluate_magnitude_prediction_model.epochs')
+        except ValueError:
+            epochs = None
+
+        try:
+            pdf_support_stretch = gin.query_parameter('train_and_evaluate_magnitude_prediction_model.pdf_support_stretch')
+        except ValueError:
+            pdf_support_stretch = 7  # default
+
+        # Check if we have all required parameters
+        if learning_rate is None or batch_size is None or epochs is None:
+            print("ERROR: Missing required hyperparameters!")
+            return None
+        # Generate model ID
+        model_id = one_region_model.model_training_id(
+            domain=domain,
+            all_encoders=all_encoders,
+            learning_rate=learning_rate,
+            batch_size=batch_size,
+            epochs=epochs,
+            pdf_support_stretch=pdf_support_stretch,
+            loss_function_type=None,  # Will be determined during training
+        )
+        gin.clear_config()
+        return model_id
+    except Exception as e:
+        print(f"Warning: Could not generate model ID from gin config: {e}")
+        return None
+
+
 def run_magnet_trainer(gin_path, output_dir=None, **flags):
     """
     Run MAGNET trainer.
@@ -1037,6 +1138,63 @@ def run_magnet_trainer(gin_path, output_dir=None, **flags):
         output_dir=str(output_dir),
         **flags
     )
+
+
+def run_magnet_trainer_or_load(gin_path, output_dir=None, trained_models_base_dir=None, **flags):
+    """
+    Wrapper for run_magnet_trainer that checks if model already exists and loads it instead of retraining.
+
+    Args:
+        gin_path: Path to gin config file
+        output_dir: Directory for saving trained model (only used as fallback if model ID generation fails)
+        trained_models_base_dir: Base directory for trained models (defaults to standard location)
+        **flags: Additional flags to pass to the subprocess
+
+    Returns:
+        Path to the model directory (either existing or newly trained)
+    """
+    if trained_models_base_dir is None:
+        trained_models_base_dir = Path("/home/neriberman/REPOS/eq_mag_prediction/results/trained_models")
+    else:
+        trained_models_base_dir = Path(trained_models_base_dir)
+
+    # Try to generate model ID from gin config
+    model_id = _get_model_id_from_gin_config(gin_path)
+
+    if model_id is not None:
+        model_dir = trained_models_base_dir / model_id
+        model_path = model_dir / "model"
+
+        # Check if model exists
+        if model_path.exists() and model_path.is_dir():
+            print(f"Found existing trained model: {model_dir}")
+            print(f"Skipping training and using existing model.")
+            return str(model_dir)
+        else:
+            print(f"Model ID: {model_id}")
+            print(f"Model directory does not exist: {model_dir}")
+            print(f"Creating persistent model directory and proceeding with training...")
+            # Create the persistent directory and use it as output_dir
+            model_dir.mkdir(parents=True, exist_ok=True)
+            output_dir = str(model_dir)
+    else:
+        print("Could not generate model ID from gin config.")
+        if output_dir is None:
+            raise ValueError("output_dir is required for run_magnet_trainer when model ID generation fails")
+        print(f"Using provided output_dir as fallback: {output_dir}")
+
+    # Model doesn't exist - proceed with training using persistent location (or fallback)
+    run_magnet_trainer(gin_path, output_dir=output_dir, **flags)
+
+    # After training, the model should be saved to trained_models_base_dir/model_id
+    # Return the path where it was saved (or output_dir if ID generation failed)
+    if model_id is not None:
+        model_dir = trained_models_base_dir / model_id
+        if model_dir.exists():
+            return str(model_dir)
+
+    # Fallback: return output_dir if we can't determine the model directory
+    return str(output_dir)
 
 # 3. Use trained model to predict aftershocks in catalog continuation.
 
@@ -1202,6 +1360,7 @@ def run_etas_catalog_continuation(config_path: str) -> None:
         magnitude_generator=simulation_config.get("magnitude_generator", "simulate_magnitudes"),
     )
 
+# region Main Execution
 if __name__ == "__main__":
     val_to_train_time_ratio = 3/4
     force_json_on_gin = False  # Gin -> JSON
@@ -1232,7 +1391,9 @@ if __name__ == "__main__":
     # Create output directory for trained model in temp workspace
     tmp_root = Path(temp_paths['tmp_root'])
     magnet_output_dir = tmp_root / "magnet_output"
-    run_magnet_trainer(local_gin_config_path, output_dir=str(magnet_output_dir))
+    # Use wrapper that checks for existing model and loads it if available
+    model_dir = run_magnet_trainer_or_load(local_gin_config_path, output_dir=str(magnet_output_dir))
+    print(f"Using model from: {model_dir}")
 
     # ---- ETAS stages (inversion + catalog continuation simulation)
     # These scripts read their own JSON configs (hardcoded inside those scripts).
@@ -1242,3 +1403,4 @@ if __name__ == "__main__":
     fn_parameters_rel = os.path.relpath(fn_parameters_json, cfg_dir)
     update_json_parameters(etas_catalog_continuation_config_json_path, {"fn_inversion_output": fn_parameters_rel})
     run_etas_catalog_continuation(etas_catalog_continuation_config_json_path)
+# endregion Main Execution
