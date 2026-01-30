@@ -1,6 +1,7 @@
 # Imports
 from datetime import datetime
 from datetime import timezone
+import hashlib
 from pathlib import Path
 import subprocess
 import sys
@@ -15,9 +16,12 @@ import argparse
 import gin
 import pandas as pd
 import numpy as np
+from shapely.geometry import Polygon, Point
+from shapely.ops import unary_union
 
 from eq_mag_prediction.ingestion import catalog_format_converter as cfc
 from eq_mag_prediction.utilities import data_utils
+from eq_mag_prediction.utilities import utility_functions
 from eq_mag_prediction.forecasting import one_region_model
 from eq_mag_prediction.forecasting import training_examples
 from eq_mag_prediction.utilities import catalog_processing
@@ -118,10 +122,50 @@ def _dt_string_to_epoch_seconds_utc(dt_str: str) -> int:
     return int(datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).timestamp())
 
 
+def _create_shape_coords_from_catalog(
+    etas_catalog_path: Path,
+    shapes_saving_dir: Path,
+) -> str:
+    """
+    Create a convex hull polygon from all points in the catalog and save as .npy file.
+
+    Args:
+        etas_catalog_path: Path to the ETAS catalog CSV file
+        shapes_saving_dir: Temporary directory for storing data files
+
+    Returns:
+        Relative path to the saved .npy file (relative to shapes_saving_dir)
+    """
+    etas_catalog_df = pd.read_csv(etas_catalog_path)
+    if len(etas_catalog_df) == 0:
+        raise ValueError(f"Catalog is empty: {etas_catalog_path}")
+
+    # Create points from lat/lon (Shapely Point uses (x, y) = (lon, lat))
+    points = [Point(lon, lat) for lon, lat in zip(etas_catalog_df['longitude'], etas_catalog_df['latitude'])]
+
+    multipoint = unary_union(points)
+    convex_hull = multipoint.convex_hull
+    if isinstance(convex_hull, Polygon):
+        coords = list(convex_hull.exterior.coords)
+        shape_coords_array = np.array([[lat, lon] for lon, lat in coords])
+    else:
+        bounds = convex_hull.bounds
+        shape_coords_array = np.array([
+            [bounds[1], bounds[0]],
+            [bounds[1], bounds[2]],
+            [bounds[3], bounds[2]],
+            [bounds[3], bounds[0]],
+        ])
+    shape_coords_npy = shapes_saving_dir / "shape_coords.npy"
+    np.save(shape_coords_npy, shape_coords_array)
+    return shape_coords_npy
+
+
 def _build_temp_configs_from_single_source(
     *,
     pipeline_config_path: str,
     val_to_train_time_ratio: float,
+    permanent_inv_dir: Path | str = "/home/neriberman/REPOS/etas_edits/outputs/inversions",
 ) -> dict[str, str]:
     """
     Single-source config mode:
@@ -251,22 +295,23 @@ def _build_temp_configs_from_single_source(
 
     # Add other overrides (not "set_times" or "catalog") to gin file
     # Flatten nested dictionaries using dot notation for gin parameters
-    def flatten_dict(d, parent_key='', sep='.'):
-        """Flatten nested dictionary using dot notation."""
-        items = []
-        for k, v in d.items():
-            new_key = f"{parent_key}{sep}{k}" if parent_key else k
-            if isinstance(v, dict):
-                items.extend(flatten_dict(v, new_key, sep=sep).items())
-            else:
-                items.append((new_key, v))
-        return dict(items)
+    # def flatten_dict(d, parent_key='', sep='.'):
+    #     """Flatten nested dictionary using dot notation."""
+    #     items = []
+    #     for k, v in d.items():
+    #         new_key = f"{parent_key}{sep}{k}" if parent_key else k
+    #         if isinstance(v, dict):
+    #             items.extend(flatten_dict(v, new_key, sep=sep).items())
+    #         else:
+    #             items.append((new_key, v))
+    #     return dict(items)
 
     for key, value in overrides.items():
         if key not in ["set_times", "catalog"]:
             if isinstance(value, dict):
                 # Flatten nested dictionaries
-                flattened = flatten_dict(value, parent_key=key)
+                # flattened = flatten_dict(value, parent_key=key)
+                flattened = utility_functions.flatten_dict(value, parent_key=key)
                 update_gin.update(flattened)
             else:
                 # Simple key-value pair
@@ -278,13 +323,34 @@ def _build_temp_configs_from_single_source(
     etas_out_dir = tmp_root / "etas_output"
     etas_out_dir.mkdir(parents=True, exist_ok=True)
     update_json = {
+        "data_path": str(permanent_inv_dir) + os.sep,
         "auxiliary_start": set_times["auxiliary_start"],
         "timewindow_start": set_times["timewindow_start"],
         "timewindow_end": set_times["timewindow_end"],
         "testwindow_end": set_times["testwindow_end"],
         "fn_catalog": tmp_etas_catalog_rel,
-        "data_path": str(etas_out_dir) + os.sep,
     }
+
+    # Handle shape_coords from overrides
+    # TODO: Also handle shape_coords in gin config (for MAGNET domain filtering)
+    shape_coords_override = overrides.get("shape_coords")
+    if shape_coords_override is None:
+        # Create convex hull from all points in catalog
+        if catalog_format == "magnet":
+            etas_catalog_path = persistent_etas_catalog
+        else:
+            etas_catalog_path = catalog_path
+
+        shape_coords_path = _create_shape_coords_from_catalog(
+            etas_catalog_path=etas_catalog_path,
+            shapes_saving_dir=tmp_data_dir,
+        )
+        update_json["shape_coords"] = str(shape_coords_path)
+    else:
+        if isinstance(shape_coords_override, str):
+            update_json["shape_coords"] = shape_coords_override
+        else:
+            raise ValueError(f"Unsupported shape_coords type: {type(shape_coords_override)}")
     update_json_parameters(str(tmp_invert_json), update_json)
 
     # --- Update temp continuation json: keep forecast_duration, but write outputs into temp dir
@@ -301,14 +367,6 @@ def _build_temp_configs_from_single_source(
         "invert_etas_config_json_path": str(tmp_invert_json),
         "etas_catalog_continuation_config_json_path": str(tmp_cont_json),
     }
-
-# 1. Set the configuration files and load them.
-# TODO: decide on format. Perhaps a JSON then a build from that to gin to be readable by MAGNET code?
-# common: timings and filtering events by shape
-# Hardcoded settings for now (no terminal/env overrides)
-# - True: copy ETAS JSON fields -> MAGNET Gin
-# - False: copy MAGNET Gin fields -> ETAS JSON
-
 
 def _read_text_file(path: str) -> str:
     with open(path, "r") as f:
@@ -1139,73 +1197,34 @@ def run_magnet_trainer(gin_path, output_dir=None, **flags):
         **flags
     )
 
-
-def run_magnet_trainer_or_load(gin_path, output_dir=None, trained_models_base_dir=None, **flags):
+def run_magnet_trainer_or_load(gin_path, trained_models_base_dir=None, **flags):
     """
-    Wrapper for run_magnet_trainer that checks if model already exists and loads it instead of retraining.
-
-    Args:
-        gin_path: Path to gin config file
-        output_dir: Directory for saving trained model (only used as fallback if model ID generation fails)
-        trained_models_base_dir: Base directory for trained models (defaults to standard location)
-        **flags: Additional flags to pass to the subprocess
-
-    Returns:
-        Path to the model directory (either existing or newly trained)
+    Checks if a model for this gin config exists in the persistent library. 
+    If yes, returns path. If no, trains it there.
     """
     if trained_models_base_dir is None:
-        trained_models_base_dir = Path("/home/neriberman/REPOS/eq_mag_prediction/results/trained_models")
+        # TODO: Move this to a constant/config eventually
+        base_dir = Path("/home/neriberman/REPOS/eq_mag_prediction/results/trained_models")
     else:
-        trained_models_base_dir = Path(trained_models_base_dir)
+        base_dir = Path(trained_models_base_dir)
 
-    # Try to generate model ID from gin config
     model_id = _get_model_id_from_gin_config(gin_path)
+    if not model_id:
+        raise ValueError(f"Could not generate model ID from {gin_path}. cannot proceed without explicit naming.")
 
-    if model_id is not None:
-        model_dir = trained_models_base_dir / model_id
-        model_path = model_dir / "model"
+    model_dir = base_dir / model_id
+    model_binary = model_dir / "model" # Assuming trainer saves to subdir 'model'
 
-        # Check if model exists
-        if model_path.exists() and model_path.is_dir():
-            print(f"Found existing trained model: {model_dir}")
-            print(f"Skipping training and using existing model.")
-            return str(model_dir)
-        else:
-            print(f"Model ID: {model_id}")
-            print(f"Model directory does not exist: {model_dir}")
-            print(f"Creating persistent model directory and proceeding with training...")
-            # Create the persistent directory and use it as output_dir
-            model_dir.mkdir(parents=True, exist_ok=True)
-            output_dir = str(model_dir)
+    if model_binary.exists() and model_binary.is_dir():
+        print(f"Skipping training. Found existing model at: {model_dir}")
     else:
-        print("Could not generate model ID from gin config.")
-        if output_dir is None:
-            raise ValueError("output_dir is required for run_magnet_trainer when model ID generation fails")
-        print(f"Using provided output_dir as fallback: {output_dir}")
+        print(f"Model not found. Training new model at: {model_dir}")
+        model_dir.mkdir(parents=True, exist_ok=True)
+        # We pass the persistent dir as the output for the trainer
+        run_magnet_trainer(gin_path, output_dir=str(model_dir), **flags)
 
-    # Model doesn't exist - proceed with training using persistent location (or fallback)
-    run_magnet_trainer(gin_path, output_dir=output_dir, **flags)
+    return str(model_dir)
 
-    # After training, the model should be saved to trained_models_base_dir/model_id
-    # Return the path where it was saved (or output_dir if ID generation failed)
-    if model_id is not None:
-        model_dir = trained_models_base_dir / model_id
-        if model_dir.exists():
-            return str(model_dir)
-
-    # Fallback: return output_dir if we can't determine the model directory
-    return str(output_dir)
-
-# 3. Use trained model to predict aftershocks in catalog continuation.
-
-# 3a. fit ETAS on train and validation periods.
-# subprocess invert_etas.py:
-
-
-# 3b. Predict magnitudes for aftershocks in test period.
-# subprocess simulate_catalog_continuation.py:
-
-# 4. Assess the performance of the predictions.
 
 def run_config_sync(
     *,
@@ -1288,58 +1307,263 @@ def run_config_sync(
     update_json_parameters(invert_etas_config_json_path, update_dict)
 
 
-def run_etas_inversion(config_path: str, store_pij: bool) -> str:
+def get_inversion_id(inversion_config: dict, store_pij: bool = False, store_distances: bool = False) -> str:
+    """
+    Generate a unique identifier for an ETAS inversion based on ALL config parameters.
+    """
+    key_params = {
+        'fn_catalog': str(inversion_config.get('fn_catalog', '')),
+        'auxiliary_start': str(inversion_config.get('auxiliary_start', '')),
+        'timewindow_start': str(inversion_config.get('timewindow_start', '')),
+        'timewindow_end': str(inversion_config.get('timewindow_end', '')),
+        'testwindow_end': str(inversion_config.get('testwindow_end', '')),
+        'mc': str(inversion_config.get('mc')),
+        'delta_m': str(inversion_config.get('delta_m')),
+        'coppersmith_multiplier': str(inversion_config.get('coppersmith_multiplier')),
+        'beta': str(inversion_config.get('beta')),
+        'm_ref': str(inversion_config.get('m_ref')),
+        'three_dim': str(inversion_config.get('three_dim', False)),
+        'free_background': str(inversion_config.get('free_background', False)),
+        'free_productivity': str(inversion_config.get('free_productivity', False)),
+        'bw_sq': str(inversion_config.get('bw_sq', 1)),
+        # A run with Pij is different from a run without (cache-wise):
+        'store_pij': str(store_pij), 
+        'store_distances': str(store_distances),
+    }
+
+    shape_coords = inversion_config.get('shape_coords')
+    if shape_coords is not None:
+        if isinstance(shape_coords, str):
+            key_params['shape_coords'] = shape_coords
+        else:
+            try:
+                shape_array = np.array(shape_coords)
+                key_params['shape_coords'] = hashlib.sha256(shape_array.tobytes()).hexdigest()
+            except Exception:
+                key_params['shape_coords'] = str(shape_coords)
+    else:
+        key_params['shape_coords'] = "None"
+
+    params_json = json.dumps(key_params, sort_keys=True).encode('utf-8')
+    params_hash = hashlib.sha1(params_json).hexdigest()
+    return params_hash[:16]
+
+
+def _inversion_id(inversion_config: dict) -> str:
+    """Generate a unique identifier for an ETAS inversion."""
+    hash_keys = [
+        "fn_catalog",
+        "auxiliary_start",
+        "timewindow_start",
+        "timewindow_end",
+        "testwindow_end",
+        "shape_coords",
+        "theta_0",
+        "mc",
+        "delta_m",
+        "coppersmith_multiplier",
+    ]
+    selected_dict = {key: inversion_config[key] for key in hash_keys}
+    config_str = json.dumps(utility_functions.flatten_dict(selected_dict), sort_keys=True)
+    return hashlib.sha1(config_str.encode('utf-8')).hexdigest()
+
+
+def _does_inversion_exists(out_path: Path, run_id: str, store_pij: bool, store_distances: bool) -> bool:
+    """
+    Check if ALL expected inversion results exist for the given run_id.
+    """
+    expected_files = [
+        f"parameters_{run_id}.json",
+        f"trig_and_bg_probs_{run_id}.csv",
+        f"sources_{run_id}.csv",
+    ]
+
+    if store_pij:
+        expected_files.append(f"pij_{run_id}.csv")
+
+    if store_distances:
+        expected_files.append(f"distances_{run_id}.csv")
+
+    for fname in expected_files:
+        if not (out_path / fname).exists():
+            return False
+
+    return True
+
+
+def run_etas_inversion(
+    config_path: str,
+    store_pij: bool,
+    store_distances: bool = False,
+    force_inversion: bool = False,
+    permanent_inv_dir=None,
+    gof_threshold: float = 0.001,
+) -> str:
+    """
+    Run ETAS parameter inversion, checking the permanent library first to skip 
+    redundant calculations.
+    """
     with open(config_path, 'r') as f:
         inversion_config = json.load(f)
 
-    # Prevent overwriting any existing inversion outputs by ensuring a unique ID.
-    # etas.inversion.ETASParameterCalculation.store_results writes files like:
-    #   parameters_<id>.json, trig_and_bg_probs_<id>.csv, sources_<id>.csv, distances_<id>.csv, (pij_<id>.csv)
-    output_dir = inversion_config.get("data_path")
-    if output_dir is None:
-        raise KeyError("ETAS inversion config missing required key: 'data_path'")
+    if permanent_inv_dir is None:
+        permanent_inv_dir = Path("/home/neriberman/REPOS/etas_edits/outputs/inversions")
+    else:
+        permanent_inv_dir = Path(permanent_inv_dir)
 
-    # store_results does string concatenation, so enforce trailing slash.
-    if not output_dir.endswith(("/", os.sep)):
-        output_dir = output_dir + os.sep
-        inversion_config["data_path"] = output_dir
+    my_inv_id = get_inversion_id(inversion_config, store_pij=store_pij, store_distances=store_distances)
+    permanent_run_dir = permanent_inv_dir / f"inv_{my_inv_id}"
+    return_param_path = permanent_run_dir / f"parameters_{my_inv_id}.json"
+    inversion_exists = _does_inversion_exists(permanent_run_dir, my_inv_id, store_pij, store_distances)
+    if inversion_exists and not force_inversion:
+        print(f"Skipping inversion. All results found in: {permanent_run_dir}")
+        return str(return_param_path)
 
-    out_path = Path(output_dir).expanduser()
-    out_path.mkdir(parents=True, exist_ok=True)
+    if force_inversion and inversion_exists:
+        print(f"Inversion exists ({my_inv_id}), but force_inversion=True. Rerunning...")
 
-    def _would_overwrite(inv_id: str) -> bool:
-        expected = [
-            out_path / f"parameters_{inv_id}.json",
-            out_path / f"trig_and_bg_probs_{inv_id}.csv",
-            out_path / f"sources_{inv_id}.csv",
-            out_path / f"distances_{inv_id}.csv",
-        ]
-        if store_pij:
-            expected.append(out_path / f"pij_{inv_id}.csv")
-        return any(p.exists() for p in expected)
+    print(f"Running ETAS inversion... Outputting to {permanent_run_dir}")
 
-    # If user supplied an id, keep it only if it won't overwrite.
-    inv_id = str(inversion_config.get("id") or "")
-    if (not inv_id) or _would_overwrite(inv_id):
-        import uuid
+    # CRITICAL: Force the ETAS library to use OUR id.
+    inversion_config["id"] = my_inv_id
 
-        for _ in range(10_000):
-            candidate = uuid.uuid4().hex
-            if not _would_overwrite(candidate):
-                inv_id = candidate
-                break
-        else:
-            raise RuntimeError(f"Could not find a free inversion id in {out_path}")
-        inversion_config["id"] = inv_id
+    permanent_run_dir.mkdir(parents=True, exist_ok=True)
+    Path(inversion_config.get("data_path")).expanduser().mkdir(parents=True, exist_ok=True)
+
+    calculation = ETASParameterCalculation(inversion_config)
+    calculation.prepare()
+    _ = calculation.invert(gof_threshold=gof_threshold)
+    safe_path_str = str(permanent_run_dir) + os.sep
+    calculation.store_results(safe_path_str, store_pij=store_pij, store_distances=store_distances)
+
+    # Verification
+    if not _does_inversion_exists(permanent_run_dir, my_inv_id, store_pij, store_distances):
+        print(f"CRITICAL ERROR: Inversion finished, but files are missing in {permanent_run_dir}")
+        print(f"Expected ID: {my_inv_id}")
+        print(f"Directory contents:")
+        for f in permanent_run_dir.glob("*"):
+            print(f" - {f.name}")
+
+        raise FileNotFoundError(
+            f"Inversion finished, but _inversion_exists returned False. "
+            f"Likely a mismatch between expected filenames and what ETASParameterCalculation wrote."
+        )
+
+    with open(permanent_run_dir / "inversion_config.json", 'w') as f:
+        json.dump(inversion_config, f, indent=2, default=str)
+    return str(return_param_path)
+
+def run_etas_inversion_old(config_path: str, store_pij: bool, force_inversion: bool = False) -> str:
+    """
+    Run ETAS parameter inversion, skipping if results already exist (unless force_inversion=True).
+
+    Args:
+        config_path: Path to ETAS inversion JSON config file
+        store_pij: Whether to store pij matrix
+        force_inversion: If True, run inversion even if results already exist
+
+    Returns:
+        Path to the parameters JSON file (either existing or newly created)
+    """
+    with open(config_path, 'r') as f:
+        inversion_config = json.load(f)
+
+    data_path = Path(inversion_config.get("data_path")).expanduser()
+    data_path.mkdir(parents=True, exist_ok=True)
+    # inv_id = str(inversion_config.get("id") or "")
+    inv_id = _inversion_id(inversion_config)
+    out_path = data_path / f"{inv_id}"
+
+    # Check if inversion already exists
+
+    if _does_inversion_exists(out_path, store_pij) and (not force_inversion):
+        print(f"ETAS inversion already exists in: {out_path}")
+        print(f"Skipping inversion. Use force_inversion=True to rerun.")
+        return str(out_path / f"parameters_{inv_id}.json")
+    elif _does_inversion_exists(out_path, store_pij) and force_inversion:
+        print(f"ETAS inversion exists for id '{inv_id}', but force_inversion=True. Rerunning...")
+    else:
+        pass
 
     calculation = ETASParameterCalculation(inversion_config)
     calculation.prepare()
     _ = calculation.invert()
-    calculation.store_results(inversion_config['data_path'], store_pij=store_pij)
-    # Return the parameters JSON path produced by store_results.
+    calculation.store_results(out_path, store_pij=store_pij)
+
+    # Copy results to permanent directory
+    permanent_inv_dir = Path("/home/neriberman/REPOS/etas_edits/outputs/inversions")
+    permanent_inv_dir.mkdir(parents=True, exist_ok=True)
+
+    # Generate unique identifier for this inversion based on config
+    inv_identifier = _generate_inversion_id(inversion_config, store_pij)
+    permanent_inv_path = permanent_inv_dir / inv_identifier
+    permanent_inv_path.mkdir(parents=True, exist_ok=True)
+
+    # Copy all inversion output files to permanent directory
+    files_to_copy = [
+        f"parameters_{inv_id}.json",
+        f"trig_and_bg_probs_{inv_id}.csv",
+        f"sources_{inv_id}.csv",
+        f"distances_{inv_id}.csv",
+    ]
+    if store_pij:
+        files_to_copy.append(f"pij_{inv_id}.csv")
+
+    # Also copy catalog if it was created
+    catalog_file = out_path / f"catalog_{inv_id}.csv"
+    if catalog_file.exists():
+        files_to_copy.append(f"catalog_{inv_id}.csv")
+
+    for filename in files_to_copy:
+        src_file = out_path / filename
+        if src_file.exists():
+            dst_file = permanent_inv_path / filename
+            shutil.copy2(src_file, dst_file)
+
+    # Copy the config file for reference
+    config_dst = permanent_inv_path / "inversion_config.json"
+    with open(config_dst, 'w') as f:
+        json.dump(inversion_config, f, indent=2, default=str)
+
+    print(f"Inversion results saved to permanent directory: {permanent_inv_path}")
+
+    # Return the parameters JSON path produced by store_results (from temp directory).
     return str(out_path / f"parameters_{inv_id}.json")
 
+
 def run_etas_catalog_continuation(config_path: str) -> None:
+    """
+    Runs the ETAS simulation/continuation using the provided config.
+    """
+    config_path = Path(config_path).resolve()
+    with open(config_path, 'r') as f:
+        simulation_config = json.load(f)
+
+    cfg_dir = config_path.parent
+    # Note: If json value is absolute, cfg_dir is ignored.
+    fn_inversion_output = (cfg_dir / simulation_config["fn_inversion_output"]).resolve()
+    fn_store_simulation = (cfg_dir / simulation_config["fn_store_simulation"]).resolve()
+
+    forecast_duration = simulation_config["forecast_duration"]
+    fn_store_simulation.parent.mkdir(parents=True, exist_ok=True)   # Ensure the output directory exists
+
+    print(f"Loading inversion parameters from: {fn_inversion_output}")
+    with open(fn_inversion_output, "r") as f:
+        inversion_output = json.load(f)
+
+    etas_inversion_reload = ETASParameterCalculation.load_calculation(inversion_output)
+
+    print(f"Running catalog continuation... Outputting to: {fn_store_simulation}")
+    simulation = ETASSimulation(etas_inversion_reload)
+    simulation.prepare()
+    simulation.simulate_to_csv(
+        str(fn_store_simulation),
+        forecast_duration,
+        1,
+        magnitude_generator=simulation_config.get("magnitude_generator", "simulate_magnitudes"),
+    )
+
+def run_etas_catalog_continuation_old(config_path: str) -> None:
     with open(config_path, 'r') as f:
         simulation_config = json.load(f)
     cfg_dir = Path(config_path).resolve().parent
@@ -1360,10 +1584,62 @@ def run_etas_catalog_continuation(config_path: str) -> None:
         magnitude_generator=simulation_config.get("magnitude_generator", "simulate_magnitudes"),
     )
 
+# # region Main Execution
+# if __name__ == "__main__":
+#     val_to_train_time_ratio = 3/4
+#     force_json_on_gin = False  # Gin -> JSON
+#     parser = argparse.ArgumentParser()
+#     parser.add_argument(
+#         "--pipeline_config_json",
+#         default="/home/neriberman/REPOS/etas_edits/config/pipeline_single_source.json",
+#         help="Single-source pipeline config JSON (templates + overrides).",
+#     )
+#     args = parser.parse_args()
+
+#     default_output_dir = Path("/home/neriberman/REPOS/etas_edits/outputs")
+#     permanent_inv_dir = default_output_dir / "inversions"
+#     temp_paths = _build_temp_configs_from_single_source(
+#         pipeline_config_path=args.pipeline_config_json,
+#         val_to_train_time_ratio=val_to_train_time_ratio,
+#         permanent_inv_dir=permanent_inv_dir,
+#     )
+
+#     general_gin_config_path = temp_paths["general_gin_config_path"]
+#     local_gin_config_path = temp_paths["local_gin_config_path"]
+#     invert_etas_config_json_path = temp_paths["invert_etas_config_json_path"]
+#     etas_catalog_continuation_config_json_path = temp_paths["etas_catalog_continuation_config_json_path"]
+
+#     print(f"Using temp pipeline workspace: {temp_paths['tmp_root']}")
+
+#     # ---- MAGNET stages (feature computation + training)
+#     # Hardcoded to current local gin config; add flags as needed.
+#     run_feature_computation(local_gin_config_path)
+#     model_dir = run_magnet_trainer_or_load(local_gin_config_path)
+#     print(f"Using model from: {model_dir}")
+
+#     # ---- ETAS stages (inversion + catalog continuation simulation)
+#     # These scripts read their own JSON configs (hardcoded inside those scripts).
+#     # Run inversion and update the continuation config to point at the newly-created parameters_<id>.json.
+#     fn_parameters_json = run_etas_inversion(invert_etas_config_json_path, store_pij=True, store_distances=True)
+#     cfg_dir = Path(etas_catalog_continuation_config_json_path).resolve().parent
+#     fn_parameters_rel = os.path.relpath(fn_parameters_json, cfg_dir)
+
+#     permanent_continuation_dir = default_output_dir / "continuation"
+#     permanent_continuation_dir.mkdir(parents=True, exist_ok=True)
+#     continuation_output_path = permanent_continuation_dir / "simulated_catalog_continuation.csv"
+
+#     update_json_parameters(etas_catalog_continuation_config_json_path, {
+#         "fn_inversion_output": fn_parameters_json,
+#         "fn_store_simulation": str(continuation_output_path),
+#     })
+
+#     run_etas_catalog_continuation(etas_catalog_continuation_config_json_path)
+# # endregion Main Execution
+
 # region Main Execution
 if __name__ == "__main__":
     val_to_train_time_ratio = 3/4
-    force_json_on_gin = False  # Gin -> JSON
+
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--pipeline_config_json",
@@ -1372,35 +1648,66 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    # Define Base Output Directories
+    default_output_dir = Path("/home/neriberman/REPOS/etas_edits/outputs")
+    permanent_inv_dir = default_output_dir / "inversions"
+
     temp_paths = _build_temp_configs_from_single_source(
         pipeline_config_path=args.pipeline_config_json,
         val_to_train_time_ratio=val_to_train_time_ratio,
+        permanent_inv_dir=permanent_inv_dir,
     )
 
-    general_gin_config_path = temp_paths["general_gin_config_path"]
     local_gin_config_path = temp_paths["local_gin_config_path"]
     invert_etas_config_json_path = temp_paths["invert_etas_config_json_path"]
     etas_catalog_continuation_config_json_path = temp_paths["etas_catalog_continuation_config_json_path"]
 
     print(f"Using temp pipeline workspace: {temp_paths['tmp_root']}")
 
-    # ---- MAGNET stages (feature computation + training)
-    # Hardcoded to current local gin config; add flags as needed.
+    # ---- 1. MAGNET stages ----------------------------------------------------
     run_feature_computation(local_gin_config_path)
-
-    # Create output directory for trained model in temp workspace
-    tmp_root = Path(temp_paths['tmp_root'])
-    magnet_output_dir = tmp_root / "magnet_output"
-    # Use wrapper that checks for existing model and loads it if available
-    model_dir = run_magnet_trainer_or_load(local_gin_config_path, output_dir=str(magnet_output_dir))
+    model_dir = run_magnet_trainer_or_load(local_gin_config_path)
     print(f"Using model from: {model_dir}")
 
-    # ---- ETAS stages (inversion + catalog continuation simulation)
-    # These scripts read their own JSON configs (hardcoded inside those scripts).
-    # Run inversion and update the continuation config to point at the newly-created parameters_<id>.json.
-    fn_parameters_json = run_etas_inversion(invert_etas_config_json_path, store_pij=True)
-    cfg_dir = Path(etas_catalog_continuation_config_json_path).resolve().parent
-    fn_parameters_rel = os.path.relpath(fn_parameters_json, cfg_dir)
-    update_json_parameters(etas_catalog_continuation_config_json_path, {"fn_inversion_output": fn_parameters_rel})
+    # Extract Model ID (assumes model_dir is ".../trained_models/{model_id}")
+    model_id = Path(model_dir).name
+
+    # ---- 2. ETAS Inversion ---------------------------------------------------
+    fn_parameters_json = run_etas_inversion(
+        invert_etas_config_json_path, 
+        store_pij=True, 
+        store_distances=True,
+        permanent_inv_dir=permanent_inv_dir,
+        gof_threshold=1,    # very high value for debugging. TODO: make configurable by flags.
+    )
+
+    # Load the config explicitly to get the ID
+    with open(invert_etas_config_json_path, 'r') as f:
+        inversion_config = json.load(f)
+
+    # Recreate the ID using the exact same logic as the runner
+    # Make sure store_pij matches what you passed to run_etas_inversion
+    inversion_id = get_inversion_id(inversion_config, store_pij=True)
+
+    # Now you have the clean ID without hacking strings
+    print(f"Inversion ID: {inversion_id}")
+    # ---- 3. Catalog Continuation ---------------------------------------------
+
+    # Construct the specific subfolder: outputs/continuation/{model_id}_{inversion_id}
+    continuation_subfolder = default_output_dir / "continuation" / f"{model_id}_{inversion_id}"
+    continuation_subfolder.mkdir(parents=True, exist_ok=True)
+
+    # Define the final output file path
+    continuation_output_path = continuation_subfolder / "simulated_catalog.csv"
+
+    # Update the config with ABSOLUTE paths
+    # Because these are absolute, Path(cfg_dir) / absolute_path will resolve correctly
+    update_json_parameters(etas_catalog_continuation_config_json_path, {
+        "fn_inversion_output": fn_parameters_json,
+        "fn_store_simulation": str(continuation_output_path),
+    })
+
     run_etas_catalog_continuation(etas_catalog_continuation_config_json_path)
+
+    print(f"Pipeline Finished. Continuation saved to: {continuation_output_path}")
 # endregion Main Execution
