@@ -1,7 +1,8 @@
 # Custom
 output_data/*
+outputs/*
 
-# Byte-compiled / optimized / DLL files
+# Byte-compil   ed / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
