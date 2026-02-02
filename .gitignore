@@ -1,6 +1,7 @@
 # Custom
 output_data/*
 outputs/*
+*.code-workspace
 
 # Byte-compil   ed / optimized / DLL files
 __pycache__/
