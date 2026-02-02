@@ -307,7 +307,7 @@ def _build_temp_configs_from_single_source(
     #     return dict(items)
 
     for key, value in overrides.items():
-        if key not in ["set_times", "catalog"]:
+        if key not in ["set_times", "catalog", "simulate_catalog_continuation"]:
             if isinstance(value, dict):
                 # Flatten nested dictionaries
                 # flattened = flatten_dict(value, parent_key=key)
@@ -355,9 +355,15 @@ def _build_temp_configs_from_single_source(
 
     # --- Update temp continuation json: keep forecast_duration, but write outputs into temp dir
     sim_out_csv = etas_out_dir / "simulated_catalog_continuation.csv"
+
+    cont_update_params = {"fn_store_simulation": str(sim_out_csv)}
+    if "simulate_catalog_continuation" in overrides:
+        # Flatten nested keys so we don't overwrite entire dictionaries, just leaves
+        cont_update_params.update(utility_functions.flatten_dict(overrides["simulate_catalog_continuation"]))
+
     update_json_parameters(
         str(tmp_cont_json),
-        {"fn_store_simulation": str(sim_out_csv)},
+        cont_update_params,
     )
 
     return {
@@ -1531,9 +1537,52 @@ def run_etas_inversion_old(config_path: str, store_pij: bool, force_inversion: b
     return str(out_path / f"parameters_{inv_id}.json")
 
 
-def run_etas_catalog_continuation(config_path: str) -> None:
+def create_reproduction_files(
+    *,
+    inversion_config_path: str | Path,
+    continuation_config_path: str | Path,
+    gin_config_path: str | Path,
+    pipeline_config_path: str | Path,
+    inversion_config: dict,
+) -> dict[str, str | Path]:
+    """
+    Creates a dictionary mapping destination filenames to source paths for reproduction files.
+    """
+    rep_files = {
+        "inversion_config.json": str(inversion_config_path),
+        "continuation_config.json": str(continuation_config_path),
+        "magnet_config.gin": str(gin_config_path),
+    }
+
+    if Path(pipeline_config_path).exists():
+        rep_files["pipeline_config.json"] = str(pipeline_config_path)
+
+    # Resolve original catalog path
+    fn_catalog = inversion_config.get("fn_catalog")
+    if fn_catalog:
+        catalog_path = Path(fn_catalog)
+        if not catalog_path.is_absolute():
+            # Resolve relative to the inversion config file location
+            catalog_path = (Path(inversion_config_path).parent / catalog_path).resolve()
+
+        rep_files["original_catalog.csv"] = str(catalog_path)
+
+    return rep_files
+
+
+def run_etas_catalog_continuation(
+    config_path: str,
+    reproduction_files: dict[str, str | Path] | None = None,
+    force_continuation_calc: bool = False,
+) -> None:
     """
     Runs the ETAS simulation/continuation using the provided config.
+
+    Args:
+        config_path: Path to the continuation config JSON.
+        reproduction_files: Optional dict mapping {destination_filename: source_path}.
+                            Files will be copied to the simulation output directory.
+        force_continuation_calc: If True, run simulation even if output file exists.
     """
     config_path = Path(config_path).resolve()
     with open(config_path, 'r') as f:
@@ -1543,6 +1592,13 @@ def run_etas_catalog_continuation(config_path: str) -> None:
     # Note: If json value is absolute, cfg_dir is ignored.
     fn_inversion_output = (cfg_dir / simulation_config["fn_inversion_output"]).resolve()
     fn_store_simulation = (cfg_dir / simulation_config["fn_store_simulation"]).resolve()
+
+    if fn_store_simulation.exists() and not force_continuation_calc:
+        print(f"Skipping catalog continuation. Output already exists at: {fn_store_simulation}")
+        return
+
+    if fn_store_simulation.exists() and force_continuation_calc:
+        print(f"Catalog continuation output exists, but force_continuation_calc=True. Rerunning...")
 
     forecast_duration = simulation_config["forecast_duration"]
     fn_store_simulation.parent.mkdir(parents=True, exist_ok=True)   # Ensure the output directory exists
@@ -1562,6 +1618,20 @@ def run_etas_catalog_continuation(config_path: str) -> None:
         1,
         magnitude_generator=simulation_config.get("magnitude_generator", "simulate_magnitudes"),
     )
+
+    if reproduction_files:
+        output_dir = fn_store_simulation.parent
+        print(f"Saving reproduction files to: {output_dir}")
+        for dest_name, src_path in reproduction_files.items():
+            if src_path:
+                src = Path(src_path)
+                if src.exists():
+                    try:
+                        shutil.copy2(src, output_dir / dest_name)
+                    except Exception as e:
+                        print(f"Warning: Failed to copy {dest_name}: {e}")
+                else:
+                    print(f"Warning: Source file for {dest_name} not found: {src}")
 
 def run_etas_catalog_continuation_old(config_path: str) -> None:
     with open(config_path, 'r') as f:
@@ -1707,7 +1777,20 @@ if __name__ == "__main__":
         "fn_store_simulation": str(continuation_output_path),
     })
 
-    run_etas_catalog_continuation(etas_catalog_continuation_config_json_path)
+    # Prepare reproduction files
+    reproduction_files = create_reproduction_files(
+        inversion_config_path=invert_etas_config_json_path,
+        continuation_config_path=etas_catalog_continuation_config_json_path,
+        gin_config_path=local_gin_config_path,
+        pipeline_config_path=args.pipeline_config_json,
+        inversion_config=inversion_config,
+    )
+
+    run_etas_catalog_continuation(
+        etas_catalog_continuation_config_json_path,
+        reproduction_files=reproduction_files,
+        force_continuation_calc=True,
+    )
 
     print(f"Pipeline Finished. Continuation saved to: {continuation_output_path}")
 # endregion Main Execution
