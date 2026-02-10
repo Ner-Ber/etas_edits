@@ -1203,22 +1203,27 @@ def run_magnet_trainer(gin_path, output_dir=None, **flags):
         **flags
     )
 
-def run_magnet_trainer_or_load(gin_path, trained_models_base_dir=None, **flags):
+def run_magnet_trainer_or_load(
+    gin_path,
+    model_dir,
+    model_name=None,
+    **flags,
+):
     """
     Checks if a model for this gin config exists in the persistent library. 
     If yes, returns path. If no, trains it there.
     """
-    if trained_models_base_dir is None:
-        # TODO: Move this to a constant/config eventually
-        base_dir = Path("/home/neriberman/REPOS/eq_mag_prediction/results/trained_models")
-    else:
-        base_dir = Path(trained_models_base_dir)
+    # if trained_models_base_dir is None:
+    #     # TODO: Move this to a constant/config eventually
+    #     base_dir = Path("/home/neriberman/REPOS/eq_mag_prediction/results/trained_models")
+    # else:
+    #     base_dir = Path(trained_models_base_dir)
 
-    model_id = _get_model_id_from_gin_config(gin_path)
-    if not model_id:
-        raise ValueError(f"Could not generate model ID from {gin_path}. cannot proceed without explicit naming.")
+    # model_id = _get_model_id_from_gin_config(gin_path)
+    # if not model_id:
+    #     raise ValueError(f"Could not generate model ID from {gin_path}. cannot proceed without explicit naming.")
 
-    model_dir = base_dir / model_id
+    # model_dir = base_dir / model_id
     model_binary = model_dir / "model" # Assuming trainer saves to subdir 'model'
 
     if model_binary.exists() and model_binary.is_dir():
@@ -1574,6 +1579,7 @@ def run_etas_catalog_continuation(
     config_path: str,
     reproduction_files: dict[str, str | Path] | None = None,
     force_continuation_calc: bool = False,
+    model_dir: str | Path | None = None,
 ) -> None:
     """
     Runs the ETAS simulation/continuation using the provided config.
@@ -1583,6 +1589,8 @@ def run_etas_catalog_continuation(
         reproduction_files: Optional dict mapping {destination_filename: source_path}.
                             Files will be copied to the simulation output directory.
         force_continuation_calc: If True, run simulation even if output file exists.
+        model_dir: Optional path to trained MAGNET model directory. If provided and
+                  magnitude_generator is "MAGNET_magnitude", will be passed to the generator.
     """
     config_path = Path(config_path).resolve()
     with open(config_path, 'r') as f:
@@ -1612,11 +1620,20 @@ def run_etas_catalog_continuation(
     print(f"Running catalog continuation... Outputting to: {fn_store_simulation}")
     simulation = ETASSimulation(etas_inversion_reload)
     simulation.prepare()
+
+    # Prepare magnitude_generator_kwargs if using MAGNET and model_dir is provided
+    magnitude_generator = simulation_config.get("magnitude_generator", "simulate_magnitudes")
+    magnitude_generator_kwargs = {}
+    if magnitude_generator == "MAGNET_magnitude" and model_dir is not None:
+        magnitude_generator_kwargs["model_dir"] = str(model_dir)
+        print(f"Using MAGNET model from: {model_dir}")
+
     simulation.simulate_to_csv(
         str(fn_store_simulation),
         forecast_duration,
         1,
-        magnitude_generator=simulation_config.get("magnitude_generator", "simulate_magnitudes"),
+        magnitude_generator=magnitude_generator,
+        magnitude_generator_kwargs=magnitude_generator_kwargs if magnitude_generator_kwargs else None,
     )
 
     if reproduction_files:
@@ -1735,8 +1752,30 @@ if __name__ == "__main__":
     print(f"Using temp pipeline workspace: {temp_paths['tmp_root']}")
 
     # ---- 1. MAGNET stages ----------------------------------------------------
-    run_feature_computation(local_gin_config_path)
-    model_dir = run_magnet_trainer_or_load(local_gin_config_path)
+    trained_models_base_dir = Path("/home/neriberman/REPOS/eq_mag_prediction/results/trained_models")
+
+    # Calculate model ID early to determine features directory
+    model_id = _get_model_id_from_gin_config(local_gin_config_path)
+    if not model_id:
+        raise ValueError(f"Could not generate model ID from {local_gin_config_path}")
+
+    model_dir = trained_models_base_dir / model_id
+    features_dir = model_dir / "features_scalers_encoders"
+    features_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"Features will be cached in: {features_dir}")
+
+    run_feature_computation(local_gin_config_path, cache_dir=features_dir)
+
+    # Pass trained_models_base_dir explicitly to avoid mismatch if default changes
+    model_dir_str = run_magnet_trainer_or_load(
+        local_gin_config_path, 
+        model_dir,
+        cache_dir=features_dir,
+        gin_bindings="train_and_evaluate_magnitude_prediction_model.scaler_saving_dir=None",
+
+    )
+    model_dir = Path(model_dir_str)
     print(f"Using model from: {model_dir}")
 
     # Extract Model ID (assumes model_dir is ".../trained_models/{model_id}")
@@ -1790,6 +1829,7 @@ if __name__ == "__main__":
         etas_catalog_continuation_config_json_path,
         reproduction_files=reproduction_files,
         force_continuation_calc=True,
+        model_dir=model_dir,
     )
 
     print(f"Pipeline Finished. Continuation saved to: {continuation_output_path}")

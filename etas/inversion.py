@@ -1108,7 +1108,7 @@ class ETASParameterCalculation:
     def theta(self, t):
         self.__theta = parameter_dict2array(t) if t is not None else None
 
-    def invert(self):
+    def invert(self, gof_threshold=0.001):
         """
         Invert the ETAS (or flETAS) parameters.
         """
@@ -1122,7 +1122,7 @@ class ETASParameterCalculation:
         i = 0
         theta_old = self.__theta_0[:]
 
-        while diff_to_before >= 0.001:
+        while diff_to_before >= gof_threshold:
             self.logger.info("  iteration {}".format(i))
 
             self.logger.debug("    expectation step")

@@ -23,6 +23,7 @@ from scipy.special import gamma as gamma_func
 from scipy.special import gammainccinv
 from seismostats import ForecastCatalog
 from shapely.geometry import Polygon
+import functools
 
 from etas.inversion import (ETASParameterCalculation, branching_integral,
                             branching_ratio, expected_aftershocks, haversine,
@@ -33,11 +34,27 @@ from etas.mc_b_est import simulate_magnitudes, simulate_magnitudes_from_zone, MA
 logger = logging.getLogger(__name__)
 
 
-def resolve_magnitude_generator(magnitude_generator):
+def resolve_magnitude_generator(magnitude_generator, **kwargs):
+    """
+    Resolve magnitude generator function from string or callable.
+
+    Args:
+        magnitude_generator: String name or callable function
+        **kwargs: Additional keyword arguments to pass to the generator function
+                  (e.g., model_dir for MAGNET_magnitude)
+
+    Returns:
+        Callable magnitude generator function, potentially with kwargs bound
+    """
     if callable(magnitude_generator):
+        # If kwargs provided and function accepts them, bind them
+        if kwargs:
+            return functools.partial(magnitude_generator, **kwargs)
         return magnitude_generator
     if isinstance(magnitude_generator, str):
         if magnitude_generator == 'MAGNET_magnitude':
+            if kwargs:
+                return functools.partial(MAGNET_magnitude, **kwargs)
             return MAGNET_magnitude
         if magnitude_generator == 'simulate_magnitudes':
             return simulate_magnitudes
@@ -1201,8 +1218,11 @@ class ETASSimulation:
             chunksize: int = 100,
             info_cols: list = ["is_background"],
             i_start: int = 0,
-            magnitude_generator=simulate_magnitudes):
-        magnitude_generator = resolve_magnitude_generator(magnitude_generator)
+            magnitude_generator=simulate_magnitudes,
+            magnitude_generator_kwargs=None):
+        if magnitude_generator_kwargs is None:
+            magnitude_generator_kwargs = {}
+        magnitude_generator = resolve_magnitude_generator(magnitude_generator, **magnitude_generator_kwargs)
         start = dt.datetime.now()
         np.random.seed()
         logger.debug("induced info: {}".format(self.induced))
@@ -1308,7 +1328,10 @@ class ETASSimulation:
         info_cols: list = [],
         i_start: int = 0,
         magnitude_generator=simulate_magnitudes,
+        magnitude_generator_kwargs=None,
     ) -> None:
+        if magnitude_generator_kwargs is None:
+            magnitude_generator_kwargs = {}
         i_end = i_start + n_simulations
 
         os.makedirs(os.path.dirname(fn_store), exist_ok=True)
@@ -1324,6 +1347,7 @@ class ETASSimulation:
                 info_cols,
                 i_start=i_start,
                 magnitude_generator=magnitude_generator,
+                magnitude_generator_kwargs=magnitude_generator_kwargs,
             )
 
             next(generator).to_csv(fn_store, mode="w", header=True, index=True)
@@ -1371,6 +1395,7 @@ class ETASSimulation:
                     info_cols,
                     i_start=i_next,
                     magnitude_generator=magnitude_generator,
+                    magnitude_generator_kwargs=magnitude_generator_kwargs,
                 )
 
         # append rest of chunks to file
@@ -1386,7 +1411,10 @@ class ETASSimulation:
         chunksize: int = 100,
         info_cols: list = [],
         magnitude_generator=simulate_magnitudes,
+        magnitude_generator_kwargs=None,
     ) -> ForecastCatalog:
+        if magnitude_generator_kwargs is None:
+            magnitude_generator_kwargs = {}
         store = pd.DataFrame()
         for chunk in self.simulate(
             forecast_n_days,
@@ -1396,6 +1424,7 @@ class ETASSimulation:
             chunksize,
             info_cols,
             magnitude_generator=magnitude_generator,
+            magnitude_generator_kwargs=magnitude_generator_kwargs,
         ):
             store = pd.concat([store, chunk], ignore_index=False)
         return ForecastCatalog(data=store)
