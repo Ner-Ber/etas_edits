@@ -20,12 +20,18 @@ from eq_mag_prediction.utilities import geometry
 from eq_mag_prediction.forecasting import one_region_model
 from eq_mag_prediction.forecasting import encoders
 from eq_mag_prediction.forecasting import metrics, training_examples
+from eq_mag_prediction.forecasting import forecasts
 from eq_mag_prediction.scripts import magnitude_predictor_trainer
 # import tf_keras
+from pathlib import Path
 import tensorflow as tf
+import tensorflow_probability as tfp
 import os
+import json
 import numpy as np
+import pandas as pd
 import joblib
+import gin
 os.environ["TF_USE_LEGACY_KERAS"] = "1"
 # import unused for gin config
 
@@ -250,7 +256,31 @@ def estimate_mc(sample,
     return mcs_test, ks_ds, ps, best_mc, beta
 
 
-def MAGNET_magnitude(n, beta, mc, m_max=None, catalog=None, aftershock_df=None):
+def _sample_from_model_prediction(model_prediction: np.ndarray, statistic: str = 'sample', n_samples: int = 1):
+    """Will use outputof prediction to construct a Kumaraswamy mixture, from which we will sample"""
+    pdf_inst = metrics.kumaraswamy_mixture_instance(model_prediction)
+    if statistic == 'sample':
+        return pdf_inst.sample(n_samples)
+    elif statistic == 'mean':
+        return pdf_inst.mean()
+    elif statistic == 'mode':
+        return pdf_inst.mode()
+    elif statistic == 'median':
+        return pdf_inst.median()
+    else:
+        raise ValueError(f"Invalid statistic: {statistic}")
+
+
+def MAGNET_magnitude(
+        n: int,
+        beta: float,
+        mc: float,
+        m_max: float | None = None,
+        loc: geometry.Point = None,
+        time: float | None = None,
+        catalog: pd.DataFrame | None = None,
+        aftershock_df: pd.DataFrame | None = None,
+        model_dir: str | None = None):
     """
     Alternative to simulate_magnitudes that uses the catalog history.
 
@@ -259,46 +289,98 @@ def MAGNET_magnitude(n, beta, mc, m_max=None, catalog=None, aftershock_df=None):
       beta: beta value
       mc: completeness magnitude
       m_max: maximum magnitude
+      loc: location of the earthquake
+      time: time of the earthquake
       catalog: pandas DataFrame containing the catalog history
+      aftershock_df: DataFrame containing aftershock information
+      model_dir: Optional path to directory containing trained MAGNET model.
+                 If None, uses default hardcoded path.
+
+    Returns:
+      Array of n simulated magnitudes
     """
-    # MODEL_NAME = 'Hauksson'
-    MODEL_NAME = 'Hauksson_recreate'
-    # experiment_dir = os.path.join(os.getcwd(), '..', 'results/trained_models/', MODEL_NAME)
-    # experiment_dir = os.path.join(os.getcwd(), 'results/trained_models/', MODEL_NAME)
-    experiment_dir = os.path.join(
-        '/home/neriberman/REPOS/eq_mag_pred_clean_test_20251104/results/trained_models/', MODEL_NAME)
-    custom_objects = {
-        '_repeat': encoders._repeat,
-    }
-    # tf load model
+    # Default model directory if not provided
+    if model_dir is None:
+        MODEL_NAME = 'Hauksson_recreate'
+        experiment_dir = os.path.join(
+            '/home/neriberman/REPOS/eq_mag_pred_clean_test_20251104/results/trained_models/', MODEL_NAME)
+    else:
+        experiment_dir = str(model_dir)
+
+    available_history = pd.concat([catalog, aftershock_df])
+    available_history = available_history.sort_values(by='time')
+    available_history = available_history.reset_index(drop=True)
+
+    custom_objects = {'_repeat': encoders._repeat}
     loaded_model = tf.keras.models.load_model(
         os.path.join(experiment_dir, 'model'),
-        custom_objects={'_repeat': encoders._repeat},
+        custom_objects=custom_objects,
         compile=False,
         # safe_mode=True
     )
 
     CatalogDomain = training_examples.CatalogDomain
-
     with open(os.path.join(experiment_dir, 'domain'), 'rb') as f:
         domain = joblib.load(f)
-    scaler_saving_dir = os.path.join(
-        os.getcwd(), '..', 'results/trained_models', MODEL_NAME, 'scalers')
-    all_encoders = one_region_model.build_encoders(domain)
-    features_and_models = one_region_model.load_features_and_construct_models(
-        domain, all_encoders, scaler_saving_dir)
 
-    one_region_model.compute_and_cache_features_scaler_encoder(
+
+    scaler_saving_dir = os.path.join(experiment_dir, 'scalers')
+    features_dir = Path(experiment_dir) / "features_scalers_encoders"
+    
+    # Parse gin config from model directory to ensure gin bindings match training
+    # This is critical for build_features_uuid() to match saved scalers
+    
+    gin_config_path = os.path.join(experiment_dir, 'config.gin')
+    if os.path.exists(gin_config_path):
+        gin.parse_config_file(gin_config_path, skip_unknown=True)
+    
+    
+    # Now build encoders - they should have correct build_features_uuid due to gin config
+    all_encoders = one_region_model.build_encoders(domain)
+    scalers, location_scalers = one_region_model.load_scalers_from_directory(
         domain,
         all_encoders,
-        force_recalculate=False,
+        str(Path(experiment_dir) / "features_scalers_encoders"),
     )
-    features_and_models = one_region_model.load_features_and_construct_models(
-        domain, all_encoders, scaler_saving_dir
-    )
-    train_features = one_region_model.features_in_order(features_and_models, 0)
-    validation_features = one_region_model.features_in_order(features_and_models, 1)
-    test_features = one_region_model.features_in_order(features_and_models, 2)
-
-    forecasts[set_name] = loaded_model.predict(locals()[f'{set_name}_features'])
-    return None
+    
+    # Handle case where time/loc are None (batch processing) or single values
+    if time is None or loc is None:
+        # Batch processing: generate magnitudes for all earthquakes in aftershock_df
+        if aftershock_df is None or len(aftershock_df) == 0:
+            # Fallback to simulate_magnitudes if no aftershock data
+            from etas.mc_b_est import simulate_magnitudes
+            return simulate_magnitudes(n, beta=beta, mc=mc, m_max=m_max)
+        
+        # Generate magnitudes for each earthquake in aftershock_df
+        sampled_magnitudes = []
+        for idx, row in aftershock_df.iterrows():
+            # Convert to epoch time if it's a pandas Timestamp or datetime object
+            earthquake_time = row['time']
+            if isinstance(earthquake_time, (pd.Timestamp, np.datetime64)):
+                earthquake_time = pd.Timestamp(earthquake_time).timestamp()
+            earthquake_loc = geometry.Point(row['latitude'], row['longitude'])
+            
+            model_prediction = forecasts.create_altered_prediction_single_loc(
+                evaluation_time=earthquake_time,
+                loc=earthquake_loc,
+                catalog_domain=domain,
+                loaded_model=loaded_model,
+                scalers=scalers,
+                spatially_dependent_scalers=location_scalers,
+            )
+            sampled_mag = _sample_from_model_prediction(model_prediction, statistic='sample', n_samples=1)
+            sampled_magnitudes.append(float(sampled_mag[0]))  # Take first sample
+        
+        return np.array(sampled_magnitudes)
+    else:
+        # Single earthquake: generate n magnitudes for one time/location
+        model_prediction = forecasts.create_altered_prediction_single_loc(
+            evaluation_time=time,
+            loc=loc,
+            catalog_domain=domain,
+            loaded_model=loaded_model,
+            scalers=scalers,
+            spatially_dependent_scalers=location_scalers,
+        )
+        sampled_magnitudes = _sample_from_model_prediction(model_prediction, statistic='sample', n_samples=n)
+        return sampled_magnitudes
