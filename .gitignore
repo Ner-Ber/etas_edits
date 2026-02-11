@@ -1,6 +1,10 @@
 # Custom
 output_data/*
 outputs/*
+**/output_data/
+**/outputs/
+**/results/
+runnable_code/home/
 *.code-workspace
 
 # Byte-compil   ed / optimized / DLL files
