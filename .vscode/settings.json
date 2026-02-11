@@ -16,5 +16,7 @@
         "editor.detectIndentation": false
     },
     "indentRainbow.tabSize": 4,
-    "indentRainbow.updateDelay": 100
+    "indentRainbow.updateDelay": 100,
+    "python.linting.pylintEnabled": true,
+    "python.linting.enabled": true
 }
