@@ -256,19 +256,20 @@ def estimate_mc(sample,
     return mcs_test, ks_ds, ps, best_mc, beta
 
 
-def _sample_from_model_prediction(model_prediction: np.ndarray, statistic: str = 'sample', n_samples: int = 1):
+def _sample_from_model_prediction(model_prediction: np.ndarray, statistic: str = 'sample') -> float:
     """Will use outputof prediction to construct a Kumaraswamy mixture, from which we will sample"""
     pdf_inst = metrics.kumaraswamy_mixture_instance(model_prediction)
     if statistic == 'sample':
-        return pdf_inst.sample(n_samples)
+        result = pdf_inst.sample()
     elif statistic == 'mean':
-        return pdf_inst.mean()
+        result = pdf_inst.mean()
     elif statistic == 'mode':
-        return pdf_inst.mode()
+        result = pdf_inst.mode()
     elif statistic == 'median':
         return pdf_inst.median()
     else:
         raise ValueError(f"Invalid statistic: {statistic}")
+    return result.numpy()[0].item()
 
 
 def MAGNET_magnitude(
@@ -276,8 +277,6 @@ def MAGNET_magnitude(
         beta: float,
         mc: float,
         m_max: float | None = None,
-        loc: geometry.Point = None,
-        time: float | None = None,
         catalog: pd.DataFrame | None = None,
         aftershock_df: pd.DataFrame | None = None,
         model_dir: str | None = None):
@@ -319,68 +318,101 @@ def MAGNET_magnitude(
         # safe_mode=True
     )
 
+
     CatalogDomain = training_examples.CatalogDomain
     with open(os.path.join(experiment_dir, 'domain'), 'rb') as f:
-        domain = joblib.load(f)
+        original_domain = joblib.load(f)
 
-
-    scaler_saving_dir = os.path.join(experiment_dir, 'scalers')
-    features_dir = Path(experiment_dir) / "features_scalers_encoders"
-    
     # Parse gin config from model directory to ensure gin bindings match training
     # This is critical for build_features_uuid() to match saved scalers
-    
     gin_config_path = os.path.join(experiment_dir, 'config.gin')
     if os.path.exists(gin_config_path):
         gin.parse_config_file(gin_config_path, skip_unknown=True)
-    
-    
-    # Now build encoders - they should have correct build_features_uuid due to gin config
-    all_encoders = one_region_model.build_encoders(domain)
+
+    # Build encoders using original_domain - this ensures encoder UUIDs match training
+    # Encoders must be built before loading scalers since scaler filenames depend on encoder UUIDs
+    all_encoders = one_region_model.build_encoders(original_domain)
+
+    # Load scalers using original_domain (not the simulation domain)
+    # Scalers were saved using original_domain's UUID, so we must use the same domain here
     scalers, location_scalers = one_region_model.load_scalers_from_directory(
-        domain,
+        original_domain,
         all_encoders,
         str(Path(experiment_dir) / "features_scalers_encoders"),
     )
-    
-    # Handle case where time/loc are None (batch processing) or single values
-    if time is None or loc is None:
-        # Batch processing: generate magnitudes for all earthquakes in aftershock_df
-        if aftershock_df is None or len(aftershock_df) == 0:
-            # Fallback to simulate_magnitudes if no aftershock data
-            from etas.mc_b_est import simulate_magnitudes
-            return simulate_magnitudes(n, beta=beta, mc=mc, m_max=m_max)
-        
-        # Generate magnitudes for each earthquake in aftershock_df
-        sampled_magnitudes = []
-        for idx, row in aftershock_df.iterrows():
-            # Convert to epoch time if it's a pandas Timestamp or datetime object
-            earthquake_time = row['time']
-            if isinstance(earthquake_time, (pd.Timestamp, np.datetime64)):
-                earthquake_time = pd.Timestamp(earthquake_time).timestamp()
-            earthquake_loc = geometry.Point(row['latitude'], row['longitude'])
-            
-            model_prediction = forecasts.create_altered_prediction_single_loc(
-                evaluation_time=earthquake_time,
-                loc=earthquake_loc,
-                catalog_domain=domain,
-                loaded_model=loaded_model,
-                scalers=scalers,
-                spatially_dependent_scalers=location_scalers,
-            )
-            sampled_mag = _sample_from_model_prediction(model_prediction, statistic='sample', n_samples=1)
-            sampled_magnitudes.append(float(sampled_mag[0]))  # Take first sample
-        
-        return np.array(sampled_magnitudes)
-    else:
-        # Single earthquake: generate n magnitudes for one time/location
+
+    # Now create the simulation domain for actual prediction
+    # This domain has different test_times/test_locations but uses the same scalers
+    earthquakes_catalog = available_history.copy()
+    earthquakes_catalog['time'] = pd.to_datetime(earthquakes_catalog['time']).astype(np.int64) // 10**9
+    if 'depth' not in earthquakes_catalog.columns:
+        earthquakes_catalog['depth'] = 0
+    # TODO: this is a workaround. Should be fixed by eliminating the need for them in the gin config
+    if 'strike' not in earthquakes_catalog.columns:
+        earthquakes_catalog['strike'] = 0
+    if 'rake' not in earthquakes_catalog.columns:
+        earthquakes_catalog['rake'] = 0
+    if 'dip' not in earthquakes_catalog.columns:
+        earthquakes_catalog['dip'] = 0
+    times = pd.to_datetime(aftershock_df['time']).astype(np.int64) // 10**9
+    locations = aftershock_df[['longitude', 'latitude']].values
+    domain = training_examples.CatalogDomain(
+        test_times=times,
+        test_locations=locations,
+        earthquakes_catalog=earthquakes_catalog,
+        user_magnitude_threshold=original_domain.magnitude_threshold,
+    )
+
+    # Create a vector of sorted times, and sort locations by the same order
+    sorted_indices = np.argsort(times)
+    sorted_times = times[sorted_indices]
+    sorted_locations = locations[sorted_indices]
+    all_sampled_magnitudes = []
+    for (time, location) in zip(sorted_times, sorted_locations):
         model_prediction = forecasts.create_altered_prediction_single_loc(
             evaluation_time=time,
-            loc=loc,
+            loc=geometry.Point(lng=location[0], lat=location[1]),
             catalog_domain=domain,
             loaded_model=loaded_model,
             scalers=scalers,
             spatially_dependent_scalers=location_scalers,
         )
-        sampled_magnitudes = _sample_from_model_prediction(model_prediction, statistic='sample', n_samples=n)
-        return sampled_magnitudes
+        sampled_magnitude = _sample_from_model_prediction(model_prediction, statistic='sample')
+        all_sampled_magnitudes.append(sampled_magnitude)
+        earthquakes_catalog = domain.earthquakes_catalog.copy()
+        earthquakes_catalog.loc[
+            (earthquakes_catalog['time'] == time) & 
+            (earthquakes_catalog['longitude'] == location[0]) & 
+            (earthquakes_catalog['latitude'] == location[1]), 
+            'magnitude'
+        ] = sampled_magnitude
+        domain.earthquakes_catalog = earthquakes_catalog
+    return all_sampled_magnitudes
+
+
+
+
+
+    # scaler_saving_dir = os.path.join(experiment_dir, 'scalers')
+    # features_dir = Path(experiment_dir) / "features_scalers_encoders"
+
+    # # Parse gin config from model directory to ensure gin bindings match training
+    # # This is critical for build_features_uuid() to match saved scalers
+
+    # gin_config_path = os.path.join(experiment_dir, 'config.gin')
+    # if os.path.exists(gin_config_path):
+    #     gin.parse_config_file(gin_config_path, skip_unknown=True)
+
+
+    # )
+
+    #     model_prediction = forecasts.create_altered_prediction_single_loc(
+    # evaluation_time=time,
+    # loc=loc,
+    # catalog_domain=domain,
+    # loaded_model=loaded_model,
+    # scalers=scalers,
+    # spatially_dependent_scalers=location_scalers,
+    # )
+    #     sampled_magnitudes = _sample_from_model_prediction(model_prediction, statistic='sample', n_samples=n)
+    #     return sampled_magnitudes
