@@ -207,7 +207,6 @@ def _build_temp_configs_from_single_source(
     tmp_data_dir.mkdir(parents=True, exist_ok=True)
 
     # Copy template config files into temp working set
-    # Keep original filename for general.gin so include statements work
     tmp_general_gin = tmp_cfg_dir / "magnitude_prediction_general.gin"
     tmp_local_gin = tmp_cfg_dir / "local.gin"
     tmp_invert_json = tmp_cfg_dir / "invert_etas.json"
@@ -218,17 +217,33 @@ def _build_temp_configs_from_single_source(
     shutil.copyfile(templates["invert_etas_config_json_path"], tmp_invert_json)
     shutil.copyfile(templates["etas_catalog_continuation_config_json_path"], tmp_cont_json)
 
-    # Update include path in temp local.gin to use absolute path so gin can find it
-    # Gin requires double quotes for absolute paths, and paths should use forward slashes
+    # Merge general.gin and local.gin into a single combined gin file
+    # This eliminates include statements and makes parameter ordering irrelevant
+    general_gin_content = _read_text_file(str(tmp_general_gin))
     local_gin_content = _read_text_file(str(tmp_local_gin))
-    # Replace relative include with absolute path (use double quotes and forward slashes)
-    abs_path_str = str(tmp_general_gin).replace('\\', '/')
-    local_gin_content = local_gin_content.replace(
-        "include 'magnitude_prediction_general.gin'",
-        f'include "{abs_path_str}"'
+
+    # Replace include statement with the actual content from general.gin
+    # Match include statements on their own line (with optional leading/trailing whitespace)
+    # Handle both single and double quotes, and relative/absolute paths
+    include_pattern = re.compile(
+        r'^\s*include\s+["\'].*magnitude_prediction_general\.gin["\']\s*$',
+        re.MULTILINE | re.IGNORECASE
     )
+
+    if include_pattern.search(local_gin_content):
+        # Replace include statement with general.gin content
+        # Add comments to mark where general.gin content starts/ends
+        merged_content = include_pattern.sub(
+            f"# --- Content from magnitude_prediction_general.gin ---\n{general_gin_content}\n# --- End of general.gin content ---\n",
+            local_gin_content
+        )
+    else:
+        # No include found, use local content as-is
+        merged_content = local_gin_content
+
+    # Write merged content to local.gin (we'll use this as the combined file)
     with open(tmp_local_gin, 'w') as f:
-        f.write(local_gin_content)
+        f.write(merged_content)
 
     # --- Catalog: default is MAGNET format
     catalog_spec = overrides["catalog"]
@@ -318,6 +333,9 @@ def _build_temp_configs_from_single_source(
                 update_gin[key] = value
 
     update_gin_parameters(str(tmp_local_gin), update_gin)
+
+    # Inline %variable references so each param has the actual value instead of a variable reference
+    _inline_gin_variable_references(str(tmp_local_gin))
 
     # --- Update temp ETAS inversion json: times + fn_catalog + data_path (temp output dir)
     etas_out_dir = tmp_root / "etas_output"
@@ -970,6 +988,102 @@ def _parse_gin_value(value_str: str):
         # Fallback: return as string if it can't be parsed (e.g., unquoted strings)
         return value_str
 
+def _format_gin_value_for_output(val):
+    """Format a Python value for Gin config syntax."""
+    if isinstance(val, str):
+        if val.strip().startswith('%'):
+            return val
+        return f"'{val}'"
+    if isinstance(val, bool):
+        return str(val)
+    return str(val)
+
+
+def _inline_gin_variable_references(gin_path: str) -> None:
+    """
+    Inline %variable references in a gin config file: replace each occurrence of
+    'key = %var_name' with 'key = <actual_value>' and remove the redundant
+    'var_name = value' definition line.
+
+    E.g. instead of:
+        _mock_earthquake.add_angles = %use_moment_angles
+        use_moment_angles = False
+    produce:
+        _mock_earthquake.add_angles = False
+    """
+    content = _read_text_file(gin_path)
+    config = parse_gin_config(content)
+
+    def flatten_bindings(bindings):
+        """Flatten scoped bindings (scope: {key: val}) to scope.key -> val."""
+        result = {}
+        for k, v in bindings.items():
+            if isinstance(v, dict):
+                for sk, sv in v.items():
+                    result[f"{k}.{sk}"] = sv
+            else:
+                result[k] = v
+        return result
+
+    flat_bindings = flatten_bindings(config.get("bindings", {}))
+
+    def resolve_value(val, seen=None):
+        """Resolve %var references recursively."""
+        if seen is None:
+            seen = set()
+        if isinstance(val, str) and val.strip().startswith('%'):
+            var_name = val.strip()[1:]
+            if var_name in seen:
+                return val
+            seen.add(var_name)
+            if var_name in flat_bindings:
+                return resolve_value(flat_bindings[var_name], seen)
+        return val
+
+    # Find variables that are referenced via %var
+    assignment_pattern = re.compile(r'^(\s*)([^#=\s]+)\s*=\s*(.*)$')
+    ref_var_pattern = re.compile(r'^%([a-zA-Z_][a-zA-Z0-9_]*)\s*$')
+
+    referenced_vars = set()
+    lines = content.split('\n')
+    for line in lines:
+        stripped = line.strip()
+        if '#' in stripped:
+            stripped = stripped.split('#', 1)[0].strip()
+        match = assignment_pattern.match(stripped) if stripped else None
+        if match:
+            _, _, value_str = match.groups()
+            value_str = value_str.strip()
+            ref_match = ref_var_pattern.match(value_str)
+            if ref_match:
+                referenced_vars.add(ref_match.group(1))
+
+    new_lines = []
+    for line in lines:
+        match = assignment_pattern.match(line)
+        if match:
+            indent, key_in_file, rest = match.groups()
+            key_in_file = key_in_file.strip()
+            value_str = rest.split('#', 1)[0].strip()
+
+            ref_match = ref_var_pattern.match(value_str)
+            if ref_match:
+                var_name = ref_match.group(1)
+                if var_name in flat_bindings:
+                    actual_val = resolve_value(flat_bindings[var_name])
+                    val_str = _format_gin_value_for_output(actual_val)
+                    comment = rest.split('#', 1)[1].strip() if '#' in rest else ''
+                    suffix = f"  # {comment}" if comment else ''
+                    new_lines.append(f"{indent}{key_in_file} = {val_str}{suffix}\n")
+                    continue
+            elif key_in_file in referenced_vars:
+                continue
+        new_lines.append(line if line.endswith('\n') else line + '\n')
+
+    with open(gin_path, 'w') as f:
+        f.writelines(new_lines)
+
+
 def update_gin_parameters(gin_path: str, params_dict: dict):
     """
     Updates multiple parameters in a Gin config file based on a dictionary.
@@ -987,7 +1101,10 @@ def update_gin_parameters(gin_path: str, params_dict: dict):
             if val.strip().startswith(('@', '%')):
                 return val
             return f"'{val}'"
-        # Convert numbers/bools/lists to string representation
+        # Handle booleans - gin expects True/False without quotes
+        if isinstance(val, bool):
+            return str(val)
+        # Convert numbers/lists to string representation
         return str(val)
 
     # Track which keys we have successfully updated in the file
