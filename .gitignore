@@ -4,8 +4,10 @@ outputs/*
 **/output_data/
 **/outputs/
 **/results/
+**/input_data/catalogs/
 runnable_code/home/
 *.code-workspace
+matplotlibrc
 
 # Byte-compil   ed / optimized / DLL files
 __pycache__/

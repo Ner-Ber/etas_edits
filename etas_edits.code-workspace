@@ -1,35 +1,37 @@
 {
-	"folders": [
-		{
-			"path": "."
-		},
-		{
-			"path": "../eq_mag_pred_clean_test_20251104"
-		}
-	],
-	"settings": {
-		"workbench.colorCustomizations": {
-			"titleBar.activeBackground": "#b16208",
-			"titleBar.inactiveBackground": "#5e370c",
-			// Background of the whole activity bar
-			"activityBar.background": "#b47b11",
-			// Color of the icons (and text when extensions add labels)
-			"activityBar.foreground": "#636363",
-			// Hover effect (background when you hover over icons)
-			"activityBar.inactiveForeground": "#000000",
-			// Border at the right edge of the activity bar
-			"activityBar.border": "#774f21",
-			// Active item (icon + underline highlight)
-			"activityBar.activeBorder": "#ffffff",
-			"activityBar.activeBackground": "#c48c1a",
-			"activityBar.activeFocusBorder": "#ffcc00"
-		},
-		"python.defaultInterpreterPath": "/home/neriberman/miniconda3/envs/etas_env/bin/python",
-		"python.analysis.extraPaths": [
-			"./"
-		],
-		"python.autoComplete.extraPaths": [
-			"./"
-		]
-	}
+    "folders": [
+        {
+            "path": "."
+        },
+        {
+            "path": "../eq_mag_prediction"
+        }
+    ],
+    "settings": {
+        "editor.formatOnSave": true,
+        "python.formatting.provider": "autopep8",
+        "workbench.colorCustomizations": {
+            "titleBar.activeBackground": "#b16208",
+            "titleBar.inactiveBackground": "#5e370c",
+            // Background of the whole activity bar
+            "activityBar.background": "#b47b11",
+            // Color of the icons (and text when extensions add labels)
+            "activityBar.foreground": "#636363",
+            // Hover effect (background when you hover over icons)
+            "activityBar.inactiveForeground": "#000000",
+            // Border at the right edge of the activity bar
+            "activityBar.border": "#774f21",
+            // Active item (icon + underline highlight)
+            "activityBar.activeBorder": "#ffffff",
+            "activityBar.activeBackground": "#c48c1a",
+            "activityBar.activeFocusBorder": "#ffcc00"
+        },
+        "python.defaultInterpreterPath": "/home/neriberman/miniconda3/envs/etas_env/bin/python",
+        "python.analysis.extraPaths": [
+            "./"
+        ],
+        "python.autoComplete.extraPaths": [
+            "./"
+        ]
+    }
 }
