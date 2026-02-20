@@ -15,6 +15,7 @@ import decimal
 import logging
 import os
 import pprint
+import types
 
 import geopandas as gpd
 import numpy as np
@@ -1094,8 +1095,12 @@ class ETASSimulation:
         approx_times: bool = False,
         m_max: float = None,
         induced_info: list = None,
+        simulate_method=None,
     ):
         self.logger = logging.getLogger(__name__)
+
+        if simulate_method is not None:
+            self.simulate = types.MethodType(simulate_method, self)
 
         self.inversion_params = inversion_params
 
