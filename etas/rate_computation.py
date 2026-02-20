@@ -104,12 +104,12 @@ def g(t, params):
     else:
         # NumPy array or scalar - convert using xp
         t_xp = xp.asarray(t)
-    
+
     # Convert scalar params to xp scalars for consistent operations
     c = xp.asarray(params["c"])
     p = xp.asarray(params["p"])
     result = (p - 1) / c * (1 + t_xp / c) ** (-p)
-    
+
     # If input was scalar, return scalar; otherwise return array
     if not hasattr(t, '__len__') or isinstance(t, str):
         return result.item() if hasattr(result, 'item') else float(result)
@@ -130,30 +130,23 @@ def f(x, y, m, params):
         Spatial distribution value (can be scalar or array)
     """
     kappa_val = kappa(m, params)
-    # Ensure kappa_val is a Python float (works with both NumPy and CuPy)
-    if hasattr(kappa_val, 'item'):
-        kappa_val = kappa_val.item()
-    elif isinstance(kappa_val, np.ndarray):
-        kappa_val = float(kappa_val)
-    
+
     # Use xp operations to ensure compatibility with both NumPy and CuPy
-    # Convert scalar params to xp scalars
+    kappa_xp = xp.asarray(kappa_val)
     D = xp.asarray(params["D"])
     q = xp.asarray(params["q"])
-    kappa_xp = xp.asarray(kappa_val)
-    
+
     denominator = xp.pi * D**2 * kappa_xp
     spatial_term = (x**2 + y**2) / (D**2 * kappa_xp)
     result = (q - 1) / denominator * (1 + spatial_term) ** (-q)
-    
-    # If inputs were scalars, return scalar; otherwise return array
-    is_scalar = not (hasattr(x, '__len__') and not isinstance(x, str))
-    if is_scalar:
+
+    # If result is a 0-d array (scalar), return python scalar
+    if hasattr(result, 'ndim') and result.ndim == 0:
         return result.item() if hasattr(result, 'item') else float(result)
     return result
 
 
-def rate_at_t_all_grid(t_days, x_flat, y_flat, h_x, h_y, h_m, h_t_days, params):
+def rate_at_t_all_grid(t_days, x_flat, y_flat, h_x, h_y, h_m, h_t_days, params, batch_size=4096):
     """
     Compute ETAS intensity at time(s) for all grid points (GPU-accelerated).
 
@@ -170,6 +163,7 @@ def rate_at_t_all_grid(t_days, x_flat, y_flat, h_x, h_y, h_m, h_t_days, params):
         h_m: 1D array of magnitudes from history
         h_t_days: 1D array of times from history (in days)
         params: Dictionary of ETAS parameters
+        batch_size: Batch size for processing history events (to manage memory)
 
     Returns:
         1D array of intensities at each grid point (NumPy array, transferred from GPU if needed)
@@ -183,33 +177,24 @@ def rate_at_t_all_grid(t_days, x_flat, y_flat, h_x, h_y, h_m, h_t_days, params):
         h_m = cp.asarray(h_m)
         h_t_days = cp.asarray(h_t_days)
         # Handle scalar vs array t_days
-        # Check if already a CuPy array to avoid implicit conversion error
         if hasattr(t_days, '__len__') and not isinstance(t_days, str):
-            # Use hasattr('get') as reliable way to detect CuPy arrays
             if not (hasattr(t_days, 'get') and not isinstance(t_days, np.ndarray)):
                 t_days = cp.asarray(t_days)
-            # Already CuPy array, keep as is
         else:
-            # Scalar - keep as is, will be broadcast
+            # Scalar
             pass
 
     n_grid = len(x_flat)
     local_intensity = xp.zeros(n_grid, dtype=xp.float64)
 
     # Handle scalar vs array t_days
-    # If t_days is an array of length n_grid, each element corresponds to a grid point
-    # If scalar, it applies to all grid points
     is_array = hasattr(t_days, '__len__') and not isinstance(t_days, str)
     if is_array:
-        # Check if already a CuPy array to avoid implicit conversion error
-        # Use hasattr('get') as reliable way to detect CuPy arrays
         if hasattr(t_days, 'get') and not isinstance(t_days, np.ndarray):
-            # Already a CuPy array, use directly
             t_days_array = t_days
         else:
-            # NumPy array or scalar - convert if needed
             t_days_array = xp.asarray(t_days)
-        # If array length matches n_grid, use element-wise; otherwise use first element
+
         if len(t_days_array) == n_grid:
             t_days_use = t_days_array
         else:
@@ -217,47 +202,59 @@ def rate_at_t_all_grid(t_days, x_flat, y_flat, h_x, h_y, h_m, h_t_days, params):
     else:
         t_days_use = t_days
 
-    # Loop over events (vectorized operations inside)
-    for k in range(len(h_x)):
-        # Extract values - convert to Python scalars first
-        # This ensures compatibility with both NumPy and CuPy arrays
-        if hasattr(h_x[k], 'item'):
-            x_k = h_x[k].item()
-            y_k = h_y[k].item()
-            m_k = h_m[k].item()
-            t_k_days = h_t_days[k].item()
-        else:
-            x_k = float(h_x[k])
-            y_k = float(h_y[k])
-            m_k = float(h_m[k])
-            t_k_days = float(h_t_days[k])
-        
-        # Vectorized computation for all grid points
-        dx = x_flat - x_k
-        dy = y_flat - y_k
-        
-        # Compute kappa_val - ensure result is Python float (works with both NumPy and CuPy)
-        kappa_val = kappa(m_k, params)
-        # Convert to Python float if it's a NumPy/CuPy scalar/array
-        if hasattr(kappa_val, 'item'):
-            kappa_val = kappa_val.item()
-        elif isinstance(kappa_val, np.ndarray):
-            kappa_val = float(kappa_val)
-        
-        f_vals = f(dx, dy, m_k, params)  # Shape: (n_grid,)
-        
-        # Compute temporal decay g()
-        # If t_days_use is array of length n_grid, compute element-wise
+    # Vectorized history processing
+    n_history = len(h_x)
+
+    # Process in batches to balance memory usage and performance
+    # Vectorizing over history events (Batch) and grid points (N_grid) simultaneously
+    # Shape of operations: (Batch, N_grid)
+
+    for i in range(0, n_history, batch_size):
+        end_idx = min(i + batch_size, n_history)
+
+        # Extract batch
+        h_x_batch = h_x[i:end_idx]
+        h_y_batch = h_y[i:end_idx]
+        h_m_batch = h_m[i:end_idx]
+        h_t_batch = h_t_days[i:end_idx]
+
+        # Broadcasting: 
+        # Grid points: (1, N_grid)
+        # History events: (Batch, 1)
+        # Result: (Batch, N_grid)
+
+        dx = x_flat[None, :] - h_x_batch[:, None]
+        dy = y_flat[None, :] - h_y_batch[:, None]
+
+        # Kappa depends on magnitude
+        kappa_val = kappa(h_m_batch[:, None], params) # (Batch, 1)
+
+        # f depends on distance and magnitude
+        # We need to adapt f to handle arrays (it should already support it)
+        # f(x, y, m, params)
+        # x, y are (Batch, N_grid)
+        # m is (Batch, 1)
+        f_vals = f(dx, dy, h_m_batch[:, None], params) # (Batch, N_grid)
+
+        # g depends on time difference
+        # t_days_use can be scalar or (N_grid,)
+        # h_t_batch is (Batch,) -> (Batch, 1)
+
         if is_array and hasattr(t_days_use, '__len__') and len(t_days_use) == n_grid:
-            time_diff = t_days_use - t_k_days  # Shape: (n_grid,)
-            g_vals = g(time_diff, params)  # Shape: (n_grid,)
+            # t_days_use: (N_grid,) -> (1, N_grid)
+            time_diff = t_days_use[None, :] - h_t_batch[:, None]
         else:
-            # Scalar t_days: broadcast to all grid points
-            time_diff = t_days_use - t_k_days
-            g_vals = g(time_diff, params)  # Scalar or broadcasts
-        
-        # kappa_val is now a Python float, which works with both NumPy and CuPy arrays
-        local_intensity += kappa_val * f_vals * g_vals
+            # t_days_use: scalar
+            time_diff = t_days_use - h_t_batch[:, None]
+
+        g_vals = g(time_diff, params) # (Batch, N_grid)
+
+        # Compute intensity contribution for this batch
+        # element-wise multiplication
+        batch_intensity = kappa_val * f_vals * g_vals # (Batch, N_grid)
+
+        # Sum over history batch (axis 0)
+        local_intensity += xp.sum(batch_intensity, axis=0)
 
     # Add background rate
     mu_val = mu(x_flat[0], y_flat[0], params)
