@@ -31,6 +31,15 @@ from etas.inversion import (ETASParameterCalculation, branching_integral,
                             parameter_dict2array, round_half_up, to_days,
                             upper_gamma_ext)
 from etas.mc_b_est import simulate_magnitudes, simulate_magnitudes_from_zone, MAGNET_magnitude
+from etas.grid_simulation import run_grid_etas_simulation
+from etas.forecast_intensity import DEFAULT_PARAMS as GRID_DEFAULT_PARAMS
+
+try:
+    import pyproj
+    from pyproj import Transformer
+except ImportError:
+    pyproj = None
+    Transformer = None
 
 logger = logging.getLogger(__name__)
 
@@ -1085,6 +1094,197 @@ def simulate_catalog_continuation(
         return catalog.drop("geometry", axis=1)
     else:
         return catalog
+
+
+def simulate_catalog_continuation_grid(
+    auxiliary_catalog,
+    auxiliary_start,
+    auxiliary_end,
+    polygon,
+    simulation_end,
+    parameters,
+    mc,
+    beta_main,
+    beta_aftershock=None,
+    delta_m=0,
+    m_max=None,
+    background_lats=None,
+    background_lons=None,
+    background_probs=None,
+    gaussian_scale=None,
+    bsla=None,
+    bslo=None,
+    bg_grid=False,
+    mfd_zones=None,
+    zones_from_latlon=None,
+    filter_polygon=True,
+    approx_times=False,
+    induced_lats=None,
+    induced_lons=None,
+    induced_term=None,
+    induced_bsla=None,
+    induced_bslo=None,
+    n_induced=None,
+    magnitude_generator=simulate_magnitudes,
+    *,
+    grid_n_xy=(4, 4),
+    grid_params=None,
+    projection=None,
+    seed=None,
+):
+    """
+    Same API as simulate_catalog_continuation but uses grid-based ETAS (thinning).
+
+    All parameters up to magnitude_generator are identical. Extra keyword-only
+    arguments: grid_n_xy, grid_params, projection, seed (see below).
+    Arguments not used by the grid implementation (e.g. background_lats, induced_*)
+    are accepted for API compatibility and ignored.
+    """
+
+    if beta_aftershock is None:
+        beta_aftershock = beta_main
+
+    if grid_params is None:
+        grid_params = GRID_DEFAULT_PARAMS.copy()
+        grid_params["m0"] = mc
+        grid_params["beta"] = (
+            beta_main if np.isscalar(beta_main) else np.log(10)
+        )
+        if "log10_mu" in parameters:
+            grid_params["mu"] = np.power(10, parameters["log10_mu"])
+
+    def _to_seconds(t):
+        if hasattr(t, "timestamp"):
+            return t.timestamp()
+        return pd.Timestamp(t).timestamp()
+
+    start_sec = _to_seconds(auxiliary_end)
+    end_sec = _to_seconds(simulation_end)
+
+    mask = auxiliary_catalog["time"] < auxiliary_end
+    history = auxiliary_catalog.loc[mask].copy()
+    if len(history) == 0:
+        history = pd.DataFrame(
+            columns=["time", "magnitude", "x_utm", "y_utm", "latitude", "longitude"]
+        )
+
+    if projection is None and pyproj is not None:
+        centroid = polygon.centroid
+        lon_c, lat_c = centroid.x, centroid.y
+        zone = int((lon_c + 180) / 6) + 1
+        hem = "north" if lat_c >= 0 else "south"
+        utm_crs = pyproj.CRS(
+            f"+proj=utm +zone={zone} +{hem} +datum=WGS84 +units=m +no_defs"
+        )
+        wgs84 = pyproj.CRS("EPSG:4326")
+        _trans_to_utm = Transformer.from_crs(wgs84, utm_crs)
+        _trans_to_wgs = Transformer.from_crs(utm_crs, wgs84)
+
+        def projection(x, y, inverse=False):
+            if inverse:
+                return _trans_to_wgs.transform(x, y)
+            return _trans_to_utm.transform(x, y)  # lon, lat -> x, y
+
+    if "x_utm" not in history.columns and "latitude" in history.columns and len(history) > 0:
+        if projection is not None:
+            xy = np.array([
+                projection(history["longitude"].values[i], history["latitude"].values[i], inverse=False)
+                for i in range(len(history))
+            ])
+            history["x_utm"] = xy[:, 0]
+            history["y_utm"] = xy[:, 1]
+        else:
+            raise ValueError(
+                "auxiliary_catalog has no x_utm/y_utm and no projection provided; "
+                "install pyproj or pass projection for grid ETAS."
+            )
+
+    if "time" in history.columns:
+        history = history.copy()
+        history["time"] = history["time"].apply(_to_seconds)
+
+    if len(history) > 0 and "x_utm" in history.columns:
+        x_min, x_max = history["x_utm"].min(), history["x_utm"].max()
+        y_min, y_max = history["y_utm"].min(), history["y_utm"].max()
+    else:
+        if projection is None or pyproj is None:
+            raise ValueError(
+                "Cannot build grid: no history with x_utm and no projection."
+            )
+        bounds = polygon.bounds  # minx, miny, maxx, maxy (lon, lat for WGS84)
+        xy_ll = projection(bounds[0], bounds[1], inverse=False)  # lon, lat -> x, y
+        xy_ur = projection(bounds[2], bounds[3], inverse=False)
+        x_min, y_min = xy_ll[0], xy_ll[1]
+        x_max, y_max = xy_ur[0], xy_ur[1]
+
+    n_x, n_y = grid_n_xy
+    x_flat = np.linspace(x_min, x_max, n_x)
+    y_flat = np.linspace(y_min, y_max, n_y)
+    XX, YY = np.meshgrid(x_flat, y_flat)
+    x_flat = XX.flatten()
+    y_flat = YY.flatten()
+
+    for col in ["time", "magnitude", "x_utm", "y_utm"]:
+        if col not in history.columns and len(history) > 0:
+            history[col] = np.nan
+    if len(history) == 0:
+        history = pd.DataFrame({
+            "time": [], "magnitude": [], "x_utm": [], "y_utm": [],
+        })
+
+    history = run_grid_etas_simulation(
+        history,
+        start_sec,
+        end_sec,
+        x_flat,
+        y_flat,
+        params=grid_params,
+        in_place=False,
+        projection=projection,
+        progress_bar=False,
+        log_interval=0,
+        seed=seed,
+    )
+
+    new_mask = history["time"] >= start_sec
+    new_ev = history.loc[new_mask].copy()
+    new_ev["time"] = pd.to_datetime(new_ev["time"], unit="s")
+    if "latitude" not in new_ev.columns and projection is not None:
+        lonlat = np.array([
+            projection(new_ev["x_utm"].values[i], new_ev["y_utm"].values[i], inverse=True)
+            for i in range(len(new_ev))
+        ])
+        new_ev["longitude"] = lonlat[:, 0]
+        new_ev["latitude"] = lonlat[:, 1]
+
+    new_ev["generation"] = 0
+    new_ev["parent"] = 0
+    new_ev["is_background"] = True
+    base_idx = auxiliary_catalog.index.max()
+    if pd.isna(base_idx):
+        base_idx = 0
+    new_ev["evt_id"] = np.arange(len(new_ev)) + base_idx + 1
+    keep_cols = ["latitude", "longitude", "time", "magnitude", "generation", "parent", "is_background", "evt_id"]
+    for c in keep_cols:
+        if c not in new_ev.columns:
+            new_ev[c] = np.nan
+    new_ev = new_ev[keep_cols]
+
+    catalog = pd.concat(
+        [auxiliary_catalog, new_ev],
+        sort=True,
+        ignore_index=True,
+    )
+    catalog = catalog.sort_values(by="time").reset_index(drop=True)
+
+    if filter_polygon:
+        catalog = gpd.GeoDataFrame(
+            catalog,
+            geometry=gpd.points_from_xy(catalog.latitude, catalog.longitude),
+        )
+        catalog = catalog[catalog.intersects(polygon)]
+        return catalog.drop("geometry", axis=1)
+    return catalog
 
 
 class ETASSimulation:
