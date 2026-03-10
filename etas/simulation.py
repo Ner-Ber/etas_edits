@@ -1424,10 +1424,14 @@ class ETASSimulation:
             info_cols: list = ["is_background"],
             i_start: int = 0,
             magnitude_generator=simulate_magnitudes,
-            magnitude_generator_kwargs=None):
+            magnitude_generator_kwargs=None,
+            simulation_method=simulate_catalog_continuation,
+            simulation_method_kwargs=None):
         if magnitude_generator_kwargs is None:
             magnitude_generator_kwargs = {}
         magnitude_generator = resolve_magnitude_generator(magnitude_generator, **magnitude_generator_kwargs)
+        if simulation_method_kwargs is None:
+            simulation_method_kwargs = {}
         start = dt.datetime.now()
         np.random.seed()
         logger.debug("induced info: {}".format(self.induced))
@@ -1448,7 +1452,7 @@ class ETASSimulation:
 
         simulations = pd.DataFrame()
         for sim_id in np.arange(i_start, n_simulations):
-            continuation = simulate_catalog_continuation(
+            continuation = simulation_method(
                 self.catalog,
                 auxiliary_start=self.inversion_params.auxiliary_start,
                 auxiliary_end=self.forecast_start_date,
@@ -1481,6 +1485,7 @@ class ETASSimulation:
                 induced_bslo=self.induced_bslo,
                 n_induced=self.n_induced,
                 magnitude_generator=magnitude_generator,
+                **simulation_method_kwargs,
             )
 
             continuation["catalog_id"] = sim_id
@@ -1534,9 +1539,13 @@ class ETASSimulation:
         i_start: int = 0,
         magnitude_generator=simulate_magnitudes,
         magnitude_generator_kwargs=None,
+        simulation_method=simulate_catalog_continuation,
+        simulation_method_kwargs=None,
     ) -> None:
         if magnitude_generator_kwargs is None:
             magnitude_generator_kwargs = {}
+        if simulation_method_kwargs is None:
+            simulation_method_kwargs = {}
         i_end = i_start + n_simulations
 
         os.makedirs(os.path.dirname(fn_store), exist_ok=True)
@@ -1553,6 +1562,8 @@ class ETASSimulation:
                 i_start=i_start,
                 magnitude_generator=magnitude_generator,
                 magnitude_generator_kwargs=magnitude_generator_kwargs,
+                simulation_method=simulation_method,
+                simulation_method_kwargs=simulation_method_kwargs,
             )
 
             next(generator).to_csv(fn_store, mode="w", header=True, index=True)
@@ -1601,6 +1612,8 @@ class ETASSimulation:
                     i_start=i_next,
                     magnitude_generator=magnitude_generator,
                     magnitude_generator_kwargs=magnitude_generator_kwargs,
+                    simulation_method=simulation_method,
+                    simulation_method_kwargs=simulation_method_kwargs,
                 )
 
         # append rest of chunks to file
@@ -1617,9 +1630,13 @@ class ETASSimulation:
         info_cols: list = [],
         magnitude_generator=simulate_magnitudes,
         magnitude_generator_kwargs=None,
+        simulation_method=simulate_catalog_continuation,
+        simulation_method_kwargs=None,
     ) -> ForecastCatalog:
         if magnitude_generator_kwargs is None:
             magnitude_generator_kwargs = {}
+        if simulation_method_kwargs is None:
+            simulation_method_kwargs = {}
         store = pd.DataFrame()
         for chunk in self.simulate(
             forecast_n_days,
@@ -1630,6 +1647,8 @@ class ETASSimulation:
             info_cols,
             magnitude_generator=magnitude_generator,
             magnitude_generator_kwargs=magnitude_generator_kwargs,
+            simulation_method=simulation_method,
+            simulation_method_kwargs=simulation_method_kwargs,
         ):
             store = pd.concat([store, chunk], ignore_index=False)
         return ForecastCatalog(data=store)

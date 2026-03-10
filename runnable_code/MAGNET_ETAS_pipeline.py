@@ -28,6 +28,36 @@ from eq_mag_prediction.utilities import catalog_processing
 
 from etas.inversion import ETASParameterCalculation
 from etas.simulation import ETASSimulation
+import etas.simulation as simulation_pckg
+
+
+def grid_params_from_inversion(etas_inversion: ETASParameterCalculation):
+    """Build grid_params dict from fitted inversion for use with simulate_catalog_continuation_grid."""
+    import numpy as np
+    params = simulation_pckg.GRID_DEFAULT_PARAMS.copy()
+    theta = etas_inversion.theta
+    if theta is None:
+        return params
+    mc = etas_inversion.m_ref - etas_inversion.delta_m / 2
+    params["m0"] = mc
+    params["beta"] = etas_inversion.beta
+    if "log10_mu" in theta:
+        params["mu"] = np.power(10, float(theta["log10_mu"]))
+    if "a" in theta:
+        params["alpha"] = float(theta["a"])
+    elif "alpha" in theta:
+        params["alpha"] = float(theta["alpha"])
+    if "gamma" in theta:
+        params["gamma"] = float(theta["gamma"])
+    if "log10_c" in theta:
+        params["c"] = np.power(10, float(theta["log10_c"]))
+    if "omega" in theta:
+        params["p"] = 1.0 + float(theta["omega"])
+    if "log10_d" in theta:
+        params["D"] = np.power(10, float(theta["log10_d"]))
+    if "rho" in theta:
+        params["q"] = 1.0 + float(theta["rho"])
+    return params
 
 
 def run_subprocess(process_path, gin_path, **flags):
@@ -1745,12 +1775,21 @@ def run_etas_catalog_continuation(
         magnitude_generator_kwargs["model_dir"] = str(model_dir)
         print(f"Using MAGNET model from: {model_dir}")
 
+
+    simulation_method_kwargs = {
+        "grid_n_xy": (4, 4),
+        "grid_params": grid_params_from_inversion(etas_inversion_reload),
+        "projection": None,
+        "seed": None,
+    }
     simulation.simulate_to_csv(
         str(fn_store_simulation),
         forecast_duration,
         1,
         magnitude_generator=magnitude_generator,
         magnitude_generator_kwargs=magnitude_generator_kwargs if magnitude_generator_kwargs else None,
+        simulation_method=simulation_pckg.simulate_catalog_continuation,
+        simulation_method_kwargs=simulation_method_kwargs,
     )
 
     if reproduction_files:
