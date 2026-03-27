@@ -156,7 +156,6 @@ def polygon_surface(polygon):
         proj_wgs84, proj_aea)
 
     geom_area = ops.transform(transformer.transform, polygon)
-
     return geom_area.area / 1e6
 
 

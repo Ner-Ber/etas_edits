@@ -1,62 +1,56 @@
 # Imports
-from datetime import datetime
-from datetime import timezone
-import hashlib
-from pathlib import Path
-import subprocess
-import sys
-import re
+import argparse
 import ast
+import datetime
+import hashlib
+import inspect
 import json
 import os
-import inspect
-import tempfile
+import pathlib
+import re
 import shutil
-import argparse
+import subprocess
+import sys
+import tempfile
+
 import gin
-import pandas as pd
 import numpy as np
-from shapely.geometry import Polygon, Point
-from shapely.ops import unary_union
+import pandas as pd
+import shapely
+import shapely.geometry
 
-from eq_mag_prediction.ingestion import catalog_format_converter as cfc
-from eq_mag_prediction.utilities import data_utils
-from eq_mag_prediction.utilities import utility_functions
-from eq_mag_prediction.forecasting import one_region_model
-from eq_mag_prediction.forecasting import training_examples
-from eq_mag_prediction.utilities import catalog_processing
+import eq_mag_prediction.ingestion.catalog_format_converter as catalog_format_converter
+import eq_mag_prediction.forecasting.one_region_model as one_region_model
+import eq_mag_prediction.forecasting.training_examples as training_examples
+import eq_mag_prediction.utilities.catalog_processing as catalog_processing
+import eq_mag_prediction.utilities.data_utils as data_utils
+import eq_mag_prediction.utilities.utility_functions as utility_functions
 
-from etas.inversion import ETASParameterCalculation
-from etas.simulation import ETASSimulation
-import etas.simulation as simulation_pckg
+import etas.forecast_intensity as etas_forecast_intensity
+import etas.inversion as etas_inversion
+import etas.simulation as etas_simulation
 
 
-def grid_params_from_inversion(etas_inversion: ETASParameterCalculation):
-    """Build grid_params dict from fitted inversion for use with simulate_catalog_continuation_grid."""
-    import numpy as np
-    params = simulation_pckg.GRID_DEFAULT_PARAMS.copy()
+def grid_params_from_inversion(etas_inversion: etas_inversion.ETASParameterCalculation):
+    """
+    Build ``grid_params`` for ``simulate_catalog_continuation_grid`` from a fitted inversion.
+
+    Starts from ``forecast_intensity`` defaults, copies every key from ``theta``,
+    then sets ``m0``, ``beta``, and ``mu`` (from ``log10_mu``) from the inversion
+    object (catalog magnitude scale and background rate).
+    """
+    params = etas_simulation.GRID_DEFAULT_PARAMS.copy()
     theta = etas_inversion.theta
-    if theta is None:
-        return params
+    if theta:
+        for key, value in theta.items():
+            params[key] = value
     mc = etas_inversion.m_ref - etas_inversion.delta_m / 2
     params["m0"] = mc
     params["beta"] = etas_inversion.beta
-    if "log10_mu" in theta:
+    if theta and "log10_mu" in theta:
         params["mu"] = np.power(10, float(theta["log10_mu"]))
-    if "a" in theta:
-        params["alpha"] = float(theta["a"])
-    elif "alpha" in theta:
-        params["alpha"] = float(theta["alpha"])
-    if "gamma" in theta:
-        params["gamma"] = float(theta["gamma"])
-    if "log10_c" in theta:
-        params["c"] = np.power(10, float(theta["log10_c"]))
-    if "omega" in theta:
-        params["p"] = 1.0 + float(theta["omega"])
-    if "log10_d" in theta:
-        params["D"] = np.power(10, float(theta["log10_d"]))
-    if "rho" in theta:
-        params["q"] = 1.0 + float(theta["rho"])
+    if theta and "log10_tau" in theta:
+        params["tau"] = np.power(10, float(theta["log10_tau"]))
     return params
 
 
@@ -79,7 +73,7 @@ def run_subprocess(process_path, gin_path, **flags):
     try:
         # Run from etas_edits directory to avoid numpy source directory conflicts
         # The scripts should work regardless of CWD since they use absolute paths
-        script_dir = Path(__file__).resolve().parent
+        script_dir = pathlib.Path(__file__).resolve().parent
 
         env = os.environ.copy()
 
@@ -127,7 +121,7 @@ def run_python_script(script_path: str, **flags):
     print('Command:', ' '.join(command))
     try:
         # Run from etas_edits directory to avoid numpy source directory conflicts
-        script_dir = Path(__file__).resolve().parent
+        script_dir = pathlib.Path(__file__).resolve().parent
         env = os.environ.copy()
         # Ensure LD_LIBRARY_PATH includes conda's lib directory for proper libstdc++ resolution
         conda_env = os.environ.get('CONDA_PREFIX', '')
@@ -149,12 +143,12 @@ def run_python_script(script_path: str, **flags):
 
 def _dt_string_to_epoch_seconds_utc(dt_str: str) -> int:
     """Parse '%Y-%m-%d %H:%M:%S' as UTC and return epoch seconds."""
-    return int(datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).timestamp())
+    return int(datetime.datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc).timestamp())
 
 
 def _create_shape_coords_from_catalog(
-    etas_catalog_path: Path,
-    shapes_saving_dir: Path,
+    etas_catalog_path: pathlib.Path,
+    shapes_saving_dir: pathlib.Path,
 ) -> str:
     """
     Create a convex hull polygon from all points in the catalog and save as .npy file.
@@ -171,20 +165,21 @@ def _create_shape_coords_from_catalog(
         raise ValueError(f"Catalog is empty: {etas_catalog_path}")
 
     # Create points from lat/lon (Shapely Point uses (x, y) = (lon, lat))
-    points = [Point(lon, lat) for lon, lat in zip(etas_catalog_df['longitude'], etas_catalog_df['latitude'])]
+    points = [shapely.geometry.Point(lon, lat) for lon, lat in zip(etas_catalog_df['longitude'], etas_catalog_df['latitude'])]
 
-    multipoint = unary_union(points)
+    multipoint = shapely.ops.unary_union(points)
     convex_hull = multipoint.convex_hull
-    if isinstance(convex_hull, Polygon):
+    # Inversion expects shape_coords as [[lat, lon], ...]; Shapely uses (x,y)=(lon, lat).
+    if isinstance(convex_hull, shapely.geometry.Polygon):
         coords = list(convex_hull.exterior.coords)
         shape_coords_array = np.array([[lat, lon] for lon, lat in coords])
     else:
-        bounds = convex_hull.bounds
+        bounds = convex_hull.bounds  # (minx, miny, maxx, maxy) = (minlon, minlat, maxlon, maxlat)
         shape_coords_array = np.array([
-            [bounds[1], bounds[0]],
-            [bounds[1], bounds[2]],
-            [bounds[3], bounds[2]],
-            [bounds[3], bounds[0]],
+            [bounds[1], bounds[0]],  # (minlat, minlon)
+            [bounds[1], bounds[2]],  # (minlat, maxlon)
+            [bounds[3], bounds[2]],  # (maxlat, maxlon)
+            [bounds[3], bounds[0]],  # (maxlat, minlon)
         ])
     shape_coords_npy = shapes_saving_dir / "shape_coords.npy"
     np.save(shape_coords_npy, shape_coords_array)
@@ -195,7 +190,7 @@ def _build_temp_configs_from_single_source(
     *,
     pipeline_config_path: str,
     val_to_train_time_ratio: float,
-    permanent_inv_dir: Path | str = "/home/neriberman/REPOS/etas_edits/outputs/inversions",
+    permanent_inv_dir: pathlib.Path | str = "/home/neriberman/REPOS/etas_edits/outputs/inversions",
 ) -> dict[str, str]:
     """
     Single-source config mode:
@@ -230,7 +225,7 @@ def _build_temp_configs_from_single_source(
     templates = pcfg["templates"]
     overrides = pcfg["overrides"]
 
-    tmp_root = Path(tempfile.mkdtemp(prefix="magnet_etas_pipeline_"))
+    tmp_root = pathlib.Path(tempfile.mkdtemp(prefix="magnet_etas_pipeline_"))
     tmp_cfg_dir = tmp_root / "configs"
     tmp_cfg_dir.mkdir(parents=True, exist_ok=True)
     tmp_data_dir = tmp_root / "data"
@@ -278,14 +273,14 @@ def _build_temp_configs_from_single_source(
     # --- Catalog: default is MAGNET format
     catalog_spec = overrides["catalog"]
     catalog_format = catalog_spec.get("format", "magnet")  # Default to MAGNET
-    catalog_path = Path(catalog_spec["path"])
+    catalog_path = pathlib.Path(catalog_spec["path"])
     if not catalog_path.is_absolute():
-        catalog_path = (Path(pipeline_config_path).resolve().parent / catalog_path).resolve()
+        catalog_path = (pathlib.Path(pipeline_config_path).resolve().parent / catalog_path).resolve()
     if not catalog_path.exists():
         raise FileNotFoundError(f"Catalog not found: {catalog_path}")
 
     # MAGNET catalog: create in persistent location (results/catalogs/ingested/) with collision detection
-    ingested_dir = Path(data_utils.INGESTED_DIRECTORY).resolve()
+    ingested_dir = pathlib.Path(data_utils.INGESTED_DIRECTORY).resolve()
     persistent_magnet_catalog = _find_or_create_magnet_catalog(
         source_catalog_path=catalog_path,
         source_format=catalog_format,
@@ -294,7 +289,7 @@ def _build_temp_configs_from_single_source(
 
     # ETAS catalog: create in persistent location with collision detection
     # Determine ETAS catalog directory from template ETAS config
-    template_etas_json = Path(templates["invert_etas_config_json_path"])
+    template_etas_json = pathlib.Path(templates["invert_etas_config_json_path"])
     etas_config_dir = template_etas_json.resolve().parent
     etas_catalog_dir = (etas_config_dir / ".." / "input_data" / "catalogs").resolve()
 
@@ -431,10 +426,10 @@ def _epoch_seconds_to_dt_string(epoch_seconds: int) -> str:
     Convert epoch seconds to ETAS JSON datetime string format: '%Y-%m-%d %H:%M:%S'
     Uses UTC to avoid local timezone drift.
     """
-    return datetime.fromtimestamp(int(epoch_seconds), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.datetime.fromtimestamp(int(epoch_seconds), tz=datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _get_catalog_path_from_gin_binding(catalog_binding: str) -> Path:
+def _get_catalog_path_from_gin_binding(catalog_binding: str) -> pathlib.Path:
     """
     Extract the catalog file path from a Gin config catalog binding.
 
@@ -499,7 +494,7 @@ def _get_catalog_path_from_gin_binding(catalog_binding: str) -> Path:
     # This ensures we use the exact same lookup logic as the data_utils functions
     try:
         catalog_path = data_utils.look_for_file(filename)
-        return Path(catalog_path).resolve()
+        return pathlib.Path(catalog_path).resolve()
     except RuntimeError as e:
         raise RuntimeError(
             f"Catalog file not found: {filename}\n"
@@ -556,7 +551,7 @@ def _default_filename_for_data_utils_function(function_name: str) -> tuple[str, 
 
     raise ValueError(f"Could not determine default filename for function '{function_name}'")
 
-def _safe_unique_path(desired_path: Path) -> Path:
+def _safe_unique_path(desired_path: pathlib.Path) -> pathlib.Path:
     """
     Return desired_path if it doesn't exist; otherwise append a numeric suffix before the extension.
     Never overwrites existing files.
@@ -576,8 +571,8 @@ def _safe_unique_path(desired_path: Path) -> Path:
     raise RuntimeError(f"Could not find a free filename near {desired_path}")
 
 def _magnet_catalogs_equivalent(
-    path_a: Path,
-    path_b: Path,
+    path_a: pathlib.Path,
+    path_b: pathlib.Path,
     *,
     chunksize: int = 200_000,
     float_rtol: float = 0.0,
@@ -589,8 +584,8 @@ def _magnet_catalogs_equivalent(
     MAGNET ingested catalog schema we care about: time, latitude, longitude, magnitude.
     Additional columns are allowed, but must match if present in both.
     """
-    path_a = Path(path_a)
-    path_b = Path(path_b)
+    path_a = pathlib.Path(path_a)
+    path_b = pathlib.Path(path_b)
 
     # Fast path: if sizes differ wildly, still could be equal due to formatting;
     # so don't early-return based on size alone.
@@ -632,17 +627,17 @@ def _magnet_catalogs_equivalent(
 
 def _find_matching_catalog_in_dir(
     *,
-    candidate_path: Path,
-    search_dir: Path,
-    temp_converted_path: Path,
-) -> Path | None:
+    candidate_path: pathlib.Path,
+    search_dir: pathlib.Path,
+    temp_converted_path: pathlib.Path,
+) -> pathlib.Path | None:
     """
     Look for an existing file in search_dir that is equivalent to temp_converted_path.
     Checks candidate_path first (if it exists), then scans suffix variants.
     """
-    search_dir = Path(search_dir)
-    candidate_path = Path(candidate_path)
-    temp_converted_path = Path(temp_converted_path)
+    search_dir = pathlib.Path(search_dir)
+    candidate_path = pathlib.Path(candidate_path)
+    temp_converted_path = pathlib.Path(temp_converted_path)
 
     # 1) Check the canonical candidate first
     if candidate_path.exists() and _magnet_catalogs_equivalent(candidate_path, temp_converted_path):
@@ -659,9 +654,9 @@ def _find_matching_catalog_in_dir(
 
 def _ensure_magnet_catalog_for_etas_catalog(
     *,
-    etas_catalog_path: Path,
+    etas_catalog_path: pathlib.Path,
     current_gin_catalog_binding: str,
-) -> tuple[Path, str]:
+) -> tuple[pathlib.Path, str]:
     """
     Ensure a MAGNET ingested catalog CSV exists for the given ETAS catalog.
 
@@ -676,17 +671,17 @@ def _ensure_magnet_catalog_for_etas_catalog(
     if filename is None or file_param_name is None:
         file_param_name, filename = _default_filename_for_data_utils_function(function_name)
 
-    ingested_dir = Path(data_utils.INGESTED_DIRECTORY).resolve()
+    ingested_dir = pathlib.Path(data_utils.INGESTED_DIRECTORY).resolve()
     ingested_dir.mkdir(parents=True, exist_ok=True)
 
     desired_output = ingested_dir / filename
 
     # Convert ETAS -> MAGNET once into a temp file, then compare against existing ingested catalogs.
     with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as tmp:
-        tmp_path = Path(tmp.name)
+        tmp_path = pathlib.Path(tmp.name)
     try:
         print(f"Converting ETAS -> MAGNET to temp:\n  {etas_catalog_path} -> {tmp_path}")
-        cfc.convert_etas_to_magnet(etas_catalog_path, tmp_path)
+        catalog_format_converter.convert_etas_to_magnet(etas_catalog_path, tmp_path)
 
         # If an existing catalog matches (default or suffixed), reuse it and delete temp.
         existing_match = _find_matching_catalog_in_dir(
@@ -721,8 +716,8 @@ def _ensure_magnet_catalog_for_etas_catalog(
             tmp_path.unlink()
 
 def _etas_catalogs_equivalent(
-    path_a: Path,
-    path_b: Path,
+    path_a: pathlib.Path,
+    path_b: pathlib.Path,
     *,
     chunksize: int = 200_000,
     float_rtol: float = 0.0,
@@ -733,8 +728,8 @@ def _etas_catalogs_equivalent(
 
     ETAS catalog schema: id, latitude, longitude, time, magnitude.
     """
-    path_a = Path(path_a)
-    path_b = Path(path_b)
+    path_a = pathlib.Path(path_a)
+    path_b = pathlib.Path(path_b)
 
     reader_a = pd.read_csv(path_a, chunksize=chunksize)
     reader_b = pd.read_csv(path_b, chunksize=chunksize)
@@ -766,10 +761,10 @@ def _etas_catalogs_equivalent(
 
 def _find_or_create_magnet_catalog(
     *,
-    source_catalog_path: Path,
+    source_catalog_path: pathlib.Path,
     source_format: str,
-    ingested_dir: Path | None = None,
-) -> Path:
+    ingested_dir: pathlib.Path | None = None,
+) -> pathlib.Path:
     """
     Ensure a MAGNET catalog exists in the ingested directory with collision detection.
 
@@ -785,22 +780,22 @@ def _find_or_create_magnet_catalog(
         Path to the MAGNET catalog in ingested_dir (may be existing or newly created)
     """
     if ingested_dir is None:
-        ingested_dir = Path(data_utils.INGESTED_DIRECTORY).resolve()
+        ingested_dir = pathlib.Path(data_utils.INGESTED_DIRECTORY).resolve()
     ingested_dir.mkdir(parents=True, exist_ok=True)
 
-    source_catalog_path = Path(source_catalog_path)
+    source_catalog_path = pathlib.Path(source_catalog_path)
     desired_output = ingested_dir / source_catalog_path.name
 
     # Create temp file with MAGNET format
     with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as tmp:
-        tmp_path = Path(tmp.name)
+        tmp_path = pathlib.Path(tmp.name)
     try:
         if source_format == "magnet":
             print(f"Copying MAGNET catalog to temp:\n  {source_catalog_path} -> {tmp_path}")
             shutil.copyfile(source_catalog_path, tmp_path)
         elif source_format == "etas":
             print(f"Converting ETAS -> MAGNET to temp:\n  {source_catalog_path} -> {tmp_path}")
-            cfc.convert_etas_to_magnet(source_catalog_path, tmp_path)
+            catalog_format_converter.convert_etas_to_magnet(source_catalog_path, tmp_path)
         else:
             raise ValueError(f"Unsupported source_format: {source_format} (expected 'magnet' or 'etas')")
 
@@ -835,10 +830,10 @@ def _find_or_create_magnet_catalog(
 
 def _find_or_create_etas_catalog_for_magnet(
     *,
-    magnet_catalog_path: Path,
-    etas_output_dir: Path,
+    magnet_catalog_path: pathlib.Path,
+    etas_output_dir: pathlib.Path,
     original_catalog_name: str,
-) -> Path:
+) -> pathlib.Path:
     """
     Create ETAS catalog from MAGNET catalog with collision detection.
 
@@ -853,20 +848,20 @@ def _find_or_create_etas_catalog_for_magnet(
     Returns:
         Path to the ETAS catalog (may be existing or newly created)
     """
-    etas_output_dir = Path(etas_output_dir)
+    etas_output_dir = pathlib.Path(etas_output_dir)
     etas_output_dir.mkdir(parents=True, exist_ok=True)
 
     # Generate base name: etas_converted_<original_name>.csv
-    original_stem = Path(original_catalog_name).stem
+    original_stem = pathlib.Path(original_catalog_name).stem
     base_name = f"etas_converted_{original_stem}.csv"
     desired_path = etas_output_dir / base_name
 
     # Convert MAGNET -> ETAS to temp file first
     with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as tmp:
-        tmp_path = Path(tmp.name)
+        tmp_path = pathlib.Path(tmp.name)
     try:
         print(f"Converting MAGNET -> ETAS to temp:\n  {magnet_catalog_path} -> {tmp_path}")
-        cfc.convert_magnet_to_etas(magnet_catalog_path, tmp_path)
+        catalog_format_converter.convert_magnet_to_etas(magnet_catalog_path, tmp_path)
 
         # Check if desired_path exists and is identical
         if desired_path.exists() and _etas_catalogs_equivalent(desired_path, tmp_path):
@@ -897,7 +892,7 @@ def _find_or_create_etas_catalog_for_magnet(
 
 def _ensure_etas_catalog_for_magnet_catalog(
     *,
-    magnet_catalog_path: Path,
+    magnet_catalog_path: pathlib.Path,
     invert_etas_config_json_path: str,
     current_fn_catalog_value: str | None,
 ) -> str:
@@ -906,7 +901,7 @@ def _ensure_etas_catalog_for_magnet_catalog(
 
     Returns the ETAS catalog path as a string **relative** to the ETAS JSON config file.
     """
-    json_dir = Path(invert_etas_config_json_path).parent
+    json_dir = pathlib.Path(invert_etas_config_json_path).parent
     etas_catalog_dir = json_dir / ".." / "input_data" / "catalogs"
     etas_catalog_dir = etas_catalog_dir.resolve()
 
@@ -1239,7 +1234,7 @@ def update_json_parameters(json_path: str, params_dict: dict):
 # 2b. Prepare features and labels.
 def run_feature_computation(gin_path, **flags):
     # Resolve script path relative to this file's location
-    script_dir = Path(__file__).resolve().parent
+    script_dir = pathlib.Path(__file__).resolve().parent
     script_path = (script_dir / ".." / ".." / "eq_mag_prediction" / "eq_mag_prediction" / "scripts" / "magnitude_prediction_compute_features.py").resolve()
     if not script_path.exists():
         raise FileNotFoundError(f"MAGNET feature computation script not found: {script_path}")
@@ -1334,13 +1329,13 @@ def run_magnet_trainer(gin_path, output_dir=None, **flags):
         raise ValueError("output_dir is required for run_magnet_trainer")
 
     # Resolve script path relative to this file's location
-    script_dir = Path(__file__).resolve().parent
+    script_dir = pathlib.Path(__file__).resolve().parent
     script_path = (script_dir / ".." / ".." / "eq_mag_prediction" / "eq_mag_prediction" / "scripts" / "magnitude_predictor_trainer.py").resolve()
     if not script_path.exists():
         raise FileNotFoundError(f"MAGNET trainer script not found: {script_path}")
 
     # Ensure output_dir exists
-    output_dir = Path(output_dir)
+    output_dir = pathlib.Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     run_subprocess(
@@ -1362,9 +1357,9 @@ def run_magnet_trainer_or_load(
     """
     # if trained_models_base_dir is None:
     #     # TODO: Move this to a constant/config eventually
-    #     base_dir = Path("/home/neriberman/REPOS/eq_mag_prediction/results/trained_models")
+    #     base_dir = pathlib.Path("/home/neriberman/REPOS/eq_mag_prediction/results/trained_models")
     # else:
-    #     base_dir = Path(trained_models_base_dir)
+    #     base_dir = pathlib.Path(trained_models_base_dir)
 
     # model_id = _get_model_id_from_gin_config(gin_path)
     # if not model_id:
@@ -1408,15 +1403,15 @@ def run_config_sync(
     if force_json_on_gin:   # copy ETAS's json fields to MAGNET's gin
         update_dict = {
             # Interpret ETAS JSON times as UTC to avoid local timezone drift
-            'feature_prep_start': int(datetime.strptime(etas_inversion_json_dict["auxiliary_start"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).timestamp()),
-            'train_start_time': int(datetime.strptime(etas_inversion_json_dict["timewindow_start"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).timestamp()),
-            'test_start_time': int(datetime.strptime(etas_inversion_json_dict["timewindow_end"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).timestamp()),
-            'test_end_time': int(datetime.strptime(etas_inversion_json_dict["testwindow_end"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).timestamp()),
+            'feature_prep_start': int(datetime.datetime.strptime(etas_inversion_json_dict["auxiliary_start"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc).timestamp()),
+            'train_start_time': int(datetime.datetime.strptime(etas_inversion_json_dict["timewindow_start"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc).timestamp()),
+            'test_start_time': int(datetime.datetime.strptime(etas_inversion_json_dict["timewindow_end"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc).timestamp()),
+            'test_end_time': int(datetime.datetime.strptime(etas_inversion_json_dict["testwindow_end"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=datetime.timezone.utc).timestamp()),
         }
         update_dict['validation_start_time'] = (1-val_to_train_time_ratio)*update_dict['train_start_time'] + val_to_train_time_ratio*update_dict['test_start_time']
 
         # Ensure a corresponding MAGNET ingested catalog exists (without overwriting).
-        json_dir = Path(invert_etas_config_json_path).parent
+        json_dir = pathlib.Path(invert_etas_config_json_path).parent
         etas_catalog_rel = etas_inversion_json_dict.get(
             "fn_catalog",
             os.path.join("..", "input_data", "catalogs", "converted_jma.csv"),
@@ -1526,7 +1521,7 @@ def _inversion_id(inversion_config: dict) -> str:
     return hashlib.sha1(config_str.encode('utf-8')).hexdigest()
 
 
-def _does_inversion_exists(out_path: Path, run_id: str, store_pij: bool, store_distances: bool) -> bool:
+def _does_inversion_exists(out_path: pathlib.Path, run_id: str, store_pij: bool, store_distances: bool) -> bool:
     """
     Check if ALL expected inversion results exist for the given run_id.
     """
@@ -1565,9 +1560,9 @@ def run_etas_inversion(
         inversion_config = json.load(f)
 
     if permanent_inv_dir is None:
-        permanent_inv_dir = Path("/home/neriberman/REPOS/etas_edits/outputs/inversions")
+        permanent_inv_dir = pathlib.Path("/home/neriberman/REPOS/etas_edits/outputs/inversions")
     else:
-        permanent_inv_dir = Path(permanent_inv_dir)
+        permanent_inv_dir = pathlib.Path(permanent_inv_dir)
 
     my_inv_id = get_inversion_id(inversion_config, store_pij=store_pij, store_distances=store_distances)
     permanent_run_dir = permanent_inv_dir / f"inv_{my_inv_id}"
@@ -1586,9 +1581,9 @@ def run_etas_inversion(
     inversion_config["id"] = my_inv_id
 
     permanent_run_dir.mkdir(parents=True, exist_ok=True)
-    Path(inversion_config.get("data_path")).expanduser().mkdir(parents=True, exist_ok=True)
+    pathlib.Path(inversion_config.get("data_path")).expanduser().mkdir(parents=True, exist_ok=True)
 
-    calculation = ETASParameterCalculation(inversion_config)
+    calculation = etas_inversion.ETASParameterCalculation(inversion_config)
     calculation.prepare()
     _ = calculation.invert(gof_threshold=gof_threshold)
     safe_path_str = str(permanent_run_dir) + os.sep
@@ -1626,7 +1621,7 @@ def run_etas_inversion_old(config_path: str, store_pij: bool, force_inversion: b
     with open(config_path, 'r') as f:
         inversion_config = json.load(f)
 
-    data_path = Path(inversion_config.get("data_path")).expanduser()
+    data_path = pathlib.Path(inversion_config.get("data_path")).expanduser()
     data_path.mkdir(parents=True, exist_ok=True)
     # inv_id = str(inversion_config.get("id") or "")
     inv_id = _inversion_id(inversion_config)
@@ -1643,13 +1638,13 @@ def run_etas_inversion_old(config_path: str, store_pij: bool, force_inversion: b
     else:
         pass
 
-    calculation = ETASParameterCalculation(inversion_config)
+    calculation = etas_inversion.ETASParameterCalculation(inversion_config)
     calculation.prepare()
     _ = calculation.invert()
     calculation.store_results(out_path, store_pij=store_pij)
 
     # Copy results to permanent directory
-    permanent_inv_dir = Path("/home/neriberman/REPOS/etas_edits/outputs/inversions")
+    permanent_inv_dir = pathlib.Path("/home/neriberman/REPOS/etas_edits/outputs/inversions")
     permanent_inv_dir.mkdir(parents=True, exist_ok=True)
 
     # Generate unique identifier for this inversion based on config
@@ -1691,12 +1686,12 @@ def run_etas_inversion_old(config_path: str, store_pij: bool, force_inversion: b
 
 def create_reproduction_files(
     *,
-    inversion_config_path: str | Path,
-    continuation_config_path: str | Path,
-    gin_config_path: str | Path,
-    pipeline_config_path: str | Path,
+    inversion_config_path: str | pathlib.Path,
+    continuation_config_path: str | pathlib.Path,
+    gin_config_path: str | pathlib.Path,
+    pipeline_config_path: str | pathlib.Path,
     inversion_config: dict,
-) -> dict[str, str | Path]:
+) -> dict[str, str | pathlib.Path]:
     """
     Creates a dictionary mapping destination filenames to source paths for reproduction files.
     """
@@ -1706,16 +1701,16 @@ def create_reproduction_files(
         "magnet_config.gin": str(gin_config_path),
     }
 
-    if Path(pipeline_config_path).exists():
+    if pathlib.Path(pipeline_config_path).exists():
         rep_files["pipeline_config.json"] = str(pipeline_config_path)
 
     # Resolve original catalog path
     fn_catalog = inversion_config.get("fn_catalog")
     if fn_catalog:
-        catalog_path = Path(fn_catalog)
+        catalog_path = pathlib.Path(fn_catalog)
         if not catalog_path.is_absolute():
             # Resolve relative to the inversion config file location
-            catalog_path = (Path(inversion_config_path).parent / catalog_path).resolve()
+            catalog_path = (pathlib.Path(inversion_config_path).parent / catalog_path).resolve()
 
         rep_files["original_catalog.csv"] = str(catalog_path)
 
@@ -1724,9 +1719,9 @@ def create_reproduction_files(
 
 def run_etas_catalog_continuation(
     config_path: str,
-    reproduction_files: dict[str, str | Path] | None = None,
+    reproduction_files: dict[str, str | pathlib.Path] | None = None,
     force_continuation_calc: bool = False,
-    model_dir: str | Path | None = None,
+    model_dir: str | pathlib.Path | None = None,
 ) -> None:
     """
     Runs the ETAS simulation/continuation using the provided config.
@@ -1739,7 +1734,7 @@ def run_etas_catalog_continuation(
         model_dir: Optional path to trained MAGNET model directory. If provided and
                   magnitude_generator is "MAGNET_magnitude", will be passed to the generator.
     """
-    config_path = Path(config_path).resolve()
+    config_path = pathlib.Path(config_path).resolve()
     with open(config_path, 'r') as f:
         simulation_config = json.load(f)
 
@@ -1762,10 +1757,10 @@ def run_etas_catalog_continuation(
     with open(fn_inversion_output, "r") as f:
         inversion_output = json.load(f)
 
-    etas_inversion_reload = ETASParameterCalculation.load_calculation(inversion_output)
+    etas_inversion_reload = etas_inversion.ETASParameterCalculation.load_calculation(inversion_output)
 
     print(f"Running catalog continuation... Outputting to: {fn_store_simulation}")
-    simulation = ETASSimulation(etas_inversion_reload)
+    simulation = etas_simulation.ETASSimulation(etas_inversion_reload)
     simulation.prepare()
 
     # Prepare magnitude_generator_kwargs if using MAGNET and model_dir is provided
@@ -1776,20 +1771,21 @@ def run_etas_catalog_continuation(
         print(f"Using MAGNET model from: {model_dir}")
 
 
-    simulation_method_kwargs = {
-        "grid_n_xy": (4, 4),
-        "grid_params": grid_params_from_inversion(etas_inversion_reload),
-        "projection": None,
-        "seed": None,
-    }
+    # Classic ETAS continuation. For grid ETAS use e.g.:
+    grid_opts = etas_simulation.GridContinuationOptions(
+        grid_n_xy=(4, 4),
+        # grid_params=grid_params_from_inversion(etas_inversion_reload),  # TODO: use force_inversion_on_default_params or push to later stage?
+        grid_params=etas_forecast_intensity.force_inversion_on_default_params(etas_inversion_reload.theta)
+    )
     simulation.simulate_to_csv(
         str(fn_store_simulation),
         forecast_duration,
         1,
         magnitude_generator=magnitude_generator,
         magnitude_generator_kwargs=magnitude_generator_kwargs if magnitude_generator_kwargs else None,
-        simulation_method=simulation_pckg.simulate_catalog_continuation,
-        simulation_method_kwargs=simulation_method_kwargs,
+        # continuation_mode="classic",
+        continuation_mode="grid",
+        grid_continuation_options=grid_opts
     )
 
     if reproduction_files:
@@ -1797,7 +1793,7 @@ def run_etas_catalog_continuation(
         print(f"Saving reproduction files to: {output_dir}")
         for dest_name, src_path in reproduction_files.items():
             if src_path:
-                src = Path(src_path)
+                src = pathlib.Path(src_path)
                 if src.exists():
                     try:
                         shutil.copy2(src, output_dir / dest_name)
@@ -1809,16 +1805,16 @@ def run_etas_catalog_continuation(
 def run_etas_catalog_continuation_old(config_path: str) -> None:
     with open(config_path, 'r') as f:
         simulation_config = json.load(f)
-    cfg_dir = Path(config_path).resolve().parent
+    cfg_dir = pathlib.Path(config_path).resolve().parent
     fn_inversion_output = (cfg_dir / simulation_config["fn_inversion_output"]).resolve()
     fn_store_simulation = (cfg_dir / simulation_config["fn_store_simulation"]).resolve()
     forecast_duration = simulation_config["forecast_duration"]
 
     with open(fn_inversion_output, "r") as f:
         inversion_output = json.load(f)
-    etas_inversion_reload = ETASParameterCalculation.load_calculation(inversion_output)
+    etas_inversion_reload = etas_inversion.ETASParameterCalculation.load_calculation(inversion_output)
 
-    simulation = ETASSimulation(etas_inversion_reload)
+    simulation = etas_simulation.ETASSimulation(etas_inversion_reload)
     simulation.prepare()
     simulation.simulate_to_csv(
         str(fn_store_simulation),
@@ -1839,7 +1835,7 @@ def run_etas_catalog_continuation_old(config_path: str) -> None:
 #     )
 #     args = parser.parse_args()
 
-#     default_output_dir = Path("/home/neriberman/REPOS/etas_edits/outputs")
+#     default_output_dir = pathlib.Path("/home/neriberman/REPOS/etas_edits/outputs")
 #     permanent_inv_dir = default_output_dir / "inversions"
 #     temp_paths = _build_temp_configs_from_single_source(
 #         pipeline_config_path=args.pipeline_config_json,
@@ -1864,7 +1860,7 @@ def run_etas_catalog_continuation_old(config_path: str) -> None:
 #     # These scripts read their own JSON configs (hardcoded inside those scripts).
 #     # Run inversion and update the continuation config to point at the newly-created parameters_<id>.json.
 #     fn_parameters_json = run_etas_inversion(invert_etas_config_json_path, store_pij=True, store_distances=True)
-#     cfg_dir = Path(etas_catalog_continuation_config_json_path).resolve().parent
+#     cfg_dir = pathlib.Path(etas_catalog_continuation_config_json_path).resolve().parent
 #     fn_parameters_rel = os.path.relpath(fn_parameters_json, cfg_dir)
 
 #     permanent_continuation_dir = default_output_dir / "continuation"
@@ -1892,7 +1888,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Define Base Output Directories
-    default_output_dir = Path("/home/neriberman/REPOS/etas_edits/outputs")
+    default_output_dir = pathlib.Path("/home/neriberman/REPOS/etas_edits/outputs")
     permanent_inv_dir = default_output_dir / "inversions"
 
     temp_paths = _build_temp_configs_from_single_source(
@@ -1908,7 +1904,7 @@ if __name__ == "__main__":
     print(f"Using temp pipeline workspace: {temp_paths['tmp_root']}")
 
     # ---- 1. MAGNET stages ----------------------------------------------------
-    trained_models_base_dir = Path("/home/neriberman/REPOS/eq_mag_prediction/results/trained_models")
+    trained_models_base_dir = pathlib.Path("/home/neriberman/REPOS/eq_mag_prediction/results/trained_models")
 
     # Calculate model ID early to determine features directory
     model_id = _get_model_id_from_gin_config(local_gin_config_path)
@@ -1931,11 +1927,11 @@ if __name__ == "__main__":
         gin_bindings="train_and_evaluate_magnitude_prediction_model.scaler_saving_dir=None",
 
     )
-    model_dir = Path(model_dir_str)
+    model_dir = pathlib.Path(model_dir_str)
     print(f"Using model from: {model_dir}")
 
     # Extract Model ID (assumes model_dir is ".../trained_models/{model_id}")
-    model_id = Path(model_dir).name
+    model_id = pathlib.Path(model_dir).name
 
     # ---- 2. ETAS Inversion ---------------------------------------------------
     fn_parameters_json = run_etas_inversion(
@@ -1966,7 +1962,7 @@ if __name__ == "__main__":
     continuation_output_path = continuation_subfolder / "simulated_catalog.csv"
 
     # Update the config with ABSOLUTE paths
-    # Because these are absolute, Path(cfg_dir) / absolute_path will resolve correctly
+    # Because these are absolute, pathlib.Path(cfg_dir) / absolute_path will resolve correctly
     update_json_parameters(etas_catalog_continuation_config_json_path, {
         "fn_inversion_output": fn_parameters_json,
         "fn_store_simulation": str(continuation_output_path),

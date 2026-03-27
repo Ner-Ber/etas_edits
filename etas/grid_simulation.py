@@ -7,15 +7,12 @@ event to the catalog. Uses kernels from forecast_intensity.
 """
 
 import logging
+
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
+import tqdm
 
-from etas.forecast_intensity import (
-    DEFAULT_PARAMS,
-    make_kernels,
-    rate_at_t_all_grid,
-)
+import etas.forecast_intensity as etas_forecast_intensity
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +33,7 @@ def magnitude_gen(n, m0=None, beta=None, params=None, seed=None):
     Returns:
         1D array of length n.
     """
-    p = params if params is not None else DEFAULT_PARAMS
+    p = params if params is not None else etas_forecast_intensity.DEFAULT_PARAMS
     if m0 is None:
         m0 = p["m0"]
     if beta is None:
@@ -96,7 +93,7 @@ def run_grid_etas_simulation(
                     used to set latitude/longitude for new events.
         progress_bar: If True, show tqdm progress.
         log_interval: Log every this many iterations (0 to disable).
-    seed: Optional random seed for reproducibility.
+        seed: Optional random seed for reproducibility.
 
     Returns:
         DataFrame: Updated catalog (history with new events appended).
@@ -104,10 +101,10 @@ def run_grid_etas_simulation(
         are set if projection is provided.
     """
     if params is None:
-        params = DEFAULT_PARAMS.copy()
+        params = etas_forecast_intensity.DEFAULT_PARAMS.copy()
     if seed is not None:
         np.random.seed(seed)
-    kernels = make_kernels(params)
+    kernels = etas_forecast_intensity.make_kernels(params)
 
     if not in_place:
         history = history.copy()
@@ -117,7 +114,7 @@ def run_grid_etas_simulation(
     events_generated = 0
     iterations = 0
     total_duration = end_forecast - start_forecast
-    pbar = tqdm(total=total_duration, desc="Simulation") if progress_bar else None
+    pbar = tqdm.tqdm(total=total_duration, desc="Simulation") if progress_bar else None
 
     while t < end_forecast:
         iterations += 1
@@ -128,12 +125,12 @@ def run_grid_etas_simulation(
         h_t_days = history["time"].values / SECONDS_PER_DAY
 
         t_days = t / SECONDS_PER_DAY
-        B = rate_at_t_all_grid(
+        B = etas_forecast_intensity.rate_at_t_all_grid(
             t_days, x_flat, y_flat, h_x, h_y, h_m, h_t_days, kernels=kernels
         )
 
         dt_vec = np.random.exponential(1.0 / np.clip(B, 1e-15, None))
-        rate_future = rate_at_t_all_grid(
+        rate_future = etas_forecast_intensity.rate_at_t_all_grid(
             t_days + dt_vec,
             x_flat,
             y_flat,
