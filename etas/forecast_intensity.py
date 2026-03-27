@@ -10,16 +10,41 @@ import pandas as pd
 
 # Default ETAS parameters (same names as in bf_ETAS notebook)
 DEFAULT_PARAMS = {
-    "mu": 0.1,
+    # "mu": 0.1,
+    "mu": 1e-7,
     "beta": np.log(10),
-    "alpha": 1,
+    "alpha": 1.9,
     "gamma": 1.3,
-    "c": -2.2,
+    "c": 10**(-2.2),
     "p": 1,
-    "D": 1,
-    "q": 1,
+    "D": 0.5,
+    "q": 1.5,
     "m0": 1,
 }
+
+
+
+def force_inversion_on_default_params(inversion_params: dict, default_params: dict = DEFAULT_PARAMS):
+    """
+    Unite inversion parameters and default parameters.
+    """
+    params = default_params.copy()
+    # unite inversion parameters and default parameters
+    for key, value in inversion_params.items():
+        if key not in params:
+            params[key] = value
+    params.update(inversion_params)
+
+    log_keys = [k for k in params.keys() if k.startswith('log10_')]
+    for key in log_keys:
+        params[key.replace('log10_', '')] = 10**params[key]
+
+    params['p'] = params['omega'] + 1
+    params["rho"] = params['q']-1
+    params["D"] = params['d']**0.5
+
+    return params
+
 
 
 def make_kernels(params=None):
@@ -38,19 +63,24 @@ def make_kernels(params=None):
         - f(dx, dy, m): spatial kernel (dx, dy from parent)
         - summand(dx, dy, m, t): kappa(m) * f(dx, dy, m) * g(t)
     """
-    if params is None:
-        params = DEFAULT_PARAMS.copy()
 
     def mu(x, y):
+        # Background rate
         return params["mu"]
 
     def kappa(m, A=1):
+        # Utsu
         return A * np.exp(-params["alpha"] * (m - params["m0"]))
 
     def g(t):
-        return (params["p"] - 1) / params["c"] * (
-            1 + t / params["c"]
-        ) ** (-params["p"])
+        # Time kernel
+        # return (params["p"] - 1) / params["c"] * (
+        #     1 + t / params["c"]
+        # ) ** (-params["p"])
+        return np.exp(-t / params["tau"])/(t + params["c"])**(1 + params["omega"])
+
+    def r(dx, dy, m):
+        return (np.sqrt(dx**2 + dy**2) + params["d"] * np.exp(params["gamma"] * (m - params["m0"])))**(-(1 + params["rho"]))
 
     def f(dx, dy, m):
         k = kappa(m)
@@ -60,13 +90,14 @@ def make_kernels(params=None):
         ) * (1 + r2 / (params["D"] ** 2 * k)) ** (-params["q"])
 
     def summand(dx, dy, m, t):
-        return kappa(m) * f(dx, dy, m) * g(t)
+        # return kappa(m) * f(dx, dy, m) * g(t)
+        return kappa(m) * r(dx, dy, m) * g(t)
 
     return {
         "mu": mu,
         "kappa": kappa,
         "g": g,
-        "f": f,
+        "f": r,
         "summand": summand,
     }
 
@@ -122,11 +153,15 @@ def rate_at_t_all_grid(
     Compute ETAS intensity at time t (in days) for all grid points.
 
     Args:
-        t_days: Current time in days (scalar).
+        t_days: Current time on the same absolute scale as h_t_days (see below).
+            When history times are Unix epoch seconds, pass t_sec / 86400.
         x_flat: 1D array of x (UTM) for each grid point.
         y_flat: 1D array of y (UTM) for each grid point.
         h_x, h_y, h_m: 1D arrays from history (x_utm, y_utm, magnitude).
-        h_t_days: 1D array of history times in days.
+        h_t_days: History event times on the **same** absolute scale as t_days
+            (typically Unix epoch seconds divided by 86400). Then
+            ``t_days - h_t_days[k]`` equals elapsed time in **days** since event k,
+            which is what the temporal kernel g expects.
         kernels: Dict from make_kernels(); if None, uses make_kernels().
 
     Returns:

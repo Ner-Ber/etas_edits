@@ -16,6 +16,8 @@ import logging
 import os
 import pprint
 import types
+from dataclasses import dataclass
+from typing import Literal, Optional
 
 import geopandas as gpd
 import numpy as np
@@ -43,6 +45,35 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+
+@dataclass
+class GridContinuationOptions:
+    """Options for `simulate_catalog_continuation_grid` only (not used for classic ETAS)."""
+
+    grid_n_xy: tuple = (4, 4)
+    grid_params: Optional[dict] = None
+    projection: object = None
+    seed: Optional[int] = None
+
+
+def _to_seconds(t):
+    if hasattr(t, "timestamp"):
+        return t.timestamp()
+    return pd.Timestamp(t).timestamp()
+
+def _get_fallback_projection(lon, lat):
+    """Expects floats or single-element arrays."""
+    utm_crs_list = pyproj.database.query_utm_crs_info(
+        datum_name="WGS 84",
+        area_of_interest=pyproj.aoi.AreaOfInterest(
+            west_lon_degree=float(lon),
+            south_lat_degree=float(lat),
+            east_lon_degree=float(lon) + 1e-5,
+            north_lat_degree=float(lat) + 1e-5,
+        ),
+    )
+    # Return the first matches' EPSG as a Proj object
+    return pyproj.Proj(f"EPSG:{utm_crs_list[0].code}")
 
 def resolve_magnitude_generator(magnitude_generator, **kwargs):
     """
@@ -216,6 +247,8 @@ def parameters_from_standard_formulation(
 
     # define parameters based on standard formulation
     result["log10_c"] = par_st["log10_c"]
+    result["a"] = par_st["alpha"] * \
+        np.log(10) + par_here["rho"] * par_here["gamma"]
     result["log10_k0"] = (
         par_st["a"]
         - np.log10(np.pi / result["rho"])
@@ -223,8 +256,6 @@ def parameters_from_standard_formulation(
     )
     result["omega"] = par_st["p"] - 1
     result["log10_tau"] = 12.26 if result["omega"] <= 0 else np.inf
-    result["a"] = par_st["alpha"] * \
-        np.log(10) + par_here["rho"] * par_here["gamma"]
 
     # transform back to reference magnitude of interest
     result = transform_parameters(
@@ -1098,51 +1129,41 @@ def simulate_catalog_continuation(
 
 def simulate_catalog_continuation_grid(
     auxiliary_catalog,
-    auxiliary_start,
     auxiliary_end,
-    polygon,
     simulation_end,
+    polygon,
     parameters,
     mc,
     beta_main,
-    beta_aftershock=None,
-    delta_m=0,
-    m_max=None,
-    background_lats=None,
-    background_lons=None,
-    background_probs=None,
-    gaussian_scale=None,
-    bsla=None,
-    bslo=None,
-    bg_grid=False,
-    mfd_zones=None,
-    zones_from_latlon=None,
-    filter_polygon=True,
-    approx_times=False,
-    induced_lats=None,
-    induced_lons=None,
-    induced_term=None,
-    induced_bsla=None,
-    induced_bslo=None,
-    n_induced=None,
-    magnitude_generator=simulate_magnitudes,
     *,
     grid_n_xy=(4, 4),
     grid_params=None,
     projection=None,
     seed=None,
+    filter_polygon=True,
 ):
     """
-    Same API as simulate_catalog_continuation but uses grid-based ETAS (thinning).
+    Forecast-period catalog continuation using grid-based ETAS (thinning).
 
-    All parameters up to magnitude_generator are identical. Extra keyword-only
-    arguments: grid_n_xy, grid_params, projection, seed (see below).
-    Arguments not used by the grid implementation (e.g. background_lats, induced_*)
-    are accepted for API compatibility and ignored.
+    This is not API-compatible with `simulate_catalog_continuation`: it only
+    takes inputs required for the grid simulator. Use `continuation_mode` on
+    `ETASSimulation.simulate` to choose classic vs grid continuation.
+
+    parameters : dict
+        ETAS parameters (used when defaulting ``grid_params`` from ``log10_mu``).
+    grid_n_xy : tuple of int
+        Number of grid nodes in x and y (UTM / projected space).
+    grid_params : dict, optional
+        Passed to ``run_grid_etas_simulation``; if None, built from ``parameters``
+        and ``mc`` / ``beta_main``.
+    projection : callable, optional
+        ``(lon, lat) -> (x, y)`` forward transform; if None, a fallback is used
+        when pyproj is available.
+    seed : int, optional
+        RNG seed for the grid simulation run.
+    filter_polygon : bool
+        If True, clip output to ``polygon``.
     """
-
-    if beta_aftershock is None:
-        beta_aftershock = beta_main
 
     if grid_params is None:
         grid_params = GRID_DEFAULT_PARAMS.copy()
@@ -1150,17 +1171,13 @@ def simulate_catalog_continuation_grid(
         grid_params["beta"] = (
             beta_main if np.isscalar(beta_main) else np.log(10)
         )
-        if "log10_mu" in parameters:
+        if parameters and "log10_mu" in parameters:
             grid_params["mu"] = np.power(10, parameters["log10_mu"])
-
-    def _to_seconds(t):
-        if hasattr(t, "timestamp"):
-            return t.timestamp()
-        return pd.Timestamp(t).timestamp()
 
     start_sec = _to_seconds(auxiliary_end)
     end_sec = _to_seconds(simulation_end)
 
+    # populate history with relevant auxiliary catalog events
     mask = auxiliary_catalog["time"] < auxiliary_end
     history = auxiliary_catalog.loc[mask].copy()
     if len(history) == 0:
@@ -1170,20 +1187,7 @@ def simulate_catalog_continuation_grid(
 
     if projection is None and pyproj is not None:
         centroid = polygon.centroid
-        lon_c, lat_c = centroid.x, centroid.y
-        zone = int((lon_c + 180) / 6) + 1
-        hem = "north" if lat_c >= 0 else "south"
-        utm_crs = pyproj.CRS(
-            f"+proj=utm +zone={zone} +{hem} +datum=WGS84 +units=m +no_defs"
-        )
-        wgs84 = pyproj.CRS("EPSG:4326")
-        _trans_to_utm = Transformer.from_crs(wgs84, utm_crs)
-        _trans_to_wgs = Transformer.from_crs(utm_crs, wgs84)
-
-        def projection(x, y, inverse=False):
-            if inverse:
-                return _trans_to_wgs.transform(x, y)
-            return _trans_to_utm.transform(x, y)  # lon, lat -> x, y
+        projection = _get_fallback_projection(lon=centroid.y, lat=centroid.x)
 
     if "x_utm" not in history.columns and "latitude" in history.columns and len(history) > 0:
         if projection is not None:
@@ -1414,6 +1418,45 @@ class ETASSimulation:
             / self.target_events["zeta_plus_1"].max()
         )
 
+    def _continuation_classic_kwargs(self, magnitude_generator):
+        """Build keyword arguments for `simulate_catalog_continuation`."""
+        return {
+            "auxiliary_catalog": self.catalog,
+            "auxiliary_start": self.inversion_params.auxiliary_start,
+            "auxiliary_end": self.forecast_start_date,
+            "polygon": self.polygon,
+            "simulation_end": self.forecast_end_date,
+            "parameters": self.inversion_params.theta,
+            "mc": (
+                self.inversion_params.m_ref
+                - self.inversion_params.delta_m / 2
+            ),
+            "m_max": (
+                self.m_max + self.inversion_params.delta_m / 2
+                if self.m_max is not None
+                else None
+            ),
+            "beta_main": self.inversion_params.beta,
+            "background_lats": self.background_lats,
+            "background_lons": self.background_lons,
+            "background_probs": self.background_probs,
+            "bg_grid": self.bg_grid,
+            "bsla": self.bsla,
+            "bslo": self.bslo,
+            "gaussian_scale": self.gaussian_scale,
+            "filter_polygon": False,
+            "approx_times": self.approx_times,
+            "mfd_zones": self.mfd_zones,
+            "zones_from_latlon": self.zones_from_latlon,
+            "induced_lats": self.induced_lats,
+            "induced_lons": self.induced_lons,
+            "induced_term": self.induced_term,
+            "induced_bsla": self.induced_bsla,
+            "induced_bslo": self.induced_bslo,
+            "n_induced": self.n_induced,
+            "magnitude_generator": magnitude_generator,
+        }
+
     def simulate(
             self,
             forecast_n_days: int,
@@ -1425,13 +1468,17 @@ class ETASSimulation:
             i_start: int = 0,
             magnitude_generator=simulate_magnitudes,
             magnitude_generator_kwargs=None,
-            simulation_method=simulate_catalog_continuation,
-            simulation_method_kwargs=None):
+            continuation_mode: Literal["classic", "grid"] = "classic",
+            grid_continuation_options: Optional[GridContinuationOptions] = None,
+    ):
         if magnitude_generator_kwargs is None:
             magnitude_generator_kwargs = {}
-        magnitude_generator = resolve_magnitude_generator(magnitude_generator, **magnitude_generator_kwargs)
-        if simulation_method_kwargs is None:
-            simulation_method_kwargs = {}
+        magnitude_generator = resolve_magnitude_generator(
+            magnitude_generator, **magnitude_generator_kwargs
+        )
+        if continuation_mode == "grid":
+            if grid_continuation_options is None:
+                grid_continuation_options = GridContinuationOptions()
         start = dt.datetime.now()
         np.random.seed()
         logger.debug("induced info: {}".format(self.induced))
@@ -1452,41 +1499,29 @@ class ETASSimulation:
 
         simulations = pd.DataFrame()
         for sim_id in np.arange(i_start, n_simulations):
-            continuation = simulation_method(
-                self.catalog,
-                auxiliary_start=self.inversion_params.auxiliary_start,
-                auxiliary_end=self.forecast_start_date,
-                polygon=self.polygon,
-                simulation_end=self.forecast_end_date,
-                parameters=self.inversion_params.theta,
-                mc=(self.inversion_params.m_ref
-                    - self.inversion_params.delta_m / 2),
-                m_max=(
-                    self.m_max + self.inversion_params.delta_m / 2
-                    if self.m_max is not None
-                    else None
-                ),
-                beta_main=self.inversion_params.beta,
-                background_lats=self.background_lats,
-                background_lons=self.background_lons,
-                background_probs=self.background_probs,
-                bg_grid=self.bg_grid,
-                bsla=self.bsla,
-                bslo=self.bslo,
-                gaussian_scale=self.gaussian_scale,
-                filter_polygon=False,
-                approx_times=self.approx_times,
-                mfd_zones=self.mfd_zones,
-                zones_from_latlon=self.zones_from_latlon,
-                induced_lats=self.induced_lats,
-                induced_lons=self.induced_lons,
-                induced_term=self.induced_term,
-                induced_bsla=self.induced_bsla,
-                induced_bslo=self.induced_bslo,
-                n_induced=self.n_induced,
-                magnitude_generator=magnitude_generator,
-                **simulation_method_kwargs,
-            )
+            if continuation_mode == "grid":
+                gopts = grid_continuation_options
+                continuation = simulate_catalog_continuation_grid(
+                    self.catalog,
+                    self.forecast_start_date,
+                    self.forecast_end_date,
+                    self.polygon,
+                    self.inversion_params.theta,
+                    mc=(
+                        self.inversion_params.m_ref
+                        - self.inversion_params.delta_m / 2
+                    ),
+                    beta_main=self.inversion_params.beta,
+                    filter_polygon=False,
+                    grid_n_xy=gopts.grid_n_xy,
+                    grid_params=gopts.grid_params,
+                    projection=gopts.projection,
+                    seed=gopts.seed,
+                )
+            else:
+                continuation = simulate_catalog_continuation(
+                    **self._continuation_classic_kwargs(magnitude_generator),
+                )
 
             continuation["catalog_id"] = sim_id
             simulations = pd.concat(
@@ -1539,13 +1574,11 @@ class ETASSimulation:
         i_start: int = 0,
         magnitude_generator=simulate_magnitudes,
         magnitude_generator_kwargs=None,
-        simulation_method=simulate_catalog_continuation,
-        simulation_method_kwargs=None,
+        continuation_mode: Literal["classic", "grid"] = "classic",
+        grid_continuation_options: Optional[GridContinuationOptions] = None,
     ) -> None:
         if magnitude_generator_kwargs is None:
             magnitude_generator_kwargs = {}
-        if simulation_method_kwargs is None:
-            simulation_method_kwargs = {}
         i_end = i_start + n_simulations
 
         os.makedirs(os.path.dirname(fn_store), exist_ok=True)
@@ -1562,8 +1595,8 @@ class ETASSimulation:
                 i_start=i_start,
                 magnitude_generator=magnitude_generator,
                 magnitude_generator_kwargs=magnitude_generator_kwargs,
-                simulation_method=simulation_method,
-                simulation_method_kwargs=simulation_method_kwargs,
+                continuation_mode=continuation_mode,
+                grid_continuation_options=grid_continuation_options,
             )
 
             next(generator).to_csv(fn_store, mode="w", header=True, index=True)
@@ -1612,8 +1645,8 @@ class ETASSimulation:
                     i_start=i_next,
                     magnitude_generator=magnitude_generator,
                     magnitude_generator_kwargs=magnitude_generator_kwargs,
-                    simulation_method=simulation_method,
-                    simulation_method_kwargs=simulation_method_kwargs,
+                    continuation_mode=continuation_mode,
+                    grid_continuation_options=grid_continuation_options,
                 )
 
         # append rest of chunks to file
@@ -1630,13 +1663,11 @@ class ETASSimulation:
         info_cols: list = [],
         magnitude_generator=simulate_magnitudes,
         magnitude_generator_kwargs=None,
-        simulation_method=simulate_catalog_continuation,
-        simulation_method_kwargs=None,
+        continuation_mode: Literal["classic", "grid"] = "classic",
+        grid_continuation_options: Optional[GridContinuationOptions] = None,
     ) -> ForecastCatalog:
         if magnitude_generator_kwargs is None:
             magnitude_generator_kwargs = {}
-        if simulation_method_kwargs is None:
-            simulation_method_kwargs = {}
         store = pd.DataFrame()
         for chunk in self.simulate(
             forecast_n_days,
@@ -1647,8 +1678,8 @@ class ETASSimulation:
             info_cols,
             magnitude_generator=magnitude_generator,
             magnitude_generator_kwargs=magnitude_generator_kwargs,
-            simulation_method=simulation_method,
-            simulation_method_kwargs=simulation_method_kwargs,
+            continuation_mode=continuation_mode,
+            grid_continuation_options=grid_continuation_options,
         ):
             store = pd.concat([store, chunk], ignore_index=False)
         return ForecastCatalog(data=store)
