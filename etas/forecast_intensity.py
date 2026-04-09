@@ -37,7 +37,7 @@ def force_inversion_on_default_params(inversion_params: dict, default_params: di
 
     log_keys = [k for k in params.keys() if k.startswith('log10_')]
     for key in log_keys:
-        params[key.replace('log10_', '')] = 10**params[key]
+        params[key.replace('log10_', '')] = 10**params[key] if params[key] is not None else None
 
     params['p'] = params['omega'] + 1
     params["rho"] = params['q']-1
@@ -70,7 +70,7 @@ def make_kernels(params=None):
 
     def kappa(m, A=1):
         # Utsu
-        return A * np.exp(-params["alpha"] * (m - params["m0"]))
+        return A * np.exp(params["alpha"] * (m - params["m0"]))
 
     def g(t):
         # Time kernel
@@ -80,7 +80,7 @@ def make_kernels(params=None):
         return np.exp(-t / params["tau"])/(t + params["c"])**(1 + params["omega"])
 
     def r(dx, dy, m):
-        return (np.sqrt(dx**2 + dy**2) + params["d"] * np.exp(params["gamma"] * (m - params["m0"])))**(-(1 + params["rho"]))
+        return ((dx**2 + dy**2) + params["d"] * np.exp(params["gamma"] * (m - params["m0"])))**(-(1 + params["rho"]))
 
     def f(dx, dy, m):
         k = kappa(m)
