@@ -13,6 +13,17 @@
             "env": {
                 "MPLBACKEND": "TkAgg"
             }
+        },
+        {
+            "name": "Python: MAGNET_ETAS_pipeline",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/runnable_code/MAGNET_ETAS_pipeline.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "env": {
+                "MPLBACKEND": "TkAgg"
+            }
         }
     ]
 }

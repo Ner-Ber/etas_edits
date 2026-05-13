@@ -214,6 +214,10 @@ def _build_temp_configs_from_single_source(
           "testwindow_end": "YYYY-mm-dd HH:MM:SS"
         },
         "catalog": { "format": "etas" | "magnet", "path": "/abs/or/rel/path/to/catalog.csv" },
+        "simulate_catalog_continuation": {
+          "continuation_mode": "classic" | "grid",
+          "grid_continuation_options": { "grid_n_xy": [4, 4], "seed": 1905, ... }
+        },
         "train_and_evaluate_magnitude_prediction_model": { "learning_rate": 1e-4, ... },
         ... (other gin parameters)
       }
@@ -1717,6 +1721,39 @@ def create_reproduction_files(
     return rep_files
 
 
+def _grid_continuation_options_from_config(
+    simulation_config: dict,
+    inversion_theta: dict | None,
+) -> etas_simulation.GridContinuationOptions:
+    """
+    Build ``GridContinuationOptions`` from continuation JSON (optional
+    ``grid_continuation_options`` object). ``grid_params`` defaults to
+    ``force_inversion_on_default_params(inversion_theta)`` when omitted.
+    """
+    raw = simulation_config.get("grid_continuation_options") or {}
+    if not isinstance(raw, dict):
+        raise TypeError("grid_continuation_options must be a JSON object when present.")
+
+    grid_params = raw.get("grid_params")
+    if grid_params is None:
+        grid_params = etas_forecast_intensity.force_inversion_on_default_params(
+            inversion_theta or {}
+        )
+
+    grid_n_xy = raw.get("grid_n_xy", (4, 4))
+    if isinstance(grid_n_xy, list):
+        grid_n_xy = tuple(grid_n_xy)
+
+    return etas_simulation.GridContinuationOptions(
+        grid_n_xy=grid_n_xy,
+        grid_params=grid_params,
+        projection=raw.get("projection"),
+        seed=raw.get("seed", 1905),
+        progress_bar=raw.get("progress_bar", True),
+        kernel_variant=raw.get("kernel_variant", etas_forecast_intensity.KERNEL_VARIANT_DEFAULT),
+    )
+
+
 def run_etas_catalog_continuation(
     config_path: str,
     reproduction_files: dict[str, str | pathlib.Path] | None = None,
@@ -1725,6 +1762,14 @@ def run_etas_catalog_continuation(
 ) -> None:
     """
     Runs the ETAS simulation/continuation using the provided config.
+
+    Continuation JSON may include:
+      - ``continuation_mode``: ``\"classic\"`` or ``\"grid\"`` (default ``\"grid\"``
+        when omitted, matching prior pipeline behavior).
+      - ``grid_continuation_options``: optional object with keys such as
+        ``grid_n_xy``, ``seed``, ``grid_params``, ``progress_bar``,
+        ``kernel_variant``. When ``grid_params`` is omitted, it is built from
+        the loaded inversion via ``force_inversion_on_default_params``.
 
     Args:
         config_path: Path to the continuation config JSON.
@@ -1770,24 +1815,29 @@ def run_etas_catalog_continuation(
         magnitude_generator_kwargs["model_dir"] = str(model_dir)
         print(f"Using MAGNET model from: {model_dir}")
 
+    # continuation_mode / grid_continuation_options: set in the continuation JSON
+    # (or under pipeline overrides -> simulate_catalog_continuation -> ...).
+    continuation_mode = simulation_config.get("continuation_mode", "grid")
+    if continuation_mode not in ("classic", "grid"):
+        raise ValueError(
+            f"continuation_mode must be 'classic' or 'grid', got: {continuation_mode!r}"
+        )
 
-    # Classic ETAS continuation. For grid ETAS use e.g.:
-    grid_opts = etas_simulation.GridContinuationOptions(
-        grid_n_xy=(4, 4),
-        # grid_n_xy=(1, 1),   # debug
-        # grid_params=grid_params_from_inversion(etas_inversion_reload),  # TODO: use force_inversion_on_default_params or push to later stage?
-        grid_params=etas_forecast_intensity.force_inversion_on_default_params(etas_inversion_reload.theta),
-        seed=1905,
-    )
+    grid_opts = None
+    if continuation_mode == "grid":
+        grid_opts = _grid_continuation_options_from_config(
+            simulation_config,
+            etas_inversion_reload.theta,
+        )
+
     simulation.simulate_to_csv(
         str(fn_store_simulation),
         forecast_duration,
         1,
         magnitude_generator=magnitude_generator,
         magnitude_generator_kwargs=magnitude_generator_kwargs if magnitude_generator_kwargs else None,
-        # continuation_mode="classic",
-        continuation_mode="grid",
-        grid_continuation_options=grid_opts
+        continuation_mode=continuation_mode,
+        grid_continuation_options=grid_opts,
     )
 
     if reproduction_files:
@@ -1884,7 +1934,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--pipeline_config_json",
-        default="/home/neriberman/REPOS/etas_edits/config/pipeline_single_source.json",
+        # default="/home/neriberman/REPOS/etas_edits/config/pipeline_single_source.json",
+        default="/home/neriberman/REPOS/etas_edits/config/pipeline_single_source_repo_default.json",
         help="Single-source pipeline config JSON (templates + overrides).",
     )
     args = parser.parse_args()
