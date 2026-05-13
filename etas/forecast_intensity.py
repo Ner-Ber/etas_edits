@@ -140,15 +140,15 @@ def return_local_rate(history, x, y, kernels=None):
 
 
 def rate_at_t_all_grid(
-    t_days,
-    x_flat,
-    y_flat,
-    h_x,
-    h_y,
-    h_m,
-    h_t_days,
-    kernels=None,
-):
+    t_days: float,
+    x_flat: np.ndarray,
+    y_flat: np.ndarray,
+    h_x: np.ndarray,
+    h_y: np.ndarray,
+    h_m: np.ndarray,
+    h_t_days: np.ndarray,
+    kernels: dict | None = None,
+) -> np.ndarray:
     """
     Compute ETAS intensity at time t (in days) for all grid points.
 
@@ -186,6 +186,58 @@ def rate_at_t_all_grid(
         g_vals = g_fn(t_days - t_k_days)
         local_intensity += kappa_val * f_vals * g_vals
 
+    mu_val = mu_fn(x_flat[0], y_flat[0])
+    return mu_val + local_intensity
+
+
+def rate_time_lambdas_on_grid(
+    t_days: float,
+    x_flat: np.ndarray,
+    y_flat: np.ndarray,
+    h_x: np.ndarray,
+    h_y: np.ndarray,
+    h_m: np.ndarray,
+    h_t_days: np.ndarray,
+    kernels: dict | None = None,
+) -> np.ndarray:
+    """
+    Computes the lambda_i(t) functions for all grid points.
+
+    Args:
+        t_days: Current time on the same absolute scale as h_t_days (see below).
+            When history times are Unix epoch seconds, pass t_sec / 86400.
+        x_flat: 1D array of x (UTM) for each grid point.
+        y_flat: 1D array of y (UTM) for each grid point.
+        h_x, h_y, h_m: 1D arrays from history (x_utm, y_utm, magnitude).
+        h_t_days: History event times on the **same** absolute scale as t_days
+            (typically Unix epoch seconds divided by 86400). Then
+            ``t_days - h_t_days[k]`` equals elapsed time in **days** since event k,
+            which is what the temporal kernel g expects.
+        kernels: Dict from make_kernels(); if None, uses make_kernels().
+
+    Returns:
+        1D array of lambda_i(t) functions for all grid points.
+    """
+    if kernels is None:
+        kernels = make_kernels()
+    kappa_fn = kernels["kappa"]
+    g_fn = kernels["g"]
+    f_fn = kernels["f"]
+    mu_fn = kernels["mu"]
+
+    n_grid = len(x_flat)
+    local_intensity = np.zeros(n_grid)
+
+    lambda_i_list = []
+    for k in range(len(h_x)):
+        x_k, y_k, m_k, t_k_days = h_x[k], h_y[k], h_m[k], h_t_days[k]
+        dx = x_flat - x_k
+        dy = y_flat - y_k
+        kappa_val = kappa_fn(m_k)
+        f_vals = f_fn(dx, dy, m_k)
+        g_vals = g_fn(t_days - t_k_days)
+        local_intensity += kappa_val * f_vals * g_vals
+        lambda_i_list.append(local_intensity)
     mu_val = mu_fn(x_flat[0], y_flat[0])
     return mu_val + local_intensity
 

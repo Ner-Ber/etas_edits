@@ -33,7 +33,7 @@ from etas.inversion import (ETASParameterCalculation, branching_integral,
                             parameter_dict2array, round_half_up, to_days,
                             upper_gamma_ext)
 from etas.mc_b_est import simulate_magnitudes, simulate_magnitudes_from_zone, MAGNET_magnitude
-from etas.grid_simulation import run_grid_etas_simulation
+from etas import grid_simulation
 from etas.forecast_intensity import DEFAULT_PARAMS as GRID_DEFAULT_PARAMS
 
 try:
@@ -54,6 +54,7 @@ class GridContinuationOptions:
     grid_params: Optional[dict] = None
     projection: object = None
     seed: Optional[int] = None
+    progress_bar: bool = True
 
 
 def _to_seconds(t):
@@ -1141,6 +1142,7 @@ def simulate_catalog_continuation_grid(
     projection=None,
     seed=None,
     filter_polygon=True,
+    progress_bar=True,
 ):
     """
     Forecast-period catalog continuation using grid-based ETAS (thinning).
@@ -1163,6 +1165,8 @@ def simulate_catalog_continuation_grid(
         RNG seed for the grid simulation run.
     filter_polygon : bool
         If True, clip output to ``polygon``.
+    progress_bar : bool
+        If True, show a tqdm bar for simulated time in the grid inversion loop.
     """
 
     if grid_params is None:
@@ -1236,7 +1240,22 @@ def simulate_catalog_continuation_grid(
             "time": [], "magnitude": [], "x_utm": [], "y_utm": [],
         })
 
-    history = run_grid_etas_simulation(
+    # history = grid_simulation.run_etas_on_grid_thinning(
+    # history = grid_simulation.run_etas_on_grid_poisson_sampling(
+    #     history,
+    #     start_sec,
+    #     end_sec,
+    #     x_flat,
+    #     y_flat,
+    #     params=grid_params,
+    #     in_place=False,
+    #     projection=projection,
+    #     progress_bar=False,
+    #     log_interval=0,
+    #     seed=seed,
+    # )
+    # history = grid_simulation.run_etas_on_grid_inversion_sampling(
+    history = grid_simulation.run_etas_per_grid_point_inversion(
         history,
         start_sec,
         end_sec,
@@ -1245,7 +1264,7 @@ def simulate_catalog_continuation_grid(
         params=grid_params,
         in_place=False,
         projection=projection,
-        progress_bar=False,
+        progress_bar=progress_bar,
         log_interval=0,
         seed=seed,
     )
@@ -1478,7 +1497,7 @@ class ETASSimulation:
         )
         if continuation_mode == "grid":
             if grid_continuation_options is None:
-                grid_continuation_options = GridContinuationOptions()
+                grid_continuation_options = GridContinuationOptions(seed=1905)
         start = dt.datetime.now()
         np.random.seed()
         logger.debug("induced info: {}".format(self.induced))
@@ -1517,6 +1536,7 @@ class ETASSimulation:
                     grid_params=gopts.grid_params,
                     projection=gopts.projection,
                     seed=gopts.seed,
+                    progress_bar=gopts.progress_bar,
                 )
             else:
                 continuation = simulate_catalog_continuation(
