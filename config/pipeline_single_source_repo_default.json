@@ -12,9 +12,14 @@
             "timewindow_end": "2007-01-01 00:00:00",
             "testwindow_end": "2021-01-01 00:00:00"
         },
+        "simulate_catalog_continuation": {
+            "forecast_duration": 1000,
+            "magnitude_generator": "simulate_magnitudes",
+            "continuation_mode": "classic"
+        },
         "catalog": {
             "format": "etas",
-            "path": "../input_data/example_catalog.csv"
+            "path": "/home/neriberman/REPOS/etas_edits/input_data/example_catalog.csv"
         },
         "shape_coords": "/home/neriberman/REPOS/etas_edits/input_data/california_shape.npy",
         "forced_completeness": 3.6

@@ -6,6 +6,7 @@
         "etas_catalog_continuation_config_json_path": "/home/neriberman/REPOS/etas_edits/config/simulate_catalog_continuation_config_hauksson_etas_pipeline_test.json"
     },
     "overrides": {
+        "run_magnet_training": true,
         "set_times": {
             "auxiliary_start": "1981-01-01 00:00:00",
             "timewindow_start": "1987-01-01 00:00:00",
