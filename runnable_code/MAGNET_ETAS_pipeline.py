@@ -216,8 +216,10 @@ def _build_temp_configs_from_single_source(
         "catalog": { "format": "etas" | "magnet", "path": "/abs/or/rel/path/to/catalog.csv" },
         "simulate_catalog_continuation": {
           "continuation_mode": "classic" | "grid",
+          "magnitude_generator": "simulate_magnitudes" | "MAGNET_magnitude" | ...,
           "grid_continuation_options": { "grid_n_xy": [4, 4], "seed": 1905, ... }
         },
+        "run_magnet_training": true | false,
         "train_and_evaluate_magnitude_prediction_model": { "learning_rate": 1e-4, ... },
         ... (other gin parameters)
       }
@@ -306,9 +308,10 @@ def _build_temp_configs_from_single_source(
         )
         tmp_etas_catalog_rel = str(persistent_etas_catalog)
     elif catalog_format == "etas":
-        # User provided ETAS catalog; create MAGNET catalog from it (already done above)
-        # Use the provided ETAS catalog (relative to temp config)
-        tmp_etas_catalog_rel = os.path.relpath(catalog_path, tmp_cfg_dir)
+        # User-provided ETAS catalog: store an absolute path. ``path_rel_to_file`` only
+        # passes through truly absolute paths; ``relpath`` to tmp would yield ``../..``
+        # chains that get wrongly joined relative to ``etas/utility_functions.py``.
+        tmp_etas_catalog_rel = str(catalog_path.resolve())
     else:
         raise ValueError(f"Unsupported catalog.format: {catalog_format} (expected 'magnet' or 'etas')")
 
@@ -1956,35 +1959,51 @@ if __name__ == "__main__":
 
     print(f"Using temp pipeline workspace: {temp_paths['tmp_root']}")
 
-    # ---- 1. MAGNET stages ----------------------------------------------------
+    with open(etas_catalog_continuation_config_json_path, "r") as _cf:
+        _continuation_early = json.load(_cf)
+    _magnitude_gen = _continuation_early.get("magnitude_generator", "simulate_magnitudes")
+
+    with open(args.pipeline_config_json, "r") as _pf:
+        _pipeline_early = json.load(_pf)
+    _overrides_early = _pipeline_early.get("overrides", {})
+    if "run_magnet_training" in _overrides_early:
+        skip_magnet_training = not bool(_overrides_early["run_magnet_training"])
+    else:
+        # No trained MAGNET checkpoint is needed unless continuation uses MAGNET_magnitude.
+        skip_magnet_training = _magnitude_gen != "MAGNET_magnitude"
+
     trained_models_base_dir = pathlib.Path("/home/neriberman/REPOS/eq_mag_prediction/results/trained_models")
 
-    # Calculate model ID early to determine features directory
-    model_id = _get_model_id_from_gin_config(local_gin_config_path)
-    if not model_id:
-        raise ValueError(f"Could not generate model ID from {local_gin_config_path}")
+    if skip_magnet_training:
+        print(
+            "Skipping MAGNET feature computation and training "
+            f"(magnitude_generator={_magnitude_gen!r}; set overrides.run_magnet_training=true to force training)."
+        )
+        model_dir = None
+        model_id = "no_magnet"
+    else:
+        # ---- 1. MAGNET stages ----------------------------------------------------
+        model_id = _get_model_id_from_gin_config(local_gin_config_path)
+        if not model_id:
+            raise ValueError(f"Could not generate model ID from {local_gin_config_path}")
 
-    model_dir = trained_models_base_dir / model_id
-    features_dir = model_dir / "features_scalers_encoders"
-    features_dir.mkdir(parents=True, exist_ok=True)
+        model_dir = trained_models_base_dir / model_id
+        features_dir = model_dir / "features_scalers_encoders"
+        features_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Features will be cached in: {features_dir}")
+        print(f"Features will be cached in: {features_dir}")
 
-    run_feature_computation(local_gin_config_path, cache_dir=features_dir)
+        run_feature_computation(local_gin_config_path, cache_dir=features_dir)
 
-    # Pass trained_models_base_dir explicitly to avoid mismatch if default changes
-    model_dir_str = run_magnet_trainer_or_load(
-        local_gin_config_path, 
-        model_dir,
-        cache_dir=features_dir,
-        gin_bindings="train_and_evaluate_magnitude_prediction_model.scaler_saving_dir=None",
-
-    )
-    model_dir = pathlib.Path(model_dir_str)
-    print(f"Using model from: {model_dir}")
-
-    # Extract Model ID (assumes model_dir is ".../trained_models/{model_id}")
-    model_id = pathlib.Path(model_dir).name
+        model_dir_str = run_magnet_trainer_or_load(
+            local_gin_config_path,
+            model_dir,
+            cache_dir=features_dir,
+            gin_bindings="train_and_evaluate_magnitude_prediction_model.scaler_saving_dir=None",
+        )
+        model_dir = pathlib.Path(model_dir_str)
+        print(f"Using model from: {model_dir}")
+        model_id = pathlib.Path(model_dir).name
 
     # ---- 2. ETAS Inversion ---------------------------------------------------
     fn_parameters_json = run_etas_inversion(
