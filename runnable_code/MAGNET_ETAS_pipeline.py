@@ -1774,8 +1774,10 @@ def run_etas_catalog_continuation(
     # Classic ETAS continuation. For grid ETAS use e.g.:
     grid_opts = etas_simulation.GridContinuationOptions(
         grid_n_xy=(4, 4),
+        # grid_n_xy=(1, 1),   # debug
         # grid_params=grid_params_from_inversion(etas_inversion_reload),  # TODO: use force_inversion_on_default_params or push to later stage?
-        grid_params=etas_forecast_intensity.force_inversion_on_default_params(etas_inversion_reload.theta)
+        grid_params=etas_forecast_intensity.force_inversion_on_default_params(etas_inversion_reload.theta),
+        seed=1905,
     )
     simulation.simulate_to_csv(
         str(fn_store_simulation),
