@@ -47,21 +47,20 @@ def force_inversion_on_default_params(inversion_params: dict, default_params: di
 
 
 
-def make_kernels(params=None):
+# Kernel factories: ``make_kernels(..., variant=...)`` dispatches here.
+KERNEL_VARIANT_DEFAULT = "default"
+KERNEL_VARIANT_ALTERNATE = "alternate"
+
+
+def _make_kernels_default(params):
     """
-    Build kernel callables from a parameter dict.
+    Current production kernels (same formulas as before extraction).
 
     Args:
-        params: Dict with keys mu, beta, alpha, gamma, c, p, D, q, m0.
-                If None, uses DEFAULT_PARAMS.
+        params: Dict with keys used by mu, kappa, g, spatial helpers, etc.
 
     Returns:
         Dict with keys: mu, kappa, g, f, summand.
-        - mu(x, y): background rate (may ignore x, y if constant)
-        - kappa(m, A=1): productivity
-        - g(t): temporal kernel (t in days)
-        - f(dx, dy, m): spatial kernel (dx, dy from parent)
-        - summand(dx, dy, m, t): kappa(m) * f(dx, dy, m) * g(t)
     """
 
     def mu(x, y):
@@ -100,6 +99,53 @@ def make_kernels(params=None):
         "f": r,
         "summand": summand,
     }
+
+
+def _make_kernels_alternate(params):
+    """
+    Placeholder second kernel set. Implement here or delegate; must return the
+    same dict keys as ``_make_kernels_default`` (mu, kappa, g, f, summand).
+    """
+    raise NotImplementedError(
+        "Kernel variant {!r} is not implemented yet; fill in _make_kernels_alternate."
+        .format(KERNEL_VARIANT_ALTERNATE)
+    )
+
+
+def make_kernels(params=None, variant: str = KERNEL_VARIANT_DEFAULT):
+    """
+    Build kernel callables from a parameter dict.
+
+    Args:
+        params: Dict with keys mu, beta, alpha, gamma, c, p, D, q, m0, etc.
+                If ``None``, uses a copy of ``DEFAULT_PARAMS``.
+        variant: Which kernel factory to use. ``KERNEL_VARIANT_DEFAULT`` (default)
+            is the current implementation; ``KERNEL_VARIANT_ALTERNATE`` is a
+            hook for a second formulation (see ``_make_kernels_alternate``).
+
+    Returns:
+        Dict with keys: mu, kappa, g, f, summand.
+        - mu(x, y): background rate (may ignore x, y if constant)
+        - kappa(m, A=1): productivity
+        - g(t): temporal kernel (t in days)
+        - f(dx, dy, m): spatial kernel (dx, dy from parent)
+        - summand(dx, dy, m, t): kappa(m) * f(dx, dy, m) * g(t)
+    """
+    if params is None:
+        params = DEFAULT_PARAMS.copy()
+
+    v = variant.strip().lower() if isinstance(variant, str) else str(variant)
+    if v == KERNEL_VARIANT_DEFAULT:
+        return _make_kernels_default(params)
+    if v == KERNEL_VARIANT_ALTERNATE:
+        return _make_kernels_alternate(params)
+    raise ValueError(
+        "Unknown kernel variant {!r}; expected {!r} or {!r}.".format(
+            variant,
+            KERNEL_VARIANT_DEFAULT,
+            KERNEL_VARIANT_ALTERNATE,
+        )
+    )
 
 
 def return_local_rate(history, x, y, kernels=None):

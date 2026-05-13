@@ -35,6 +35,7 @@ from etas.inversion import (ETASParameterCalculation, branching_integral,
 from etas.mc_b_est import simulate_magnitudes, simulate_magnitudes_from_zone, MAGNET_magnitude
 from etas import grid_simulation
 from etas.forecast_intensity import DEFAULT_PARAMS as GRID_DEFAULT_PARAMS
+from etas.forecast_intensity import KERNEL_VARIANT_DEFAULT
 
 try:
     import pyproj
@@ -55,6 +56,7 @@ class GridContinuationOptions:
     projection: object = None
     seed: Optional[int] = None
     progress_bar: bool = True
+    kernel_variant: str = KERNEL_VARIANT_DEFAULT
 
 
 def _to_seconds(t):
@@ -1143,6 +1145,7 @@ def simulate_catalog_continuation_grid(
     seed=None,
     filter_polygon=True,
     progress_bar=True,
+    kernel_variant=KERNEL_VARIANT_DEFAULT,
 ):
     """
     Forecast-period catalog continuation using grid-based ETAS (thinning).
@@ -1167,6 +1170,9 @@ def simulate_catalog_continuation_grid(
         If True, clip output to ``polygon``.
     progress_bar : bool
         If True, show a tqdm bar for simulated time in the grid inversion loop.
+    kernel_variant : str
+        Passed to ``forecast_intensity.make_kernels(..., variant=...)`` for grid
+        inversion (e.g. ``KERNEL_VARIANT_DEFAULT`` or ``KERNEL_VARIANT_ALTERNATE``).
     """
 
     if grid_params is None:
@@ -1267,6 +1273,7 @@ def simulate_catalog_continuation_grid(
         progress_bar=progress_bar,
         log_interval=0,
         seed=seed,
+        kernel_variant=kernel_variant,
     )
 
     new_mask = history["time"] >= start_sec
@@ -1537,6 +1544,7 @@ class ETASSimulation:
                     projection=gopts.projection,
                     seed=gopts.seed,
                     progress_bar=gopts.progress_bar,
+                    kernel_variant=gopts.kernel_variant,
                 )
             else:
                 continuation = simulate_catalog_continuation(

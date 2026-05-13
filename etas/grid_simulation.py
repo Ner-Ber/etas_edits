@@ -438,7 +438,7 @@ def run_etas_per_grid_point_inversion(
     log_interval=100,
     seed=None,
     return_full_catalog=True,
-    # SECONDS_PER_DAY=86400.0
+    kernel_variant=etas_forecast_intensity.KERNEL_VARIANT_DEFAULT,
 ):
     """
     Per-grid-point inversion/thinning ETAS simulation on a spatial grid.
@@ -457,12 +457,14 @@ def run_etas_per_grid_point_inversion(
             ``history_original`` and simulated events. If False, return only the
             simulated rows. The merge for the full catalog is done **once** after
             the loop, not while iterating.
+        kernel_variant: Passed to ``forecast_intensity.make_kernels`` (e.g.
+            ``KERNEL_VARIANT_DEFAULT`` or ``KERNEL_VARIANT_ALTERNATE``).
     """
     if params is None:
         params = etas_forecast_intensity.DEFAULT_PARAMS.copy() 
     if seed is not None:
         np.random.seed(seed)
-    kernels = etas_forecast_intensity.make_kernels(params)
+    kernels = etas_forecast_intensity.make_kernels(params, variant=kernel_variant)
 
     if not in_place:
         catalog = history.copy()
