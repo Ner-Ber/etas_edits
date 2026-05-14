@@ -1175,7 +1175,9 @@ def simulate_catalog_continuation_grid(
         Number of grid nodes in x and y (UTM / projected space).
     grid_params : dict, optional
         Passed to ``run_grid_etas_simulation``; if None, built from ``parameters``
-        and ``mc`` / ``beta_main``.
+        and ``mc`` / ``beta_main``. When provided, keys are copied and ``m0`` is
+        always overwritten by ``mc`` so magnitudes align with the inversion catalog
+        completeness used in ``ETASSimulation.simulate``.
     projection : callable, optional
         ``(lon, lat) -> (x, y)`` forward transform; if None, a fallback is used
         when pyproj is available.
@@ -1191,12 +1193,19 @@ def simulate_catalog_continuation_grid(
     """
     if grid_params is None:
         grid_params = GRID_DEFAULT_PARAMS.copy()
-        grid_params["m0"] = mc
         grid_params["beta"] = (
             beta_main if np.isscalar(beta_main) else np.log(10)
         )
         if parameters and "log10_mu" in parameters:
             grid_params["mu"] = np.power(10, parameters["log10_mu"])
+    else:
+        grid_params = dict(grid_params)
+    # Inversion JSON / ``force_inversion_on_default_params`` often leaves ``m0``
+    # at the forecast_intensity default (1) because theta uses ``m_ref``, not
+    # ``m0``. ``mc`` here matches ``ETASSimulation.simulate``'s magnitude cutoff
+    # (m_ref - delta_m/2), so pin ``m0`` for G-R sampling in the grid simulator.
+    if mc is not None:
+        grid_params["m0"] = float(mc)
 
     simulation_trace.log_etas_params(
         "simulate_catalog_continuation_grid",
@@ -1303,7 +1312,11 @@ def simulate_catalog_continuation_grid(
     new_mask = history["time"] >= start_sec
     new_ev = history.loc[new_mask].copy()
     new_ev["time"] = pd.to_datetime(new_ev["time"], unit="s")
-    if "latitude" not in new_ev.columns and projection is not None:
+    # Forecast rows come from grid_simulation with x_utm/y_utm only. `history` can still
+    # carry empty latitude/longitude columns inherited from the auxiliary catalog; the old
+    # guard `if "latitude" not in new_ev.columns` then skipped inverse projection, leaving
+    # NaN lat/lon so ETASSimulation.simulate(..., filter_polygon=True) dropped every event.
+    if projection is not None and len(new_ev) > 0 and "x_utm" in new_ev.columns:
         lonlat = np.array([
             projection(new_ev["x_utm"].values[i], new_ev["y_utm"].values[i], inverse=True)
             for i in range(len(new_ev))
@@ -1696,7 +1709,7 @@ class ETASSimulation:
                 (n_simulations - 1) // chunksize) * chunksize
             if last_index > max_store_incomplete:
                 logger.debug("all done, nothing left to do.")
-                exit()
+                return
             else:
                 chunks_done = last_index // chunksize
                 if last_index % chunksize > 0:
