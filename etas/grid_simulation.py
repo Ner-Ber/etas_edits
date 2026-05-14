@@ -18,6 +18,7 @@ from scipy import integrate
 from scipy import optimize
 
 import etas.forecast_intensity as etas_forecast_intensity
+from etas import simulation_trace
 
 logger = logging.getLogger(__name__)
 
@@ -439,6 +440,7 @@ def run_etas_per_grid_point_inversion(
     seed=None,
     return_full_catalog=True,
     kernel_variant=etas_forecast_intensity.KERNEL_VARIANT_DEFAULT,
+    max_forecast_events=None,
 ):
     """
     Per-grid-point inversion/thinning ETAS simulation on a spatial grid.
@@ -461,7 +463,16 @@ def run_etas_per_grid_point_inversion(
             ``KERNEL_VARIANT_DEFAULT`` or ``KERNEL_VARIANT_ALTERNATE``).
     """
     if params is None:
-        params = etas_forecast_intensity.DEFAULT_PARAMS.copy() 
+        params = etas_forecast_intensity.DEFAULT_PARAMS.copy()
+    simulation_trace.log_etas_params(
+        "grid_simulation.run_etas_per_grid_point_inversion",
+        params,
+        start_forecast=float(start_forecast),
+        end_forecast=float(end_forecast),
+        n_grid_points=int(len(x_flat)),
+        max_forecast_events=max_forecast_events,
+        kernel_variant=kernel_variant,
+    )
     if seed is not None:
         np.random.seed(seed)
     kernels = etas_forecast_intensity.make_kernels(params, variant=kernel_variant)
@@ -663,6 +674,21 @@ def run_etas_per_grid_point_inversion(
 
         t = t_star
         events_generated += 1
+
+        evt_log = new_event.copy()
+        evt_log["time"] = pd.to_datetime(evt_log["time"], unit="s", utc=True)
+        evt_log["latitude"] = np.nan
+        evt_log["longitude"] = np.nan
+        simulation_trace.log_events_batch(
+            "grid_simulation.run_etas_per_grid_point_inversion",
+            evt_log,
+        )
+
+        if max_forecast_events is not None and max_forecast_events > 0:
+            if events_generated >= max_forecast_events:
+                if pbar:
+                    pbar.update(max(0.0, end_forecast - t_star))
+                break
 
     if debug_file is not None:
         debug_file.close()
