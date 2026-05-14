@@ -393,10 +393,12 @@ def run_etas_on_grid_inversion_sampling(
         new_x = x_flat[grid_idx]
         new_y = y_flat[grid_idx]
 
-        # Magnitude sampling (Standard Gutenberg-Richter)
+        # Magnitude sampling (Standard Gutenberg-Richter); use ``m0`` when present
+        # (ETAS grid params) so magnitudes stay above the catalog completeness used
+        # in ``ETASSimulation.simulate`` filtering.
         b_value = params.get('b', 1.0)
-        m_ref = params.get('m_ref', 2.0)
-        new_m = np.random.exponential(1.0 / (b_value * np.log(10))) + m_ref
+        m0 = params.get("m0", params.get("m_ref", 2.0))
+        new_m = np.random.exponential(1.0 / (b_value * np.log(10))) + m0
 
         # Update history
         new_event = pd.DataFrame({
@@ -605,9 +607,12 @@ def run_etas_per_grid_point_inversion(
             new_x = x_flat[min_idx]
             new_y = y_flat[min_idx]
             b_value = params.get('b', 1.0)
-            m_ref = params.get('m_ref', 2.0)
+            # ETAS grid params use ``m0`` (completeness / lower magnitude bound); older code
+            # only read ``m_ref`` and defaulted to 2.0, producing sub-m_ref magnitudes that
+            # ``ETASSimulation.simulate`` then filtered out entirely.
+            m0 = params.get("m0", params.get("m_ref", 2.0))
             new_m = float(
-                np.random.exponential(1.0 / (b_value * np.log(10))) + m_ref
+                np.random.exponential(1.0 / (b_value * np.log(10))) + m0
             )
             new_event_payload = {
                 "time": t_star,

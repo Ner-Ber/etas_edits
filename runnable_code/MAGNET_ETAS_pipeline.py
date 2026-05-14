@@ -1797,6 +1797,14 @@ def run_etas_catalog_continuation(
 
     if fn_store_simulation.exists() and force_continuation_calc:
         print(f"Catalog continuation output exists, but force_continuation_calc=True. Rerunning...")
+        # simulate_to_csv() resumes from an existing file when present; with n_simulations=1
+        # and no catalog_id column that leaves last_index=-1, resume can set i_start=1 and
+        # run zero simulations (no progress bar, instant DONE). Remove stale output first.
+        try:
+            fn_store_simulation.unlink()
+            print(f"Removed existing file: {fn_store_simulation}")
+        except OSError as exc:
+            print(f"Warning: could not remove existing continuation CSV ({exc}); results may be wrong.")
 
     forecast_duration = simulation_config["forecast_duration"]
     fn_store_simulation.parent.mkdir(parents=True, exist_ok=True)   # Ensure the output directory exists
@@ -2031,8 +2039,19 @@ if __name__ == "__main__":
     print(f"Inversion ID: {inversion_id}")
     # ---- 3. Catalog Continuation ---------------------------------------------
 
-    # Construct the specific subfolder: outputs/continuation/{model_id}_{inversion_id}
-    continuation_subfolder = default_output_dir / "continuation" / f"{model_id}_{inversion_id}"
+    _continuation_mode = _continuation_early.get("continuation_mode", "classic")
+    if _continuation_mode not in ("classic", "grid"):
+        raise ValueError(
+            f"continuation_mode must be 'classic' or 'grid', got: {_continuation_mode!r}"
+        )
+
+    # Separate output per continuation mode so back-to-back classic/grid runs do not
+    # overwrite the same simulated_catalog.csv (same model_id + inversion_id).
+    continuation_subfolder = (
+        default_output_dir
+        / "continuation"
+        / f"{model_id}_{inversion_id}_{_continuation_mode}"
+    )
     continuation_subfolder.mkdir(parents=True, exist_ok=True)
 
     # Define the final output file path

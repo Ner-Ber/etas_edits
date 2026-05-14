@@ -13,7 +13,7 @@ Usage:
 Optional:
   python runnable_code/run_magnet_continuation_classic_then_grid.py \\
     --repo-root /path/to/etas_edits \\
-    --max-forecast-events 5000
+    --max-forecast-events 1000
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ def main() -> int:
     parser.add_argument(
         "--max-forecast-events",
         type=int,
-        default=5000,
+        default=1000,
         help="Stop continuation after this many forecast-period events (or forecast end, whichever first).",
     )
     args = parser.parse_args()
