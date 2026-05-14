@@ -1833,6 +1833,10 @@ def run_etas_catalog_continuation(
             etas_inversion_reload.theta,
         )
 
+    max_forecast_events = simulation_config.get("max_forecast_events")
+    if max_forecast_events is not None:
+        max_forecast_events = int(max_forecast_events)
+
     simulation.simulate_to_csv(
         str(fn_store_simulation),
         forecast_duration,
@@ -1841,6 +1845,7 @@ def run_etas_catalog_continuation(
         magnitude_generator_kwargs=magnitude_generator_kwargs if magnitude_generator_kwargs else None,
         continuation_mode=continuation_mode,
         grid_continuation_options=grid_opts,
+        max_forecast_events=max_forecast_events,
     )
 
     if reproduction_files:

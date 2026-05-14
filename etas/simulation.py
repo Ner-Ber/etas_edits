@@ -34,6 +34,7 @@ from etas.inversion import (ETASParameterCalculation, branching_integral,
                             upper_gamma_ext)
 from etas.mc_b_est import simulate_magnitudes, simulate_magnitudes_from_zone, MAGNET_magnitude
 from etas import grid_simulation
+from etas import simulation_trace
 from etas.forecast_intensity import DEFAULT_PARAMS as GRID_DEFAULT_PARAMS
 from etas.forecast_intensity import KERNEL_VARIANT_DEFAULT
 
@@ -63,6 +64,7 @@ def _to_seconds(t):
     if hasattr(t, "timestamp"):
         return t.timestamp()
     return pd.Timestamp(t).timestamp()
+
 
 def _get_fallback_projection(lon, lat):
     """Expects floats or single-element arrays."""
@@ -437,6 +439,8 @@ def generate_background_events(
 ):
     from etas.inversion import polygon_surface, to_days
 
+    simulation_trace.log_etas_params("generate_background_events", parameters)
+
     theta = parameter_dict2array(parameters)
     theta_without_mu = theta[2:]
 
@@ -539,8 +543,7 @@ def generate_background_events(
         zones = zones_from_latlon(catalog["latitude"], catalog["longitude"])
         catalog["magnitude"] = simulate_magnitudes_from_zone(zones, mfd_zones)
     else:
-        # catalog["magnitude"] = magnitude_generator(
-        catalog["magnitude"] = simulate_magnitudes(
+        catalog["magnitude"] = magnitude_generator(
             n_background,
             beta=beta,
             mc=mc - delta_m / 2,
@@ -569,7 +572,9 @@ def generate_background_events(
     catalog["n_aftershocks"] = np.random.poisson(
         lam=catalog["expected_n_aftershocks"])
 
-    return catalog.drop("geometry", axis=1)
+    out = catalog.drop("geometry", axis=1)
+    simulation_trace.log_events_batch("generate_background_events", out)
+    return out
 
 
 def generate_aftershocks(
@@ -591,6 +596,8 @@ def generate_aftershocks(
     magnitude_generator=simulate_magnitudes,
     catalog=None,
 ):
+    simulation_trace.log_etas_params("generate_aftershocks", parameters)
+
     theta = parameter_dict2array(parameters)
     theta_without_mu = theta[2:]
 
@@ -715,6 +722,7 @@ def generate_aftershocks(
     aadf["n_aftershocks"] = np.random.poisson(
         lam=aadf["expected_n_aftershocks"])
 
+    simulation_trace.log_events_batch("generate_aftershocks", aadf)
     return aadf
 
 
@@ -993,6 +1001,12 @@ def simulate_catalog_continuation(
     """
     magnitude_generator = resolve_magnitude_generator(magnitude_generator)
 
+    simulation_trace.log_etas_params(
+        "simulate_catalog_continuation",
+        parameters,
+        mc=float(mc) if mc is not None else None,
+    )
+
     # preparing betas
     if beta_aftershock is None:
         beta_aftershock = beta_main
@@ -1146,6 +1160,7 @@ def simulate_catalog_continuation_grid(
     filter_polygon=True,
     progress_bar=True,
     kernel_variant=KERNEL_VARIANT_DEFAULT,
+    max_forecast_events=None,
 ):
     """
     Forecast-period catalog continuation using grid-based ETAS (thinning).
@@ -1174,7 +1189,6 @@ def simulate_catalog_continuation_grid(
         Passed to ``forecast_intensity.make_kernels(..., variant=...)`` for grid
         inversion (e.g. ``KERNEL_VARIANT_DEFAULT`` or ``KERNEL_VARIANT_ALTERNATE``).
     """
-
     if grid_params is None:
         grid_params = GRID_DEFAULT_PARAMS.copy()
         grid_params["m0"] = mc
@@ -1183,6 +1197,15 @@ def simulate_catalog_continuation_grid(
         )
         if parameters and "log10_mu" in parameters:
             grid_params["mu"] = np.power(10, parameters["log10_mu"])
+
+    simulation_trace.log_etas_params(
+        "simulate_catalog_continuation_grid",
+        parameters,
+        grid_params=grid_params,
+        grid_n_xy=grid_n_xy,
+        max_forecast_events=max_forecast_events,
+        mc=float(mc) if mc is not None else None,
+    )
 
     start_sec = _to_seconds(auxiliary_end)
     end_sec = _to_seconds(simulation_end)
@@ -1274,6 +1297,7 @@ def simulate_catalog_continuation_grid(
         log_interval=0,
         seed=seed,
         kernel_variant=kernel_variant,
+        max_forecast_events=max_forecast_events,
     )
 
     new_mask = history["time"] >= start_sec
@@ -1496,6 +1520,7 @@ class ETASSimulation:
             magnitude_generator_kwargs=None,
             continuation_mode: Literal["classic", "grid"] = "classic",
             grid_continuation_options: Optional[GridContinuationOptions] = None,
+            max_forecast_events: int | None = None,
     ):
         if magnitude_generator_kwargs is None:
             magnitude_generator_kwargs = {}
@@ -1523,6 +1548,23 @@ class ETASSimulation:
             days=forecast_n_days
         )
 
+        simulation_trace.log_etas_params(
+            "ETASSimulation.simulate",
+            self.inversion_params.theta,
+            forecast_n_days=int(forecast_n_days),
+            forecast_start=str(self.forecast_start_date),
+            forecast_end=str(self.forecast_end_date),
+            continuation_mode=continuation_mode,
+            n_simulations=int(n_simulations),
+            m_threshold=float(m_threshold) if m_threshold is not None else None,
+            max_forecast_events=max_forecast_events,
+            magnitude_generator=(
+                getattr(magnitude_generator, "__name__", None)
+                or getattr(getattr(magnitude_generator, "func", None), "__name__", None)
+                or str(magnitude_generator)
+            ),
+        )
+
         simulations = pd.DataFrame()
         for sim_id in np.arange(i_start, n_simulations):
             if continuation_mode == "grid":
@@ -1545,6 +1587,7 @@ class ETASSimulation:
                     seed=gopts.seed,
                     progress_bar=gopts.progress_bar,
                     kernel_variant=gopts.kernel_variant,
+                    max_forecast_events=max_forecast_events,
                 )
             else:
                 continuation = simulate_catalog_continuation(
@@ -1604,6 +1647,7 @@ class ETASSimulation:
         magnitude_generator_kwargs=None,
         continuation_mode: Literal["classic", "grid"] = "classic",
         grid_continuation_options: Optional[GridContinuationOptions] = None,
+        max_forecast_events: int | None = None,
     ) -> None:
         if magnitude_generator_kwargs is None:
             magnitude_generator_kwargs = {}
@@ -1625,6 +1669,7 @@ class ETASSimulation:
                 magnitude_generator_kwargs=magnitude_generator_kwargs,
                 continuation_mode=continuation_mode,
                 grid_continuation_options=grid_continuation_options,
+                max_forecast_events=max_forecast_events,
             )
 
             next(generator).to_csv(fn_store, mode="w", header=True, index=True)
@@ -1675,6 +1720,7 @@ class ETASSimulation:
                     magnitude_generator_kwargs=magnitude_generator_kwargs,
                     continuation_mode=continuation_mode,
                     grid_continuation_options=grid_continuation_options,
+                    max_forecast_events=max_forecast_events,
                 )
 
         # append rest of chunks to file
@@ -1693,6 +1739,7 @@ class ETASSimulation:
         magnitude_generator_kwargs=None,
         continuation_mode: Literal["classic", "grid"] = "classic",
         grid_continuation_options: Optional[GridContinuationOptions] = None,
+        max_forecast_events: int | None = None,
     ) -> ForecastCatalog:
         if magnitude_generator_kwargs is None:
             magnitude_generator_kwargs = {}
@@ -1708,6 +1755,7 @@ class ETASSimulation:
             magnitude_generator_kwargs=magnitude_generator_kwargs,
             continuation_mode=continuation_mode,
             grid_continuation_options=grid_continuation_options,
+            max_forecast_events=max_forecast_events,
         ):
             store = pd.concat([store, chunk], ignore_index=False)
         return ForecastCatalog(data=store)
