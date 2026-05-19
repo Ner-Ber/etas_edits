@@ -24,6 +24,23 @@ logger = logging.getLogger(__name__)
 
 SECONDS_PER_DAY = 86400.0
 
+
+def _estimate_area_km2_from_grid(x_flat, y_flat) -> float:
+    """Approximate total study area (km²) from a regular UTM grid layout."""
+    x_flat = np.asarray(x_flat, dtype=float)
+    y_flat = np.asarray(y_flat, dtype=float)
+    unique_x = np.unique(x_flat)
+    unique_y = np.unique(y_flat)
+    if len(unique_x) > 1 and len(unique_y) > 1:
+        dx = float(np.mean(np.diff(np.sort(unique_x))))
+        dy = float(np.mean(np.diff(np.sort(unique_y))))
+        cell_km2 = (dx * dy) / 1e6
+        return cell_km2 * len(x_flat)
+    span_x = float(x_flat.max() - x_flat.min())
+    span_y = float(y_flat.max() - y_flat.min())
+    return max(span_x * span_y / 1e6, 1e-12)
+
+
 # JSONL debug log for ``run_etas_per_grid_point_inversion`` (one record per line, flushed).
 # Set to None to disable; edit path as needed.
 DEBUG_GRID_SIM_JSONL_PATH = "/tmp/etas_grid_sim_debug.jsonl"
@@ -339,12 +356,12 @@ def run_etas_on_grid_inversion_sampling(
     while t < end_forecast:
         h_t_days = history["time"].values / SECONDS_PER_DAY
 
-        # Fast temporal rate function using precomputed weights
-        def total_rate_fast(v_sec):
-            v_days = v_sec / SECONDS_PER_DAY
+        # Intensity is in events/day; integrate in days (not seconds).
+        t_days = t / SECONDS_PER_DAY
+
+        def total_rate_fast(v_days):
             dt = v_days - h_t_days
             valid = dt > 0
-
             triggered_rate = np.sum(spatial_weights[valid] * kernels["g"](dt[valid]))
             return mu_total + triggered_rate
 
@@ -352,25 +369,29 @@ def run_etas_on_grid_inversion_sampling(
         U = np.random.uniform(0, 1)
         D = -np.log(U)
 
-        def objective(t_prime):
-            area, _ = integrate.quad(total_rate_fast, t, t_prime, limit=50) 
+        def objective(t_prime_days):
+            area, _ = integrate.quad(
+                total_rate_fast, t_days, t_prime_days, limit=50
+            )
             return area - D
 
-        def derivative(t_prime):
-            return total_rate_fast(t_prime)
+        def derivative(t_prime_days):
+            return total_rate_fast(t_prime_days)
 
         # Root finding (No try-except block)
-        current_total_rate = total_rate_fast(t)
-        guess_step = D / current_total_rate if current_total_rate > 0 else 0.1
+        current_total_rate = total_rate_fast(t_days)
+        guess_step_days = (
+            D / current_total_rate if current_total_rate > 0 else 0.1
+        )
 
         res = optimize.root_scalar(
-            objective, 
-            x0=t + guess_step, 
-            fprime=derivative, 
-            method='newton', 
+            objective,
+            x0=t_days + guess_step_days,
+            fprime=derivative,
+            method='newton',
             maxiter=50
         )
-        t_prime = res.root
+        t_prime = res.root * SECONDS_PER_DAY
 
         # Boundary check
         if t_prime >= end_forecast:
@@ -443,14 +464,23 @@ def run_etas_per_grid_point_inversion(
     return_full_catalog=True,
     kernel_variant=etas_forecast_intensity.KERNEL_VARIANT_DEFAULT,
     max_forecast_events=None,
+    area_km2=None,
 ):
     """
-    Per-grid-point inversion/thinning ETAS simulation on a spatial grid.
+    Grid ETAS simulation via compensator inversion (Ogata-style) on a spatial grid.
+
+  Time advance uses the **total** regional intensity
+  ``mu * area_km2 + sum_k kappa(m_k) g(t) sum_j f(x_j-x_k, ...)`` (same spatial
+  aggregation as ``run_etas_on_grid_inversion_sampling``), then samples the event
+  location from per-node rates at ``t_star``. This avoids the near-zero per-cell
+  kernels that occur when the grid is coarse relative to the spatial bandwidth.
 
     Args:
         history: Catalog used as initial state; times in seconds if numeric.
         start_forecast, end_forecast: Forecast interval (same time units as ``history``).
         x_flat, y_flat: Grid coordinates (1D, same length).
+        area_km2: Study region area in km² for scaling background rate ``mu`` (events/day/km²).
+            If None, estimated from grid spacing and extent.
         params: ETAS parameter dict; defaults from ``forecast_intensity``.
         in_place: If False, copy ``history`` before any updates.
         projection: Unused; reserved for API compatibility.
@@ -503,25 +533,27 @@ def run_etas_per_grid_point_inversion(
         else None
     )
 
-    # mu is assumed uniform across the grid based on your original code
-    mu_val = kernels["mu"](x_flat[0], y_flat[0]) 
+    mu_density = float(kernels["mu"](x_flat[0], y_flat[0]))
+    if area_km2 is None:
+        area_km2 = _estimate_area_km2_from_grid(x_flat, y_flat)
+        logger.warning(
+            "area_km2 not provided; estimated %.1f km² from grid layout.",
+            area_km2,
+        )
+    area_km2 = float(area_km2)
+    cell_area_km2 = area_km2 / n_grid
+    mu_background = mu_density * area_km2
 
-    # Precompute spatial weights matrix W (Shape: N_grid x N_history)
-    # W[i, k] represents the spatial weight of past event k on grid point i
-    W_list = []
+    # Aggregate spatial weights per history event (sum f over grid nodes).
+    spatial_weights = []
     for k in range(len(catalog)):
         dx = x_flat - catalog["x_utm"].iloc[k]
         dy = y_flat - catalog["y_utm"].iloc[k]
         m_k = catalog["magnitude"].iloc[k]
-
-        w_k = kernels["kappa"](m_k) * kernels["f"](dx, dy, m_k)
-        W_list.append(w_k)
-
-    # Initialize W matrix
-    if len(W_list) > 0:
-        W = np.column_stack(W_list) 
-    else:
-        W = np.empty((n_grid, 0))
+        spatial_weights.append(
+            kernels["kappa"](m_k) * np.sum(kernels["f"](dx, dy, m_k))
+        )
+    spatial_weights = np.asarray(spatial_weights, dtype=float)
 
     debug_file = None
     if DEBUG_GRID_SIM_JSONL_PATH:
@@ -554,56 +586,55 @@ def run_etas_per_grid_point_inversion(
     while t < end_forecast:
         step_index += 1
         h_t_days = catalog["time"].values / SECONDS_PER_DAY
+        t_days = t / SECONDS_PER_DAY
 
-        # Array to store the generated time for each grid point
-        t_primes = np.full(n_grid, np.inf)
+        def total_rate(v_days):
+            dt = v_days - h_t_days
+            valid = dt > 0
+            triggered = np.sum(spatial_weights[valid] * kernels["g"](dt[valid]))
+            return mu_background + triggered
 
-        # Generate target areas D for all grid points simultaneously
-        U_grid = np.random.uniform(0, 1, size=n_grid)
-        D_grid = -np.log(U_grid)
+        u = float(np.random.uniform(0.0, 1.0))
+        d_comp = -np.log(u)
+        current_rate = float(total_rate(t_days))
 
-        rates_at_t = []
+        def objective(t_prime_days):
+            area, _ = integrate.quad(total_rate, t_days, t_prime_days, limit=50)
+            return area - d_comp
 
-        # Solve the integral for EVERY grid point individually
-        for i in range(n_grid):
-            W_i = W[i, :] # The history weights affecting only grid point i
-
-            def rate_i(v_sec):
-                v_days = v_sec / SECONDS_PER_DAY
-                dt = v_days - h_t_days
-                valid = dt > 0
-                triggered = np.sum(W_i[valid] * kernels["g"](dt[valid]))
-                return mu_val + triggered
-
-            def objective(t_prime):
-                area, _ = integrate.quad(rate_i, t, t_prime, limit=50) 
-                return area - D_grid[i]
-
-            def derivative(t_prime):
-                return rate_i(t_prime)
-
-            current_rate = rate_i(t)
-            rates_at_t.append(float(current_rate))
-            guess_step = D_grid[i] / current_rate if current_rate > 0 else 0.1
-
-            # Root finding per grid point
-            res = optimize.root_scalar(
-                objective, 
-                x0=t + guess_step, 
-                fprime=derivative, 
-                method='newton', 
-                maxiter=50
-            )
-            t_primes[i] = res.root
-
-        # The actual next event is the minimum of all generated times
-        min_idx = int(np.argmin(t_primes))
-        t_star = float(t_primes[min_idx])
+        guess_step_days = d_comp / current_rate if current_rate > 0 else 0.1
+        res = optimize.root_scalar(
+            objective,
+            x0=t_days + guess_step_days,
+            fprime=total_rate,
+            method="newton",
+            maxiter=50,
+        )
+        t_star = float(res.root * SECONDS_PER_DAY)
 
         accepted = t_star < end_forecast
         new_event_payload = None
+        min_idx = 0
 
         if accepted:
+            rates_at_loc = etas_forecast_intensity.rate_at_t_all_grid(
+                t_star / SECONDS_PER_DAY,
+                x_flat,
+                y_flat,
+                catalog["x_utm"].values,
+                catalog["y_utm"].values,
+                catalog["magnitude"].values,
+                h_t_days,
+                kernels=kernels,
+            )
+            rates_at_loc = rates_at_loc - mu_density + mu_density * cell_area_km2
+            total_spatial = float(np.sum(rates_at_loc))
+            if total_spatial <= 0:
+                min_idx = int(np.random.randint(n_grid))
+            else:
+                min_idx = int(
+                    np.random.choice(n_grid, p=rates_at_loc / total_spatial)
+                )
             new_x = x_flat[min_idx]
             new_y = y_flat[min_idx]
             b_value = params.get('b', 1.0)
@@ -626,9 +657,8 @@ def run_etas_per_grid_point_inversion(
                 "kind": "step",
                 "step_index": step_index,
                 "t": float(t),
-                "rates_at_t": rates_at_t,
-                "D_grid": [float(x) for x in D_grid],
-                "t_primes": [float(x) for x in t_primes],
+                "total_rate_at_t": current_rate,
+                "d_comp": d_comp,
                 "t_star": t_star,
                 "min_idx": min_idx,
                 "accepted": accepted,
@@ -658,13 +688,12 @@ def run_etas_per_grid_point_inversion(
         })
         catalog = pd.concat([catalog, new_event], ignore_index=True)
 
-        # Calculate spatial weights of the NEW event across all grid points
         new_dx = x_flat - new_x
         new_dy = y_flat - new_y
-        new_w_k = kernels["kappa"](new_m) * kernels["f"](new_dx, new_dy, new_m)
-
-        # Append the new column to the W matrix
-        W = np.column_stack([W, new_w_k])
+        spatial_weights = np.append(
+            spatial_weights,
+            kernels["kappa"](new_m) * np.sum(kernels["f"](new_dx, new_dy, new_m)),
+        )
 
         if pbar:
             pbar.update(t_star - t)

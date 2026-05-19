@@ -24,6 +24,22 @@
             "env": {
                 "MPLBACKEND": "TkAgg"
             }
+        },
+        {
+            "name": "MAGNET pipeline: classic (etas_new, trace log run)",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "/home/neriberman/miniconda3/envs/etas_new/bin/python",
+            "pythonArgs": ["-u"],
+            "program": "${workspaceFolder}/runnable_code/MAGNET_ETAS_pipeline.py",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--pipeline_config_json=${workspaceFolder}/outputs/pipeline_continuation_trace_logs/20260514T103525Z/pipeline_run_classic.json"
+            ],
+            "console": "integratedTerminal",
+            "env": {
+                "MPLBACKEND": "TkAgg"
+            }
         }
     ]
 }

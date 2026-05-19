@@ -1292,6 +1292,10 @@ def simulate_catalog_continuation_grid(
     #     log_interval=0,
     #     seed=seed,
     # )
+    from etas.inversion import polygon_surface
+
+    area_km2 = polygon_surface(polygon)
+
     # history = grid_simulation.run_etas_on_grid_inversion_sampling(
     history = grid_simulation.run_etas_per_grid_point_inversion(
         history,
@@ -1307,6 +1311,7 @@ def simulate_catalog_continuation_grid(
         seed=seed,
         kernel_variant=kernel_variant,
         max_forecast_events=max_forecast_events,
+        area_km2=area_km2,
     )
 
     new_mask = history["time"] >= start_sec
