@@ -67,9 +67,16 @@ def _make_kernels_default(params):
         # Background rate
         return params["mu"]
 
-    def kappa(m, A=1):
-        # Utsu
-        return A * np.exp(params["alpha"] * (m - params["m0"]))
+    def kappa(m, A=None):
+        # Match inversion.triggering_kernel: k0 * exp(a * (m - m0))
+        if A is None:
+            A = params.get("k0")
+            if A is None and "log10_k0" in params:
+                A = np.power(10.0, params["log10_k0"])
+            if A is None:
+                A = 1.0
+        a_eff = params.get("a", params.get("alpha", 0.0))
+        return A * np.exp(a_eff * (m - params["m0"]))
 
     def g(t):
         # Time kernel
