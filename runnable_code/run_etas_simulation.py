@@ -16,15 +16,10 @@ import logging
 import time
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
+import tqdm
 
-from eq_mag_prediction.utilities import data_utils
-from etas import rate_computation as rc
-from etas.rate_computation import (
-    rate_at_t_all_grid,
-    mu, kappa, g, f,
-    set_use_gpu,
-)
+import eq_mag_prediction.utilities.data_utils as data_utils
+import etas.rate_computation as rc
 
 
 def magnitude_gen(n, m0, beta, rng_state=None):
@@ -78,7 +73,7 @@ def run_etas_simulation(
     """
     # Set GPU mode
     if use_gpu is not None:
-        set_use_gpu(use_gpu)
+        rc.set_use_gpu(use_gpu)
     
     # Set up logging
     if verbose:
@@ -126,7 +121,7 @@ def run_etas_simulation(
         rc.xp.random.seed(random_seed)
     
     # Create progress bar
-    pbar = tqdm(
+    pbar = tqdm.tqdm(
         total=end_forecast - start_forecast,
         unit='time',
         desc='Simulation progress',
@@ -148,9 +143,9 @@ def run_etas_simulation(
         h_t_days = history['time'].values / 86400.0
         
         # Vectorized rate computation at current time t for all grid points (GPU-accelerated)
-        B = rate_at_t_all_grid(t/86400.0, x_flat, y_flat, h_x, h_y, h_m, h_t_days, params)
+        B = rc.rate_at_t_all_grid(t/86400.0, x_flat, y_flat, h_x, h_y, h_m, h_t_days, params)
         
-        # Convert B to GPU array if using GPU (rate_at_t_all_grid returns NumPy for pandas compatibility)
+        # Convert B to GPU array if using GPU (rc.rate_at_t_all_grid returns NumPy for pandas compatibility)
         if hasattr(rc.xp, 'cuda'):
             B = rc.xp.asarray(B)
         
@@ -160,7 +155,7 @@ def run_etas_simulation(
         dt_vec = rc.xp.random.exponential(1 / rc.xp.clip(B, 1e-15, None))  # dt_vec is in days
         
         # Vectorized rate computation at future times t+dt_vec for all grid points
-        rate_future = rate_at_t_all_grid(t/86400.0 + dt_vec, x_flat, y_flat, h_x, h_y, h_m, h_t_days, params)
+        rate_future = rc.rate_at_t_all_grid(t/86400.0 + dt_vec, x_flat, y_flat, h_x, h_y, h_m, h_t_days, params)
         
         # Convert rate_future to GPU array if using GPU
         if hasattr(rc.xp, 'cuda'):

@@ -3,7 +3,7 @@ import sys
 import argparse
 import pandas as pd
 # Keep StringIO for potential in-memory operations if needed, though pandas handles files directly
-from io import StringIO
+import io
 
 
 def convert_catalog(input_path, start_id=1):
