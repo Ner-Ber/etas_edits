@@ -1747,8 +1747,13 @@ def _grid_continuation_options_from_config(
     if isinstance(grid_n_xy, list):
         grid_n_xy = tuple(grid_n_xy)
 
+    grid_point_density_km2 = raw.get("grid_point_density_km2")
+    if grid_point_density_km2 is not None:
+        grid_point_density_km2 = float(grid_point_density_km2)
+
     return etas_simulation.GridContinuationOptions(
         grid_n_xy=grid_n_xy,
+        grid_point_density_km2=grid_point_density_km2,
         grid_params=grid_params,
         projection=raw.get("projection"),
         seed=raw.get("seed", 1905),
