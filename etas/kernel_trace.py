@@ -92,8 +92,8 @@ def sample_kernels_to_log(
         "radius_i": np.asarray(
             etas_simulation.aftershock_radius_from_uniform(
                 parameters["log10_d"],
-                parameters["gamma"],
-                parameters["rho"],
+                kpar["gamma"],
+                kpar["rho"],
                 m_i,
                 mc,
                 u_i,

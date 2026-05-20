@@ -44,6 +44,34 @@ _REPORT_HTML_NAME = "compare_continuation_trace_logs.html"
 _INV_LINE_RE = re.compile(r"Inversion ID:\s*(\S+)")
 
 
+def _windows_path_if_wsl(path: pathlib.Path) -> str | None:
+    """Map a Linux path to a Windows path when ``wslpath`` is available (WSL)."""
+    wslpath = shutil.which("wslpath")
+    if not wslpath:
+        return None
+    try:
+        completed = subprocess.run(
+            [wslpath, "-w", str(path.resolve())],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    win = completed.stdout.strip()
+    return win or None
+
+
+def _format_path_for_terminal(path: pathlib.Path) -> str:
+    """WSL/Linux path plus Windows path when running under WSL."""
+    resolved = path.resolve()
+    lines = [f"  WSL:      {resolved}"]
+    win = _windows_path_if_wsl(resolved)
+    if win:
+        lines.append(f"  Windows:  {win}")
+    return "\n".join(lines)
+
+
 def _deep_merge_simulate_continuation(
     base: dict,
     *,
@@ -411,7 +439,10 @@ def main() -> int:
             )
             return proc.returncode
 
-    print(f"\nAll runs finished. Logs under:\n{log_root}\n", flush=True)
+    print(
+        f"\nAll runs finished. Logs under:\n{_format_path_for_terminal(log_root)}\n",
+        flush=True,
+    )
 
     inversion_id = _parse_inversion_id_from_logs(log_root)
     report_path: pathlib.Path | None = None
@@ -431,7 +462,11 @@ def main() -> int:
                 flush=True,
             )
         else:
-            print(f"Comparison HTML report saved to:\n{report_path}\n", flush=True)
+            print(
+                "Comparison HTML report saved to:\n"
+                f"{_format_path_for_terminal(report_path)}\n",
+                flush=True,
+            )
 
     _enrich_run_meta_after_runs(
         meta_path,
