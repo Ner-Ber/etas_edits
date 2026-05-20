@@ -15,9 +15,9 @@ from etas.inversion import (
     to_days,
 )
 from etas.mc_b_est import simulate_magnitudes, simulate_magnitudes_from_zone
+from etas.data_utils import bin_to_precision
 from etas.simulation import (
     resolve_magnitude_generator,
-    bin_to_precision,
     simulate_background_location,
     prepare_auxiliary_catalog,
 )
