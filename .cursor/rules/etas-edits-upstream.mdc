@@ -1,0 +1,37 @@
+---
+description: Do not refactor upstream ETAS files; only edit Ner-Ber / Neri-authored files
+alwaysApply: true
+---
+
+# etas_edits — file ownership
+
+Commits by **Ner-Ber** or **Neri Berman @ hanamel** define what you may refactor freely.
+
+## Do not touch (upstream / pre-existing)
+
+Unless the user **explicitly** asks to change a specific upstream file, leave these **unchanged** — especially import style, formatting sweeps, or “cleanup”:
+
+- `etas/inversion.py`, `etas/simulation.py`, `etas/mc_b_est.py`, `etas/plots.py`, `etas/evaluation.py`, `etas/download.py`, `etas/oef/**`
+- `runnable_code/simulate_catalog.py`, `simulate_catalog_continuation.py`, `invert_etas.py`, `ch_forecast.py`, `visualise_fit.py`, and other scripts not listed below
+
+Apply bugfixes to upstream files only when necessary and **minimal** (smallest diff).
+
+## Safe to edit (first added in Ner-Ber / Neri commits)
+
+- `etas/data_utils.py`, `etas/forecast_intensity.py`, `etas/grid_simulation.py`, `etas/rate_computation.py`, `etas/rate_simulation.py`, `etas/simulation_trace.py`, `etas/utility_functions.py`
+- `runnable_code/MAGNET_ETAS_pipeline.py`, `ingest_catalog_from_magnet_format.py`, `invert_etas_test.py`, `run_etas_simulation.py`, `run_magnet_continuation_classic_then_grid.py`, `test_gpu_cpu_performance.py`
+
+When editing **your** files, follow the global **python-imports** user rule (module-qualified imports; `typing` exception). When calling upstream APIs from your code, match **their** style (`from etas.data_utils import bin_to_precision`, etc.).
+
+**Your modules:** use `import etas.mc_b_est as mc_b_est` for `round_half_up`; `import etas.inversion as inversion` for `polygon_surface` — do not assume symbols moved with a refactor.
+
+## etas_edits refactor pitfalls (concrete)
+
+- `read_shape_coords` / inversion JSON: `shape_coords` strings use `array([...])`; needs `eval(s, {"array": np.array})` if you remove inline `from numpy import array`.
+- `round_half_up` lives in **`etas.mc_b_est`**, not `etas.inversion` (HEAD `data_utils` wrongly imported it from inversion).
+- Magnitude generator dispatch strings stay **`'simulate_magnitudes'`** / **`'MAGNET_magnitude'`** — not prefixed with module paths.
+- In runnable scripts: `import etas.simulation as simulation` then `etas_simulation = simulation.ETASSimulation(...)` — never call methods on the module alias.
+
+## Cross-module moves
+
+Prefer new helpers in **your** modules (`data_utils.py`, `utility_functions.py`). If upstream must call them, add a small import at the top of the upstream file only when the user approves that file change.
