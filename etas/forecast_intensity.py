@@ -26,22 +26,43 @@ DEFAULT_PARAMS = {
 
 def force_inversion_on_default_params(inversion_params: dict, default_params: dict = DEFAULT_PARAMS):
     """
-    Unite inversion parameters and default parameters.
+    Unite inversion parameters and default parameters for grid / ``make_kernels``.
+
+    Inversion θ supplies ``rho``, ``omega``, ``log10_*``, etc. Derived grid fields
+    (``p``, ``q``, ``D``) are filled from defaults only when not already given by
+    the inversion dict. In particular, ``rho`` from θ is **not** replaced by
+    ``q - 1`` from ``DEFAULT_PARAMS`` (``q=1.5`` → ``rho=0.5``).
     """
+    inv = dict(inversion_params or {})
+    inv_keys = set(inv.keys())
+
     params = default_params.copy()
-    # unite inversion parameters and default parameters
-    for key, value in inversion_params.items():
+    for key, value in inv.items():
         if key not in params:
             params[key] = value
-    params.update(inversion_params)
+    params.update(inv)
 
-    log_keys = [k for k in params.keys() if k.startswith('log10_')]
-    for key in log_keys:
-        params[key.replace('log10_', '')] = 10**params[key] if params[key] is not None else None
+    for key in list(params.keys()):
+        if not key.startswith("log10_"):
+            continue
+        if params[key] is not None:
+            params[key.replace("log10_", "")] = 10 ** params[key]
 
-    params['p'] = params['omega'] + 1
-    params["rho"] = params['q']-1
-    params["D"] = params['d']**0.5
+    if params.get("omega") is not None:
+        params["p"] = params["omega"] + 1
+
+    if "rho" in inv_keys and inv["rho"] is not None:
+        params["rho"] = float(inv["rho"])
+    else:
+        params["rho"] = float(params["q"]) - 1.0
+
+    if "q" in inv_keys and inv["q"] is not None:
+        params["q"] = float(inv["q"])
+    elif "rho" in inv_keys and inv["rho"] is not None:
+        params["q"] = float(inv["rho"]) + 1.0
+
+    if "D" not in inv_keys and params.get("d") is not None:
+        params["D"] = float(params["d"]) ** 0.5
 
     return params
 
