@@ -18,45 +18,18 @@ from scipy import integrate
 from scipy import optimize
 
 import etas.forecast_intensity as etas_forecast_intensity
-from etas import simulation_trace
+from etas import utility_functions
+from etas.data_utils import estimate_area_km2_from_grid
+from etas.utility_functions import json_numpy_default
 
 logger = logging.getLogger(__name__)
 
 SECONDS_PER_DAY = 86400.0
 
 
-def _estimate_area_km2_from_grid(x_flat, y_flat) -> float:
-    """Approximate total study area (km²) from a regular UTM grid layout."""
-    x_flat = np.asarray(x_flat, dtype=float)
-    y_flat = np.asarray(y_flat, dtype=float)
-    unique_x = np.unique(x_flat)
-    unique_y = np.unique(y_flat)
-    if len(unique_x) > 1 and len(unique_y) > 1:
-        dx = float(np.mean(np.diff(np.sort(unique_x))))
-        dy = float(np.mean(np.diff(np.sort(unique_y))))
-        cell_km2 = (dx * dy) / 1e6
-        return cell_km2 * len(x_flat)
-    span_x = float(x_flat.max() - x_flat.min())
-    span_y = float(y_flat.max() - y_flat.min())
-    return max(span_x * span_y / 1e6, 1e-12)
-
-
 # JSONL debug log for ``run_etas_per_grid_point_inversion`` (one record per line, flushed).
 # Set to None to disable; edit path as needed.
 DEBUG_GRID_SIM_JSONL_PATH = "/tmp/etas_grid_sim_debug.jsonl"
-
-
-def _json_numpy_default(obj: Any) -> Any:
-    if isinstance(obj, (np.integer,)):
-        return int(obj)
-    if isinstance(obj, (np.floating,)):
-        x = float(obj)
-        if np.isnan(x) or np.isinf(x):
-            return None
-        return x
-    if isinstance(obj, np.ndarray):
-        return obj.tolist()
-    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
 def magnitude_gen(n, m0=None, beta=None, params=None, seed=None):
@@ -496,7 +469,7 @@ def run_etas_per_grid_point_inversion(
     """
     if params is None:
         params = etas_forecast_intensity.DEFAULT_PARAMS.copy()
-    simulation_trace.log_etas_params(
+    utility_functions.log_etas_params(
         "grid_simulation.run_etas_per_grid_point_inversion",
         params,
         start_forecast=float(start_forecast),
@@ -535,7 +508,7 @@ def run_etas_per_grid_point_inversion(
 
     mu_density = float(kernels["mu"](x_flat[0], y_flat[0]))
     if area_km2 is None:
-        area_km2 = _estimate_area_km2_from_grid(x_flat, y_flat)
+        area_km2 = estimate_area_km2_from_grid(x_flat, y_flat)
         logger.warning(
             "area_km2 not provided; estimated %.1f km² from grid layout.",
             area_km2,
@@ -578,7 +551,7 @@ def run_etas_per_grid_point_inversion(
             "n_history_original": int(n_past),
         }
         debug_file.write(
-            json.dumps(init_rec, default=_json_numpy_default) + "\n"
+            json.dumps(init_rec, default=json_numpy_default) + "\n"
         )
         debug_file.flush()
 
@@ -667,7 +640,7 @@ def run_etas_per_grid_point_inversion(
                 "n_history_original": int(n_past),
             }
             debug_file.write(
-                json.dumps(step_rec, default=_json_numpy_default) + "\n"
+                json.dumps(step_rec, default=json_numpy_default) + "\n"
             )
             debug_file.flush()
 
@@ -713,7 +686,7 @@ def run_etas_per_grid_point_inversion(
         evt_log["time"] = pd.to_datetime(evt_log["time"], unit="s", utc=True)
         evt_log["latitude"] = np.nan
         evt_log["longitude"] = np.nan
-        simulation_trace.log_events_batch(
+        utility_functions.log_events_batch(
             "grid_simulation.run_etas_per_grid_point_inversion",
             evt_log,
         )

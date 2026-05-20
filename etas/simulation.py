@@ -11,7 +11,6 @@
 ##############################################################################
 
 import datetime as dt
-import decimal
 import logging
 import os
 import pprint
@@ -30,11 +29,17 @@ import functools
 
 from etas.inversion import (ETASParameterCalculation, branching_integral,
                             branching_ratio, expected_aftershocks, haversine,
-                            parameter_dict2array, round_half_up, to_days,
+                            parameter_dict2array, to_days,
                             upper_gamma_ext)
 from etas.mc_b_est import simulate_magnitudes, simulate_magnitudes_from_zone, MAGNET_magnitude
 from etas import grid_simulation
-from etas import simulation_trace
+from etas import utility_functions
+from etas.data_utils import (
+    bin_to_precision,
+    get_fallback_projection,
+    to_seconds,
+    utm_rectangular_grid_in_polygon,
+)
 from etas.forecast_intensity import DEFAULT_PARAMS as GRID_DEFAULT_PARAMS
 from etas.forecast_intensity import KERNEL_VARIANT_DEFAULT
 
@@ -53,32 +58,13 @@ class GridContinuationOptions:
     """Options for `simulate_catalog_continuation_grid` only (not used for classic ETAS)."""
 
     grid_n_xy: tuple = (4, 4)
+    grid_point_density_km2: Optional[float] = None
     grid_params: Optional[dict] = None
     projection: object = None
     seed: Optional[int] = None
     progress_bar: bool = True
     kernel_variant: str = KERNEL_VARIANT_DEFAULT
 
-
-def _to_seconds(t):
-    if hasattr(t, "timestamp"):
-        return t.timestamp()
-    return pd.Timestamp(t).timestamp()
-
-
-def _get_fallback_projection(lon, lat):
-    """Expects floats or single-element arrays."""
-    utm_crs_list = pyproj.database.query_utm_crs_info(
-        datum_name="WGS 84",
-        area_of_interest=pyproj.aoi.AreaOfInterest(
-            west_lon_degree=float(lon),
-            south_lat_degree=float(lat),
-            east_lon_degree=float(lon) + 1e-5,
-            north_lat_degree=float(lat) + 1e-5,
-        ),
-    )
-    # Return the first matches' EPSG as a Proj object
-    return pyproj.Proj(f"EPSG:{utm_crs_list[0].code}")
 
 def resolve_magnitude_generator(magnitude_generator, **kwargs):
     """
@@ -105,28 +91,6 @@ def resolve_magnitude_generator(magnitude_generator, **kwargs):
         if magnitude_generator == 'simulate_magnitudes':
             return simulate_magnitudes
     return simulate_magnitudes
-
-
-def bin_to_precision(x: np.ndarray | list, delta_x: float = 0.1) -> np.ndarray:
-    """
-    Rounds a float number x to a given precision. If precision not given,
-    assumes 0.1 bin size
-
-    Args:
-        x: decimal number that needs to be rounded
-        delta_x: size of the bin, optional
-
-    Returns:
-        Value rounded to the given precision.
-    """
-    if x is None:
-        raise ValueError("x cannot be None")
-
-    if isinstance(x, list):
-        x = np.array(x)
-    d = decimal.Decimal(str(delta_x))
-    decimal_places = abs(d.as_tuple().exponent)
-    return np.round(round_half_up(x / delta_x) * delta_x, decimal_places)
 
 
 def inverse_upper_gamma_ext(a, y):
@@ -439,7 +403,7 @@ def generate_background_events(
 ):
     from etas.inversion import polygon_surface, to_days
 
-    simulation_trace.log_etas_params("generate_background_events", parameters)
+    utility_functions.log_etas_params("generate_background_events", parameters)
 
     theta = parameter_dict2array(parameters)
     theta_without_mu = theta[2:]
@@ -573,7 +537,7 @@ def generate_background_events(
         lam=catalog["expected_n_aftershocks"])
 
     out = catalog.drop("geometry", axis=1)
-    simulation_trace.log_events_batch("generate_background_events", out)
+    utility_functions.log_events_batch("generate_background_events", out)
     return out
 
 
@@ -596,7 +560,7 @@ def generate_aftershocks(
     magnitude_generator=simulate_magnitudes,
     catalog=None,
 ):
-    simulation_trace.log_etas_params("generate_aftershocks", parameters)
+    utility_functions.log_etas_params("generate_aftershocks", parameters)
 
     theta = parameter_dict2array(parameters)
     theta_without_mu = theta[2:]
@@ -722,7 +686,7 @@ def generate_aftershocks(
     aadf["n_aftershocks"] = np.random.poisson(
         lam=aadf["expected_n_aftershocks"])
 
-    simulation_trace.log_events_batch("generate_aftershocks", aadf)
+    utility_functions.log_events_batch("generate_aftershocks", aadf)
     return aadf
 
 
@@ -1001,7 +965,7 @@ def simulate_catalog_continuation(
     """
     magnitude_generator = resolve_magnitude_generator(magnitude_generator)
 
-    simulation_trace.log_etas_params(
+    utility_functions.log_etas_params(
         "simulate_catalog_continuation",
         parameters,
         mc=float(mc) if mc is not None else None,
@@ -1154,6 +1118,7 @@ def simulate_catalog_continuation_grid(
     beta_main,
     *,
     grid_n_xy=(4, 4),
+    grid_point_density_km2=None,
     grid_params=None,
     projection=None,
     seed=None,
@@ -1172,7 +1137,12 @@ def simulate_catalog_continuation_grid(
     parameters : dict
         ETAS parameters (used when defaulting ``grid_params`` from ``log10_mu``).
     grid_n_xy : tuple of int
-        Number of grid nodes in x and y (UTM / projected space).
+        Number of grid nodes in x and y on the history/polygon bounding box
+        (used when ``grid_point_density_km2`` is None).
+    grid_point_density_km2 : float, optional
+        If set, build a rectangular UTM grid clipped to ``polygon`` with this
+        many nodes per km² inside the region (see ``utm_rectangular_grid_in_polygon``).
+        When provided, ``grid_n_xy`` is ignored.
     grid_params : dict, optional
         Passed to ``run_grid_etas_simulation``; if None, built from ``parameters``
         and ``mc`` / ``beta_main``. When provided, keys are copied and ``m0`` is
@@ -1207,17 +1177,18 @@ def simulate_catalog_continuation_grid(
     if mc is not None:
         grid_params["m0"] = float(mc)
 
-    simulation_trace.log_etas_params(
+    utility_functions.log_etas_params(
         "simulate_catalog_continuation_grid",
         parameters,
         grid_params=grid_params,
         grid_n_xy=grid_n_xy,
+        grid_point_density_km2=grid_point_density_km2,
         max_forecast_events=max_forecast_events,
         mc=float(mc) if mc is not None else None,
     )
 
-    start_sec = _to_seconds(auxiliary_end)
-    end_sec = _to_seconds(simulation_end)
+    start_sec = to_seconds(auxiliary_end)
+    end_sec = to_seconds(simulation_end)
 
     # populate history with relevant auxiliary catalog events
     mask = auxiliary_catalog["time"] < auxiliary_end
@@ -1229,7 +1200,7 @@ def simulate_catalog_continuation_grid(
 
     if projection is None and pyproj is not None:
         centroid = polygon.centroid
-        projection = _get_fallback_projection(lon=centroid.y, lat=centroid.x)
+        projection = get_fallback_projection(lon=centroid.y, lat=centroid.x)
 
     if "x_utm" not in history.columns and "latitude" in history.columns and len(history) > 0:
         if projection is not None:
@@ -1247,7 +1218,7 @@ def simulate_catalog_continuation_grid(
 
     if "time" in history.columns:
         history = history.copy()
-        history["time"] = history["time"].apply(_to_seconds)
+        history["time"] = history["time"].apply(to_seconds)
 
     if len(history) > 0 and "x_utm" in history.columns:
         x_min, x_max = history["x_utm"].min(), history["x_utm"].max()
@@ -1257,18 +1228,38 @@ def simulate_catalog_continuation_grid(
             raise ValueError(
                 "Cannot build grid: no history with x_utm and no projection."
             )
-        bounds = polygon.bounds  # minx, miny, maxx, maxy (lon, lat for WGS84)
-        xy_ll = projection(bounds[0], bounds[1], inverse=False)  # lon, lat -> x, y
-        xy_ur = projection(bounds[2], bounds[3], inverse=False)
+        min_lat, min_lon, max_lat, max_lon = polygon.bounds
+        xy_ll = projection(min_lon, min_lat, inverse=False)
+        xy_ur = projection(max_lon, max_lat, inverse=False)
         x_min, y_min = xy_ll[0], xy_ll[1]
         x_max, y_max = xy_ur[0], xy_ur[1]
 
-    n_x, n_y = grid_n_xy
-    x_flat = np.linspace(x_min, x_max, n_x)
-    y_flat = np.linspace(y_min, y_max, n_y)
-    XX, YY = np.meshgrid(x_flat, y_flat)
-    x_flat = XX.flatten()
-    y_flat = YY.flatten()
+    if grid_point_density_km2 is not None:
+        if projection is None:
+            raise ValueError(
+                "grid_point_density_km2 requires a projection to build the UTM grid."
+            )
+        x_flat, y_flat, grid_info = utm_rectangular_grid_in_polygon(
+            polygon,
+            projection,
+            grid_point_density_km2,
+        )
+        logger.info(
+            "Grid from density %.4g pts/km²: %s nodes inside polygon "
+            "(target %s, spacing %.1f m, rectangle %s)",
+            grid_point_density_km2,
+            grid_info["n_points"],
+            grid_info["target_n"],
+            grid_info["spacing_m"],
+            grid_info["grid_n_xy"],
+        )
+    else:
+        n_x, n_y = grid_n_xy
+        x_flat = np.linspace(x_min, x_max, n_x)
+        y_flat = np.linspace(y_min, y_max, n_y)
+        XX, YY = np.meshgrid(x_flat, y_flat)
+        x_flat = XX.flatten()
+        y_flat = YY.flatten()
 
     for col in ["time", "magnitude", "x_utm", "y_utm"]:
         if col not in history.columns and len(history) > 0:
@@ -1566,7 +1557,7 @@ class ETASSimulation:
             days=forecast_n_days
         )
 
-        simulation_trace.log_etas_params(
+        utility_functions.log_etas_params(
             "ETASSimulation.simulate",
             self.inversion_params.theta,
             forecast_n_days=int(forecast_n_days),
@@ -1600,6 +1591,7 @@ class ETASSimulation:
                     beta_main=self.inversion_params.beta,
                     filter_polygon=False,
                     grid_n_xy=gopts.grid_n_xy,
+                    grid_point_density_km2=gopts.grid_point_density_km2,
                     grid_params=gopts.grid_params,
                     projection=gopts.projection,
                     seed=gopts.seed,
