@@ -3,8 +3,8 @@
 Run ``MAGNET_ETAS_pipeline.py`` twice (classic then grid continuation) with shared
 catalog, ETAS settings, and ``magnitude_generator: simulate_magnitudes``.
 
-Writes per-run trace logs (ETAS parameters + event stream) under a new timestamped
-directory. ``max_forecast_events`` is honored for grid continuation only; classic
+Writes per-run trace logs (ETAS parameters, event stream, kernel numerical samples)
+under a new timestamped directory. ``max_forecast_events`` is honored for grid continuation only; classic
 continuation runs the full time window without an event-count cap.
 
 Usage:
@@ -386,6 +386,10 @@ def main() -> int:
         env = os.environ.copy()
         env["ETAS_SIM_TRACE_PARAMS_LOG"] = str(params_log)
         env["ETAS_SIM_TRACE_EVENTS_LOG"] = str(events_csv)
+        env["ETAS_SAMPLE_KERNELS"] = "1"
+        env["ETAS_KERNEL_SAMPLES_LOG"] = str(
+            log_root / f"run_{name}_kernel_samples.json"
+        )
 
         # Shell pipeline: unbuffered python + tee console log
         cmd = (

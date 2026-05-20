@@ -143,9 +143,15 @@ def make_kernels(params=None, variant: str = KERNEL_VARIANT_DEFAULT):
 
     v = variant.strip().lower() if isinstance(variant, str) else str(variant)
     if v == KERNEL_VARIANT_DEFAULT:
-        return _make_kernels_default(params)
-    if v == KERNEL_VARIANT_ALTERNATE:
-        return _make_kernels_alternate(params)
+        kernels = _make_kernels_default(params)
+    elif v == KERNEL_VARIANT_ALTERNATE:
+        kernels = _make_kernels_alternate(params)
+    else:
+        kernels = None
+
+    if kernels is not None:
+        return kernels
+
     raise ValueError(
         "Unknown kernel variant {!r}; expected {!r} or {!r}.".format(
             variant,

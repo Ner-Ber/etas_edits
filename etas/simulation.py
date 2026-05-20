@@ -318,12 +318,23 @@ def simulate_aftershock_time_approx(log10_c, omega, log10_tau, size=1):
     return inv_time_cdf_approx(y, c, tau, omega)
 
 
-def simulate_aftershock_place(log10_d, gamma, rho, mi, mc):
-    # x and y offset in km
+def aftershock_radius_from_uniform(log10_d, gamma, rho, mi, mc, y_r):
+    """
+    Aftershock radius (km) from uniform spatial CDF argument ``y_r`` in (0, 1).
+
+    Same map as inside ``simulate_aftershock_radius`` (inverse spatial kernel).
+    """
+    mi = np.asarray(mi, dtype=float)
+    y_r = np.asarray(y_r, dtype=float)
     d = np.power(10, log10_d)
     d_g = d * np.exp(gamma * (mi - mc))
-    y_r = np.random.uniform(size=len(mi))
-    r = np.sqrt(np.power(1 - y_r, -1 / rho) * d_g - d_g)
+    return np.sqrt(np.power(1 - y_r, -1 / rho) * d_g - d_g)
+
+
+def simulate_aftershock_place(log10_d, gamma, rho, mi, mc):
+    # x and y offset in km
+    y_r = np.random.uniform(size=len(np.asarray(mi)))
+    r = aftershock_radius_from_uniform(log10_d, gamma, rho, mi, mc, y_r)
     phi = np.random.uniform(0, 2 * np.pi, size=len(mi))
 
     x = r * np.sin(phi)
@@ -334,12 +345,8 @@ def simulate_aftershock_place(log10_d, gamma, rho, mi, mc):
 
 def simulate_aftershock_radius(log10_d, gamma, rho, mi, mc):
     # x and y offset in km
-    d = np.power(10, log10_d)
-    d_g = d * np.exp(gamma * (mi - mc))
-    y_r = np.random.uniform(size=len(mi))
-    r = np.sqrt(np.power(1 - y_r, -1 / rho) * d_g - d_g)
-
-    return r
+    y_r = np.random.uniform(size=len(np.asarray(mi)))
+    return aftershock_radius_from_uniform(log10_d, gamma, rho, mi, mc, y_r)
 
 
 def simulate_background_location(
