@@ -1,30 +1,19 @@
 
+import datetime as dt
+import functools
 import logging
 import types
-import datetime as dt
+
+import geopandas as gpd
 import numpy as np
 import pandas as pd
-import geopandas as gpd
-from shapely.geometry import Polygon
-import functools
+from shapely import geometry
 
-# Import from local modules
-from etas.inversion import (
-    parameter_dict2array,
-    branching_ratio,
-    to_days,
-)
-from etas.mc_b_est import simulate_magnitudes, simulate_magnitudes_from_zone
-from etas.data_utils import bin_to_precision
-from etas.simulation import (
-    resolve_magnitude_generator,
-    simulate_background_location,
-    prepare_auxiliary_catalog,
-)
-from etas.inversion import polygon_surface, haversine
-
-# Import rate computation functions
+import etas.data_utils as data_utils
+import etas.inversion as inversion
+import etas.mc_b_est as mc_b_est
 import etas.rate_computation as rc
+import etas.simulation as simulation
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +115,7 @@ def generate_aftershocks_rc(
     auxiliary_end=None,
     earth_radius=6.3781e3,
     polygon=None,
-    magnitude_generator=simulate_magnitudes,
+    magnitude_generator=mc_b_est.simulate_magnitudes,
     catalog=None,
     **kwargs
 ):
@@ -177,14 +166,14 @@ def generate_aftershocks_rc(
     aftershocks["angle"] = np.random.uniform(0, 2 * np.pi, size=len(aftershocks))
     
     # Transport to lat/lon
-    aftershocks["degree_lon"] = haversine(
+    aftershocks["degree_lon"] = inversion.haversine(
         np.radians(aftershocks["parent_latitude"]),
         np.radians(aftershocks["parent_latitude"]),
         np.radians(0),
         np.radians(1),
         earth_radius,
     )
-    aftershocks["degree_lat"] = haversine(
+    aftershocks["degree_lat"] = inversion.haversine(
         np.radians(aftershocks["parent_latitude"] - 0.5),
         np.radians(aftershocks["parent_latitude"] + 0.5),
         np.radians(0),
@@ -237,10 +226,10 @@ def simulate_catalog_continuation_rc(
     mc,
     beta_main,
     filter_polygon=True,
-    magnitude_generator=simulate_magnitudes,
+    magnitude_generator=mc_b_est.simulate_magnitudes,
 ):
-    area = polygon_surface(polygon)
-    duration = to_days(simulation_end - auxiliary_end)
+    area = inversion.polygon_surface(polygon)
+    duration = inversion.to_days(simulation_end - auxiliary_end)
     
     expected_n_bg = parameters["mu"] * area * duration
     n_bg = np.random.poisson(expected_n_bg)
@@ -288,7 +277,7 @@ def simulate_catalog_continuation_rc(
     catalog = pd.concat([aux, background], sort=True)
     
     generation = 0
-    sim_duration = to_days(simulation_end - auxiliary_start)
+    sim_duration = inversion.to_days(simulation_end - auxiliary_start)
     
     while True:
         sources = catalog.query(f"generation == {generation}").copy()
@@ -345,7 +334,7 @@ def simulate_rate_computation(
     chunksize: int = 100,
     info_cols: list = ["is_background"],
     i_start: int = 0,
-    magnitude_generator=simulate_magnitudes,
+    magnitude_generator=mc_b_est.simulate_magnitudes,
     magnitude_generator_kwargs=None
 ):
     """
@@ -356,7 +345,7 @@ def simulate_rate_computation(
         magnitude_generator_kwargs = {}
         
     # Resolve magnitude generator
-    magnitude_generator = resolve_magnitude_generator(magnitude_generator, **magnitude_generator_kwargs)
+    magnitude_generator = simulation.resolve_magnitude_generator(magnitude_generator, **magnitude_generator_kwargs)
     
     # Convert parameters
     mc = self.inversion_params.m_ref - self.inversion_params.delta_m / 2

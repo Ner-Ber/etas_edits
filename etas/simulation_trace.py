@@ -8,12 +8,12 @@ Activated when environment variables are set (typically by a wrapper script):
 Implementation lives in ``etas.utility_functions``; this module re-exports for compatibility.
 """
 
-from etas.utility_functions import (
-    json_numpy_default,
-    log_etas_params,
-    log_events_batch,
-    serialize_params_for_json,
-)
+import etas.utility_functions as utility_functions
+
+json_numpy_default = utility_functions.json_numpy_default
+log_etas_params = utility_functions.log_etas_params
+log_events_batch = utility_functions.log_events_batch
+serialize_params_for_json = utility_functions.serialize_params_for_json
 
 __all__ = [
     "json_numpy_default",

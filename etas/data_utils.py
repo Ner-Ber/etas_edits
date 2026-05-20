@@ -5,13 +5,15 @@ Data preparation utilities: time/coordinate transforms, grids, and catalog round
 from __future__ import annotations
 
 import decimal
+
 import numpy as np
 import pandas as pd
 from shapely.geometry import Point, Polygon
 from shapely.ops import transform as shapely_transform
 from shapely.prepared import prep
 
-from etas.inversion import polygon_surface, round_half_up
+from etas.inversion import polygon_surface
+from etas.mc_b_est import round_half_up
 
 try:
     import pyproj

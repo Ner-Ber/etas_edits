@@ -8,8 +8,7 @@ event to the catalog. Uses kernels from forecast_intensity.
 
 import json
 import logging
-from pathlib import Path
-from typing import Any
+import pathlib
 
 import numpy as np
 import pandas as pd
@@ -17,10 +16,9 @@ import tqdm
 from scipy import integrate
 from scipy import optimize
 
+import etas.data_utils as data_utils
 import etas.forecast_intensity as etas_forecast_intensity
-from etas import utility_functions
-from etas.data_utils import estimate_area_km2_from_grid
-from etas.utility_functions import json_numpy_default
+import etas.utility_functions as utility_functions
 
 logger = logging.getLogger(__name__)
 
@@ -508,7 +506,7 @@ def run_etas_per_grid_point_inversion(
 
     mu_density = float(kernels["mu"](x_flat[0], y_flat[0]))
     if area_km2 is None:
-        area_km2 = estimate_area_km2_from_grid(x_flat, y_flat)
+        area_km2 = data_utils.estimate_area_km2_from_grid(x_flat, y_flat)
         logger.warning(
             "area_km2 not provided; estimated %.1f km² from grid layout.",
             area_km2,
@@ -530,7 +528,7 @@ def run_etas_per_grid_point_inversion(
 
     debug_file = None
     if DEBUG_GRID_SIM_JSONL_PATH:
-        dbg_p = Path(DEBUG_GRID_SIM_JSONL_PATH)
+        dbg_p = pathlib.Path(DEBUG_GRID_SIM_JSONL_PATH)
         dbg_p.parent.mkdir(parents=True, exist_ok=True)
         debug_file = open(dbg_p, "w", encoding="utf-8")
         hist_json = (
@@ -551,7 +549,7 @@ def run_etas_per_grid_point_inversion(
             "n_history_original": int(n_past),
         }
         debug_file.write(
-            json.dumps(init_rec, default=json_numpy_default) + "\n"
+            json.dumps(init_rec, default=utility_functions.json_numpy_default) + "\n"
         )
         debug_file.flush()
 
@@ -640,7 +638,7 @@ def run_etas_per_grid_point_inversion(
                 "n_history_original": int(n_past),
             }
             debug_file.write(
-                json.dumps(step_rec, default=json_numpy_default) + "\n"
+                json.dumps(step_rec, default=utility_functions.json_numpy_default) + "\n"
             )
             debug_file.flush()
 

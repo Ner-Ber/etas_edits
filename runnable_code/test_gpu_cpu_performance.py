@@ -9,17 +9,20 @@ Usage:
     python test_gpu_cpu_performance.py
 """
 
+import argparse
 import logging
+import os
+import sys
 import time
+
 import numpy as np
 import pandas as pd
 
-from eq_mag_prediction.utilities import data_utils
-import sys
-import os
+import eq_mag_prediction.utilities.data_utils as data_utils
+
 # Add current directory to path for importing run_etas_simulation
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from run_etas_simulation import run_etas_simulation
+import run_etas_simulation
 
 
 def compare_performance(
@@ -76,7 +79,7 @@ def compare_performance(
         print(f"  CPU run {run+1}/{num_runs} (seed={run_seed})...", end=' ', flush=True)
         start_time = time.time()
 
-        cpu_history, cpu_stats = run_etas_simulation(
+        cpu_history, cpu_stats = run_etas_simulation.run_etas_simulation(
             catalog=catalog,
             params=params,
             start_forecast=start_forecast,
@@ -107,7 +110,7 @@ def compare_performance(
             print(f"  GPU run {run+1}/{num_runs} (seed={run_seed})...", end=' ', flush=True)
             start_time = time.time()
 
-            gpu_history, gpu_stats = run_etas_simulation(
+            gpu_history, gpu_stats = run_etas_simulation.run_etas_simulation(
                 catalog=catalog,
                 params=params,
                 start_forecast=start_forecast,
@@ -180,8 +183,6 @@ def compare_performance(
 
 def main():
     """Main function to run performance comparison."""
-    import argparse
-
     parser = argparse.ArgumentParser(
         description='Compare GPU vs CPU performance for ETAS simulation',
         formatter_class=argparse.RawDescriptionHelpFormatter
