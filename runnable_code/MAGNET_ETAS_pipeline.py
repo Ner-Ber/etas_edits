@@ -35,22 +35,14 @@ def grid_params_from_inversion(etas_inversion: etas_inversion.ETASParameterCalcu
     """
     Build ``grid_params`` for ``simulate_catalog_continuation_grid`` from a fitted inversion.
 
-    Starts from ``forecast_intensity`` defaults, copies every key from ``theta``,
-    then sets ``m0``, ``beta``, and ``mu`` (from ``log10_mu``) from the inversion
-    object (catalog magnitude scale and background rate).
+    θ overrides ``forecast_intensity`` defaults via ``force_inversion_on_default_params``;
+    ``m0`` and ``beta`` are always taken from the inversion object (catalog scale).
     """
-    params = etas_simulation.GRID_DEFAULT_PARAMS.copy()
-    theta = etas_inversion.theta
-    if theta:
-        for key, value in theta.items():
-            params[key] = value
+    theta = etas_inversion.theta or {}
+    params = etas_forecast_intensity.force_inversion_on_default_params(theta)
     mc = etas_inversion.m_ref - etas_inversion.delta_m / 2
     params["m0"] = mc
     params["beta"] = etas_inversion.beta
-    if theta and "log10_mu" in theta:
-        params["mu"] = np.power(10, float(theta["log10_mu"]))
-    if theta and "log10_tau" in theta:
-        params["tau"] = np.power(10, float(theta["log10_tau"]))
     return params
 
 

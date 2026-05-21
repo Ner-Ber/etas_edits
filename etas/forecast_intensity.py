@@ -22,44 +22,65 @@ DEFAULT_PARAMS = {
     "m0": 1,
 }
 
+# ETAS inversion θ → grid / ``make_kernels`` parameter names.
+# Keys in θ not listed here are copied as-is (e.g. ``gamma``, ``a``).
+# ``beta`` and ``m0`` are usually set from ``ETASParameterCalculation`` after this merge.
+THETA_LOG10_TO_LINEAR = (
+    "log10_mu",
+    "log10_k0",
+    "log10_c",
+    "log10_tau",
+    "log10_d",
+)
 
 
 def force_inversion_on_default_params(inversion_params: dict, default_params: dict = DEFAULT_PARAMS):
     """
-    Unite inversion parameters and default parameters for grid / ``make_kernels``.
+    Merge inversion θ over ``default_params`` for grid / ``make_kernels``.
 
-    Inversion θ supplies ``rho``, ``omega``, ``log10_*``, etc. Derived grid fields
-    (``p``, ``q``, ``D``) are filled from defaults only when not already given by
-    the inversion dict. In particular, ``rho`` from θ is **not** replaced by
-    ``q - 1`` from ``DEFAULT_PARAMS`` (``q=1.5`` → ``rho=0.5``).
+    θ keys override notebook defaults. Transforms (only when the target is not
+    already in θ):
+
+    - ``log10_*`` → linear: ``mu``, ``k0``, ``c``, ``tau``, ``d`` via ``10**·``
+    - ``omega`` ↔ ``p``: ``p = omega + 1`` (``g`` also needs ``omega`` in params)
+    - ``rho`` ↔ ``q``: ``q = rho + 1`` for the ``f`` kernel
+    - ``d`` → ``D``: ``D = sqrt(d)`` for the ``f`` kernel (grid form, not ``sqrt(d/A)``)
+
+    Passed through without rename: ``gamma``, ``a`` (used by ``kappa`` / ``r``, not ``alpha``).
+
+    Set outside this helper: ``m0`` (from ``m_ref``, ``delta_m``), ``beta`` (from inversion).
     """
     inv = dict(inversion_params or {})
     inv_keys = set(inv.keys())
 
     params = default_params.copy()
-    for key, value in inv.items():
-        if key not in params:
-            params[key] = value
     params.update(inv)
 
-    for key in list(params.keys()):
-        if not key.startswith("log10_"):
+    for log_key in THETA_LOG10_TO_LINEAR:
+        if log_key not in inv_keys or inv.get(log_key) is None:
             continue
-        if params[key] is not None:
-            params[key.replace("log10_", "")] = 10 ** params[key]
+        linear = log_key.replace("log10_", "", 1)
+        if linear not in inv_keys:
+            params[linear] = 10.0 ** float(inv[log_key])
 
-    if params.get("omega") is not None:
-        params["p"] = params["omega"] + 1
+    if "omega" in inv_keys and inv.get("omega") is not None:
+        params["omega"] = float(inv["omega"])
+        if "p" not in inv_keys:
+            params["p"] = params["omega"] + 1.0
+    elif "p" in inv_keys and inv.get("p") is not None and "omega" not in inv_keys:
+        params["p"] = float(inv["p"])
+        params["omega"] = params["p"] - 1.0
 
-    if "rho" in inv_keys and inv["rho"] is not None:
+    if "rho" in inv_keys and inv.get("rho") is not None:
         params["rho"] = float(inv["rho"])
-    else:
-        params["rho"] = float(params["q"]) - 1.0
-
-    if "q" in inv_keys and inv["q"] is not None:
+        if "q" not in inv_keys:
+            params["q"] = float(inv["rho"]) + 1.0
+    elif "q" in inv_keys and inv.get("q") is not None:
         params["q"] = float(inv["q"])
-    elif "rho" in inv_keys and inv["rho"] is not None:
-        params["q"] = float(inv["rho"]) + 1.0
+        if "rho" not in inv_keys:
+            params["rho"] = float(inv["q"]) - 1.0
+    else:
+        params["rho"] = float(params.get("q", default_params["q"])) - 1.0
 
     if "D" not in inv_keys and params.get("d") is not None:
         params["D"] = float(params["d"]) ** 0.5

@@ -37,6 +37,9 @@ hermes = [
     "hermes-model @ git+https://gitlab.seismo.ethz.ch/indu/hermes-model.git",
     "seismostats @ git+https://github.com/swiss-seismological-service/SeismoStats.git",
 ]
+dev = [
+    "pytest>=8.0",
+]
 
 [tool.pylint.format]
 indent-string = "  "
