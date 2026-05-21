@@ -217,7 +217,8 @@ def _build_temp_configs_from_single_source(
         "simulate_catalog_continuation": {
           "continuation_mode": "classic" | "grid",
           "magnitude_generator": "simulate_magnitudes" | "MAGNET_magnitude" | ...,
-          "grid_continuation_options": { "grid_n_xy": [4, 4], "seed": 1905, ... }
+          "seed": 1905,
+          "grid_continuation_options": { "grid_n_xy": [4, 4], ... }
         },
         "run_magnet_training": true | false,
         "train_and_evaluate_magnitude_prediction_model": { "learning_rate": 1e-4, ... },
@@ -1724,6 +1725,16 @@ def create_reproduction_files(
     return rep_files
 
 
+def _continuation_seed_from_config(simulation_config: dict) -> int | None:
+    """Top-level ``seed`` in continuation JSON (classic and grid)."""
+    if "seed" not in simulation_config:
+        return None
+    value = simulation_config["seed"]
+    if value is None:
+        return None
+    return int(value)
+
+
 def _grid_continuation_options_from_config(
     simulation_config: dict,
     inversion_theta: dict | None,
@@ -1733,6 +1744,7 @@ def _grid_continuation_options_from_config(
     ``grid_continuation_options`` object). ``grid_params`` defaults to
     ``force_inversion_on_default_params(inversion_theta)`` when omitted.
     """
+    top_seed = _continuation_seed_from_config(simulation_config)
     raw = simulation_config.get("grid_continuation_options") or {}
     if not isinstance(raw, dict):
         raise TypeError("grid_continuation_options must be a JSON object when present.")
@@ -1756,7 +1768,7 @@ def _grid_continuation_options_from_config(
         grid_point_density_km2=grid_point_density_km2,
         grid_params=grid_params,
         projection=raw.get("projection"),
-        seed=raw.get("seed", 1905),
+        seed=raw.get("seed", top_seed if top_seed is not None else 1905),
         progress_bar=raw.get("progress_bar", True),
         kernel_variant=raw.get("kernel_variant", etas_forecast_intensity.KERNEL_VARIANT_DEFAULT),
     )
@@ -1774,6 +1786,8 @@ def run_etas_catalog_continuation(
     Continuation JSON may include:
       - ``continuation_mode``: ``\"classic\"`` or ``\"grid\"`` (default ``\"grid\"``
         when omitted, matching prior pipeline behavior).
+      - ``seed``: optional RNG seed for reproducibility (classic and grid). For
+        grid, also overridable via ``grid_continuation_options.seed``.
       - ``grid_continuation_options``: optional object with keys such as
         ``grid_n_xy``, ``seed``, ``grid_params``, ``progress_bar``,
         ``kernel_variant``. When ``grid_params`` is omitted, it is built from
@@ -1850,6 +1864,8 @@ def run_etas_catalog_continuation(
     if max_forecast_events is not None:
         max_forecast_events = int(max_forecast_events)
 
+    continuation_seed = _continuation_seed_from_config(simulation_config)
+
     simulation.simulate_to_csv(
         str(fn_store_simulation),
         forecast_duration,
@@ -1859,6 +1875,7 @@ def run_etas_catalog_continuation(
         continuation_mode=continuation_mode,
         grid_continuation_options=grid_opts,
         max_forecast_events=max_forecast_events,
+        seed=continuation_seed,
     )
 
     if reproduction_files:

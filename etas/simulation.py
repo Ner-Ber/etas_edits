@@ -359,7 +359,6 @@ def simulate_background_location(
     bslo=None,
     n=1,
 ):
-    np.random.seed()
     assert np.max(background_probs) <= 1, "background_probs cannot exceed 1"
 
     keep_idxs = []
@@ -1537,6 +1536,7 @@ class ETASSimulation:
             continuation_mode: Literal["classic", "grid"] = "classic",
             grid_continuation_options: Optional[GridContinuationOptions] = None,
             max_forecast_events: int | None = None,
+            seed: Optional[int] = None,
     ):
         if magnitude_generator_kwargs is None:
             magnitude_generator_kwargs = {}
@@ -1546,8 +1546,14 @@ class ETASSimulation:
         if continuation_mode == "grid":
             if grid_continuation_options is None:
                 grid_continuation_options = GridContinuationOptions(seed=1905)
+        effective_seed = seed
+        if effective_seed is None and continuation_mode == "grid":
+            effective_seed = grid_continuation_options.seed
         start = dt.datetime.now()
-        np.random.seed()
+        if effective_seed is not None:
+            np.random.seed(effective_seed)
+        else:
+            np.random.seed()
         logger.debug("induced info: {}".format(self.induced))
 
         if m_threshold is None:
@@ -1665,6 +1671,7 @@ class ETASSimulation:
         continuation_mode: Literal["classic", "grid"] = "classic",
         grid_continuation_options: Optional[GridContinuationOptions] = None,
         max_forecast_events: int | None = None,
+        seed: Optional[int] = None,
     ) -> None:
         if magnitude_generator_kwargs is None:
             magnitude_generator_kwargs = {}
@@ -1687,6 +1694,7 @@ class ETASSimulation:
                 continuation_mode=continuation_mode,
                 grid_continuation_options=grid_continuation_options,
                 max_forecast_events=max_forecast_events,
+                seed=seed,
             )
 
             next(generator).to_csv(fn_store, mode="w", header=True, index=True)
@@ -1738,6 +1746,7 @@ class ETASSimulation:
                     continuation_mode=continuation_mode,
                     grid_continuation_options=grid_continuation_options,
                     max_forecast_events=max_forecast_events,
+                    seed=seed,
                 )
 
         # append rest of chunks to file
@@ -1757,6 +1766,7 @@ class ETASSimulation:
         continuation_mode: Literal["classic", "grid"] = "classic",
         grid_continuation_options: Optional[GridContinuationOptions] = None,
         max_forecast_events: int | None = None,
+        seed: Optional[int] = None,
     ) -> ForecastCatalog:
         if magnitude_generator_kwargs is None:
             magnitude_generator_kwargs = {}
@@ -1773,6 +1783,7 @@ class ETASSimulation:
             continuation_mode=continuation_mode,
             grid_continuation_options=grid_continuation_options,
             max_forecast_events=max_forecast_events,
+            seed=seed,
         ):
             store = pd.concat([store, chunk], ignore_index=False)
         return ForecastCatalog(data=store)
