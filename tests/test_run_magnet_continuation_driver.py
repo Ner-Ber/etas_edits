@@ -1,0 +1,147 @@
+"""Unit tests for run_magnet_continuation_classic_then_grid helpers and CLI."""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+import run_magnet_continuation_classic_then_grid as driver
+
+
+class TestDeepMergeSimulateContinuation:
+    def test_classic_mode_sets_fields(
+        self, minimal_pipeline_base: dict, example_catalog_path: Path
+    ) -> None:
+        out = driver._deep_merge_simulate_continuation(
+            minimal_pipeline_base,
+            continuation_mode="classic",
+            max_forecast_events=5000,
+            catalog_csv=example_catalog_path,
+        )
+        scc = out["overrides"]["simulate_catalog_continuation"]
+        assert scc["continuation_mode"] == "classic"
+        assert scc["max_forecast_events"] == 5000
+        assert scc["magnitude_generator"] == "simulate_magnitudes"
+        assert out["overrides"]["catalog"]["path"] == str(example_catalog_path.resolve())
+
+    def test_grid_density_only_sets_grid_options(
+        self, minimal_pipeline_base: dict, example_catalog_path: Path
+    ) -> None:
+        out = driver._deep_merge_simulate_continuation(
+            minimal_pipeline_base,
+            continuation_mode="grid",
+            max_forecast_events=100,
+            catalog_csv=example_catalog_path,
+            grid_point_density_km2=0.05,
+        )
+        gopts = out["overrides"]["simulate_catalog_continuation"]["grid_continuation_options"]
+        assert gopts["grid_point_density_km2"] == pytest.approx(0.05)
+
+    def test_preserves_base_seed_when_present(
+        self, minimal_pipeline_base: dict, example_catalog_path: Path
+    ) -> None:
+        minimal_pipeline_base["overrides"]["simulate_catalog_continuation"]["seed"] = 777
+        out = driver._deep_merge_simulate_continuation(
+            minimal_pipeline_base,
+            continuation_mode="classic",
+            max_forecast_events=10,
+            catalog_csv=example_catalog_path,
+        )
+        assert out["overrides"]["simulate_catalog_continuation"]["seed"] == 777
+
+    def test_merged_config_is_strict_json_roundtrip(
+        self, minimal_pipeline_base: dict, example_catalog_path: Path
+    ) -> None:
+        out = driver._deep_merge_simulate_continuation(
+            minimal_pipeline_base,
+            continuation_mode="grid",
+            max_forecast_events=10,
+            catalog_csv=example_catalog_path,
+            grid_n_xy=(2, 2),
+        )
+        text = json.dumps(out)
+        parsed = json.loads(text)
+        assert parsed["overrides"]["simulate_catalog_continuation"]["continuation_mode"] == "grid"
+
+
+class TestParseInversionId:
+    def test_from_console_log(self, tmp_path: Path) -> None:
+        log = tmp_path / "run_classic_console.log"
+        log.write_text("INFO: Inversion ID: abc123def\n", encoding="utf-8")
+        assert driver._parse_inversion_id_from_logs(tmp_path) == "abc123def"
+
+    def test_from_continuation_folder_fallback(self, tmp_path: Path) -> None:
+        # log_root.parents[1] / "continuation" => .../outputs/continuation
+        log_root = tmp_path / "outputs" / "pipeline_continuation_trace_logs" / "20260101T000000Z"
+        log_root.mkdir(parents=True)
+        cont = tmp_path / "outputs" / "continuation"
+        (cont / "no_magnet_xyz789_grid").mkdir(parents=True)
+        assert driver._parse_inversion_id_from_logs(log_root) == "xyz789"
+
+
+class TestFormatPathForTerminal:
+    def test_includes_wsl_path(self, tmp_path: Path) -> None:
+        text = driver._format_path_for_terminal(tmp_path)
+        assert "WSL:" in text
+        assert str(tmp_path.resolve()) in text
+
+    def test_windows_line_when_wslpath_available(self, tmp_path: Path) -> None:
+        if driver.shutil.which("wslpath") is None:
+            pytest.skip("wslpath not available")
+        text = driver._format_path_for_terminal(tmp_path)
+        assert "Windows:" in text
+
+
+class TestRunMeta:
+    def test_enrich_run_meta_writes_dirs(self, tmp_path: Path) -> None:
+        meta_path = tmp_path / "run_meta.json"
+        meta_path.write_text('{"inversion_id": null}\n', encoding="utf-8")
+        repo = tmp_path
+        driver._enrich_run_meta_after_runs(
+            meta_path,
+            log_root=tmp_path,
+            repo=repo,
+            inversion_id="inv42",
+            report_html=tmp_path / "compare_continuation_trace_logs.html",
+        )
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        assert meta["inversion_id"] == "inv42"
+        assert meta["classic_continuation_dir"].endswith("no_magnet_inv42_classic")
+        assert meta["comparison_html_report"].endswith("compare_continuation_trace_logs.html")
+
+
+class TestMainCliValidation:
+    def test_rejects_both_grid_size_and_density(self, repo_root: Path) -> None:
+        argv = [
+            "run_magnet_continuation_classic_then_grid.py",
+            "--repo-root",
+            str(repo_root),
+            "--max-forecast-events",
+            "10",
+            "--grid-n-xy",
+            "4",
+            "4",
+            "--grid-point-density-km2",
+            "0.05",
+            "--no-report",
+        ]
+        with patch.object(sys, "argv", argv):
+            assert driver.main() == 2
+
+    def test_rejects_non_positive_density(self, repo_root: Path) -> None:
+        argv = [
+            "run_magnet_continuation_classic_then_grid.py",
+            "--repo-root",
+            str(repo_root),
+            "--max-forecast-events",
+            "10",
+            "--grid-point-density-km2",
+            "0",
+            "--no-report",
+        ]
+        with patch.object(sys, "argv", argv):
+            assert driver.main() == 2
