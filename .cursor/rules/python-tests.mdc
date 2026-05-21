@@ -1,0 +1,51 @@
+---
+description: Run and fix pytest after Python changes; hooks auto-run mapped tests on Agent Write edits.
+globs:
+  - etas/**/*.py
+  - runnable_code/**/*.py
+  - tests/**/*.py
+---
+
+# Python tests (etas_edits)
+
+After changing Python under `etas/`, `runnable_code/`, or `tests/`, **relevant tests must pass** before the task is done.
+
+## Run tests manually
+
+From repo root (add sibling `eq_mag_prediction` on `PYTHONPATH` when pipeline tests need it):
+
+```bash
+cd /path/to/etas_edits
+PYTHONPATH="$PWD:$PWD/runnable_code:$HOME/REPOS/eq_mag_prediction" \
+  python -m pytest tests/ -q --tb=short
+```
+
+Install dev deps: `pip install -e ".[dev]"` or `pip install pytest`.
+
+## Cursor hooks (Agent `Write` edits)
+
+- **afterFileEdit** runs mapped pytest and writes `.cursor/hooks/.pytest-last-run.json`.
+- **stop** sends a follow-up if that run **failed** (fresh ≤10 min, up to **3** loops).
+
+Tab-only edits may not trigger hooks. If hooks did not run, run pytest yourself before claiming done.
+
+## File → test mapping
+
+| Edited file | Pytest target(s) |
+|-------------|------------------|
+| `tests/test_*.py` | that file |
+| `etas/forecast_intensity.py` | `tests/test_forecast_intensity_force_inversion.py` |
+| `etas/simulation.py` | `tests/test_simulation_seed_and_kernels.py` |
+| `runnable_code/MAGNET_ETAS_pipeline.py` | `tests/test_continuation_seed_and_grid_options.py`, `tests/test_magnet_pipeline_json_merge.py` |
+| `runnable_code/run_magnet_continuation_classic_then_grid.py` | `tests/test_run_magnet_continuation_driver.py` |
+| `etas/<name>.py` | `tests/test_<name>.py` if it exists |
+| `runnable_code/<name>.py` | `tests/test_<name>.py` if it exists |
+| other `.py` under repo (not skipped paths) | `tests/` (full suite, fast unit tests only) |
+
+Skipped (no hook run): `docs/`, `.cursor/`, `config/`, `outputs/`, notebooks, non-`.py` files.
+
+## Agent obligations
+
+1. Read `.cursor/hooks/.pytest-last-run.json` after edits when available.
+2. Do **not** treat the task complete while `status` is `fail` for your edited files.
+3. Fix failures, then re-run the same pytest command (or save the file again to trigger the hook).

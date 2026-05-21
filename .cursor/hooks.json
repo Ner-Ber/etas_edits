@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "hooks": {
+    "afterFileEdit": [
+      {
+        "command": "bash .cursor/hooks/run-tests-on-edit.sh",
+        "matcher": "Write",
+        "timeout": 300
+      }
+    ],
+    "stop": [
+      {
+        "command": "bash .cursor/hooks/stop-on-test-failure.sh",
+        "matcher": "Stop",
+        "timeout": 60,
+        "loop_limit": 3
+      }
+    ]
+  }
+}

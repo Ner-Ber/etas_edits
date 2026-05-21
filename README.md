@@ -27,6 +27,10 @@ To install, run
 <br/>
 <br/>
 
+**Tests:** `PYTHONPATH=$PWD:$PWD/runnable_code:$HOME/REPOS/eq_mag_prediction python -m pytest tests/ -q` — Cursor Agent hooks re-run mapped tests after each `Write` edit (see `.cursor/rules/python-tests.mdc`).
+<br/>
+<br/>
+
 ### Contents:
 
 -   <code>runnable_code/</code> scripts to be run for parameter inversion or catalog simulation
