@@ -1,4 +1,5 @@
 # Custom
+.cursor/hooks/.pytest-last-run.json
 output_data/*
 outputs/*
 **/output_data/
