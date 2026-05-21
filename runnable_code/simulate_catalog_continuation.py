@@ -50,10 +50,14 @@ if __name__ == '__main__':
     simulation.prepare()
 
     # simulate and store one catalog
+    seed = simulation_config.get("seed")
+    if seed is not None:
+        seed = int(seed)
     simulation.simulate_to_csv(
         fn_store_simulation,
         forecast_duration,
         1,
         magnitude_generator=simulation_config.get(
-            "magnitude_generator", "simulate_magnitudes")
+            "magnitude_generator", "simulate_magnitudes"),
+        seed=seed,
     )

@@ -16,14 +16,12 @@
         "simulate_catalog_continuation": {
             "forecast_duration": 1000,
             "magnitude_generator": "simulate_magnitudes",
-            // "continuation_mode": "grid",
             "continuation_mode": "classic",
             "grid_continuation_options": {
                 "grid_n_xy": [
                     4,
                     4
-                ],
-                "seed": 1905
+                ]
             }
         },
         "shape_coords": null,
