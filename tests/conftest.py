@@ -8,6 +8,8 @@ import sys
 
 import pytest
 
+from _import_helpers import load_module_from_path
+
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 RUNNABLE_CODE = REPO_ROOT / "runnable_code"
 CONFIG_DIR = REPO_ROOT / "config"
@@ -64,6 +66,26 @@ def example_catalog_path(repo_root: pathlib.Path) -> pathlib.Path:
     if not path.is_file():
         pytest.skip(f"example catalog missing: {path}")
     return path
+
+
+@pytest.fixture(scope="session")
+def continuation_config_mod():
+    """``continuation_config`` loaded once per test session."""
+    return load_module_from_path(
+        "continuation_config_test_session",
+        RUNNABLE_CODE / "continuation_config.py",
+        skip_reason_prefix="continuation_config import failed",
+    )
+
+
+@pytest.fixture(scope="session")
+def magnet_pipeline_module():
+    """``MAGNET_ETAS_pipeline`` loaded once per test session (integration)."""
+    return load_module_from_path(
+        "magnet_etas_pipeline_test_session",
+        RUNNABLE_CODE / "MAGNET_ETAS_pipeline.py",
+        skip_reason_prefix="MAGNET_ETAS_pipeline import failed",
+    )
 
 
 def load_json(path: pathlib.Path) -> dict:

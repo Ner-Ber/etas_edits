@@ -27,7 +27,7 @@ To install, run
 <br/>
 <br/>
 
-**Tests:** `PYTHONPATH=$PWD:$PWD/runnable_code:$HOME/REPOS/eq_mag_prediction python -m pytest tests/ -q` — Cursor Agent hooks re-run mapped tests after each `Write` edit (see `.cursor/rules/python-tests.mdc`).
+**Tests:** fast unit checks: `PYTHONPATH=$PWD:$PWD/runnable_code python -m pytest -m unit -q --tb=short`. Integration (optional): add `$HOME/REPOS/eq_mag_prediction` to `PYTHONPATH` and run `pytest -m "unit or integration" -q`. Full suite before PR: `pytest -q`. Cursor Agent hooks run **mapped** tests after each `Write` edit (see `.cursor/rules/python-tests.mdc`).
 <br/>
 <br/>
 

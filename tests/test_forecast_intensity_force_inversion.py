@@ -7,6 +7,8 @@ import pytest
 
 import etas.forecast_intensity as etas_forecast_intensity
 
+pytestmark = pytest.mark.unit
+
 # Representative fitted inversion θ (from pipeline compare logs).
 FULL_THETA = {
     "rho": 0.6176230718737372,

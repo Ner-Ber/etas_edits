@@ -10,14 +10,30 @@ globs:
 
 After changing Python under `etas/`, `runnable_code/`, or `tests/`, **relevant tests must pass** before the task is done.
 
+## Test tiers
+
+| Marker | Scope | Hook tier / timeout |
+|--------|-------|---------------------|
+| `unit` | etas + lightweight runnable_code helpers | 60s |
+| `integration` | driver / pipeline JSON merge | 180s |
+| `heavy` | full MAGNET stack (gin, TF) | manual / CI only |
+
+Unmarked tests are rejected (`--strict-markers` in `pytest.ini`). Every test file uses module-level `pytestmark`.
+
 ## Run tests manually
 
-From repo root (add sibling `eq_mag_prediction` on `PYTHONPATH` when pipeline tests need it):
+From repo root (add sibling `eq_mag_prediction` on `PYTHONPATH` when integration tests need it):
 
 ```bash
 cd /path/to/etas_edits
 PYTHONPATH="$PWD:$PWD/runnable_code:$HOME/REPOS/eq_mag_prediction" \
-  python -m pytest tests/ -q --tb=short
+  python -m pytest -m unit -q --tb=short
+
+# integration (optional env)
+python -m pytest -m "unit or integration" -q --tb=short
+
+# full suite before PR
+python -m pytest -q --tb=short
 ```
 
 Install dev deps: `pip install -e ".[dev]"` or `pip install pytest`.
@@ -26,26 +42,35 @@ Install dev deps: `pip install -e ".[dev]"` or `pip install pytest`.
 
 - **afterFileEdit** runs mapped pytest and writes `.cursor/hooks/.pytest-last-run.json`.
 - **stop** sends a follow-up if that run **failed** (fresh ≤10 min, up to **3** loops).
+- State includes `mapping` (`explicit`, `stem_match`, `smoke_fallback`, `skipped`) and `tier`.
 
 Tab-only edits may not trigger hooks. If hooks did not run, run pytest yourself before claiming done.
 
-## File → test mapping
+## File → test mapping (hook)
 
-| Edited file | Pytest target(s) |
-|-------------|------------------|
-| `tests/test_*.py` | that file |
-| `etas/forecast_intensity.py` | `tests/test_forecast_intensity_force_inversion.py` |
-| `etas/simulation.py` | `tests/test_simulation_seed_and_kernels.py` |
-| `runnable_code/MAGNET_ETAS_pipeline.py` | `tests/test_continuation_seed_and_grid_options.py`, `tests/test_magnet_pipeline_json_merge.py` |
-| `runnable_code/run_magnet_continuation_classic_then_grid.py` | `tests/test_run_magnet_continuation_driver.py` |
-| `etas/<name>.py` | `tests/test_<name>.py` if it exists |
-| `runnable_code/<name>.py` | `tests/test_<name>.py` if it exists |
-| other `.py` under repo (not skipped paths) | `tests/` (full suite, fast unit tests only) |
+| Edited file | Pytest target(s) | Mapping |
+|-------------|------------------|---------|
+| `tests/test_*.py` | that file | `test_file` |
+| `etas/forecast_intensity.py` | `tests/test_forecast_intensity_force_inversion.py` | `explicit` |
+| `etas/grid_simulation.py` | `tests/test_simulation_seed_and_kernels.py` | `explicit` |
+| `etas/simulation.py` | `tests/test_simulation_seed_and_kernels.py` | `explicit` |
+| `etas/utility_functions.py` | `tests/test_simulation_seed_and_kernels.py` | `explicit` |
+| `runnable_code/continuation_config.py` | `tests/test_continuation_seed_and_grid_options.py` | `explicit` |
+| `runnable_code/MAGNET_ETAS_pipeline.py` | `tests/test_continuation_seed_and_grid_options.py`, `tests/test_magnet_pipeline_json_merge.py` | `explicit` |
+| `runnable_code/run_magnet_continuation_classic_then_grid.py` | `tests/test_run_magnet_continuation_driver.py` | `explicit` |
+| `etas/<name>.py` | `tests/test_<name>.py` if it exists | `stem_match` |
+| `runnable_code/<name>.py` | `tests/test_<name>.py` if it exists | `stem_match` |
+| other `.py` (not skipped paths) | `tests/test_smoke_import.py` with `-m unit` | `smoke_fallback` |
 
 Skipped (no hook run): `docs/`, `.cursor/`, `config/`, `outputs/`, notebooks, non-`.py` files.
+
+## Shared import helpers
+
+Integration tests that load runnable modules use `tests/_import_helpers.load_module_from_path` or session fixtures in `tests/conftest.py` (`continuation_config_mod`, `magnet_pipeline_module`). Do not cache a module in `sys.modules` before a successful import.
 
 ## Agent obligations
 
 1. Read `.cursor/hooks/.pytest-last-run.json` after edits when available.
 2. Do **not** treat the task complete while `status` is `fail` for your edited files.
-3. Fix failures, then re-run the same pytest command (or save the file again to trigger the hook).
+3. Fix failures in the **mapped** targets; smoke-fallback or unrelated integration failures should not block unrelated refactors unless you changed an integration-mapped file.
+4. Re-run the same pytest command (or save the file again to trigger the hook).
