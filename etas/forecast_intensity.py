@@ -93,6 +93,14 @@ def force_inversion_on_default_params(inversion_params: dict, default_params: di
 KERNEL_VARIANT_DEFAULT = "default"
 KERNEL_VARIANT_ALTERNATE = "alternate"
 
+# Grid / UTM offsets are in metres; inversion ``d`` and ``D`` pair with km (haversine).
+_UTM_M_TO_KM = 1.0e-3
+
+
+def _spatial_offsets_km(dx, dy):
+    """Convert UTM offsets (m) to km for kernels that use inversion ``d`` in km²."""
+    return np.asarray(dx, dtype=float) * _UTM_M_TO_KM, np.asarray(dy, dtype=float) * _UTM_M_TO_KM
+
 
 def _make_kernels_default(params):
     """
@@ -121,21 +129,31 @@ def _make_kernels_default(params):
         return A * np.exp(a_eff * (m - params["m0"]))
 
     def g(t):
-        # Time kernel
-        # return (params["p"] - 1) / params["c"] * (
-        #     1 + t / params["c"]
-        # ) ** (-params["p"])
-        return np.exp(-t / params["tau"])/(t + params["c"])**(1 + params["omega"])
+        # Time kernel; non-positive lags are zero (no self-trigger at same instant).
+        t_arr = np.asarray(t, dtype=float)
+        safe = np.maximum(t_arr, 0.0)
+        val = np.exp(-safe / params["tau"]) / (safe + params["c"]) ** (
+            1 + params["omega"]
+        )
+        out = np.where(t_arr > 0, val, 0.0)
+        if np.isscalar(t) or (hasattr(t, "shape") and t.shape == ()):
+            return float(out)
+        return out
 
     def r(dx, dy, m):
-        return ((dx**2 + dy**2) + params["d"] * np.exp(params["gamma"] * (m - params["m0"])))**(-(1 + params["rho"]))
+        dx_km, dy_km = _spatial_offsets_km(dx, dy)
+        r2_km2 = dx_km**2 + dy_km**2
+        return (
+            r2_km2 + params["d"] * np.exp(params["gamma"] * (m - params["m0"]))
+        ) ** (-(1 + params["rho"]))
 
     def f(dx, dy, m):
         k = kappa(m)
-        r2 = np.asarray(dx) ** 2 + np.asarray(dy) ** 2
+        dx_km, dy_km = _spatial_offsets_km(dx, dy)
+        r2_km2 = dx_km**2 + dy_km**2
         return (params["q"] - 1) / (
             np.pi * params["D"] ** 2 * k
-        ) * (1 + r2 / (params["D"] ** 2 * k)) ** (-params["q"])
+        ) * (1 + r2_km2 / (params["D"] ** 2 * k)) ** (-params["q"])
 
     def summand(dx, dy, m, t):
         # return kappa(m) * f(dx, dy, m) * g(t)
@@ -280,11 +298,14 @@ def rate_at_t_all_grid(
 
     for k in range(len(h_x)):
         x_k, y_k, m_k, t_k_days = h_x[k], h_y[k], h_m[k], h_t_days[k]
+        dt_days = t_days - t_k_days
+        if dt_days <= 0:
+            continue
         dx = x_flat - x_k
         dy = y_flat - y_k
         kappa_val = kappa_fn(m_k)
         f_vals = f_fn(dx, dy, m_k)
-        g_vals = g_fn(t_days - t_k_days)
+        g_vals = g_fn(dt_days)
         local_intensity += kappa_val * f_vals * g_vals
 
     mu_val = mu_fn(x_flat[0], y_flat[0])
@@ -332,11 +353,14 @@ def rate_time_lambdas_on_grid(
     lambda_i_list = []
     for k in range(len(h_x)):
         x_k, y_k, m_k, t_k_days = h_x[k], h_y[k], h_m[k], h_t_days[k]
+        dt_days = t_days - t_k_days
+        if dt_days <= 0:
+            continue
         dx = x_flat - x_k
         dy = y_flat - y_k
         kappa_val = kappa_fn(m_k)
         f_vals = f_fn(dx, dy, m_k)
-        g_vals = g_fn(t_days - t_k_days)
+        g_vals = g_fn(dt_days)
         local_intensity += kappa_val * f_vals * g_vals
         lambda_i_list.append(local_intensity)
     mu_val = mu_fn(x_flat[0], y_flat[0])

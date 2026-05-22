@@ -110,3 +110,16 @@ def test_full_theta_produces_keys_required_by_make_kernels() -> None:
     assert float(kernels["mu"](0.0, 0.0)) > 0
     assert len(kernels["kappa"](np.array([3.0, 4.0]))) == 2
     assert len(kernels["g"](np.array([0.1, 1.0]))) == 2
+
+
+def test_spatial_kernel_uses_km_for_utm_metre_offsets() -> None:
+    """UTM dx/dy in metres must pair with inversion d in km² (not m²)."""
+    params = etas_forecast_intensity.force_inversion_on_default_params(FULL_THETA)
+    params["m0"] = 3.6
+    kernels = etas_forecast_intensity.make_kernels(params)
+    m = 4.0
+    # 400 km span in UTM metres
+    x_m = np.linspace(-200_000.0, 200_000.0, 101)
+    y_m = np.zeros_like(x_m)
+    r_vals = kernels["f"](x_m, y_m, m)
+    assert float(np.sum(r_vals)) > 1.0e-4

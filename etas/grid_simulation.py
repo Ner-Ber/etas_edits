@@ -514,7 +514,8 @@ def run_etas_per_grid_point_inversion(
             area_km2,
         )
     area_km2 = float(area_km2)
-    cell_area_km2 = area_km2 / n_grid
+    cell_area_km2 = area_km2 / n_grid   # TODO: this should eventually be the accurate area per cell
+    # Regional background: mu_density [events/day/km²] * area_km2 [km²].
     mu_background = mu_density * area_km2
 
     # Aggregate spatial weights per history event (sum f over grid nodes).
@@ -565,14 +566,17 @@ def run_etas_per_grid_point_inversion(
             dt = v_days - h_t_days
             valid = dt > 0
             triggered = np.sum(spatial_weights[valid] * kernels["g"](dt[valid]))
-            return mu_background + triggered
+            # Background uses full polygon area; triggering uses sum over cells (× cell_area).
+            return mu_background + cell_area_km2 * triggered
 
         u = float(np.random.uniform(0.0, 1.0))
         d_comp = -np.log(u)
-        current_rate = float(total_rate(t_days)) * cell_area_km2
+        current_rate = float(total_rate(t_days))
 
         def objective(t_prime_days):
-            area, _ = integrate.quad(total_rate, t_days, t_prime_days, limit=50)
+            area, _ = integrate.quad(
+                total_rate, t_days, t_prime_days, limit=200
+            )
             return area - d_comp
 
         guess_step_days = d_comp / current_rate if current_rate > 0 else 0.1
@@ -600,7 +604,12 @@ def run_etas_per_grid_point_inversion(
                 h_t_days,
                 kernels=kernels,
             )
-            rates_at_loc = rates_at_loc - mu_density + mu_density * cell_area_km2
+            # Point intensity -> event rate per cell (constant mu on all nodes).
+            rates_at_loc = rates_at_loc * cell_area_km2
+            rates_at_loc = np.nan_to_num(
+                rates_at_loc, nan=0.0, posinf=0.0, neginf=0.0
+            )
+            rates_at_loc = np.maximum(rates_at_loc, 0.0)
             total_spatial = float(np.sum(rates_at_loc))
             if total_spatial <= 0:
                 min_idx = int(np.random.randint(n_grid))
