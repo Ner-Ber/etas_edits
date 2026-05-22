@@ -481,14 +481,16 @@ def run_etas_per_grid_point_inversion(
     kernels = etas_forecast_intensity.make_kernels(params, variant=kernel_variant)
 
     if not in_place:
-        catalog = history.copy()
-        if not isinstance(catalog, pd.DataFrame):
-            catalog = pd.DataFrame(catalog)
+        working_history = history.copy()
+        if not isinstance(working_history, pd.DataFrame):
+            working_history = pd.DataFrame(working_history)
     else:
-        catalog = history if isinstance(history, pd.DataFrame) else pd.DataFrame(history)
+        working_history = (
+            history if isinstance(history, pd.DataFrame) else pd.DataFrame(history)
+        )
 
     # Frozen input catalog: unchanged while simulating; handy for debug breakpoints.
-    history_original = catalog.copy()
+    history_original = working_history.copy()
     n_past = len(history_original)
     n_grid = len(x_flat)
     t = float(start_forecast)
@@ -517,10 +519,10 @@ def run_etas_per_grid_point_inversion(
 
     # Aggregate spatial weights per history event (sum f over grid nodes).
     spatial_weights = []
-    for k in range(len(catalog)):
-        dx = x_flat - catalog["x_utm"].iloc[k]
-        dy = y_flat - catalog["y_utm"].iloc[k]
-        m_k = catalog["magnitude"].iloc[k]
+    for k in range(len(working_history)):
+        dx = x_flat - working_history["x_utm"].iloc[k]
+        dy = y_flat - working_history["y_utm"].iloc[k]
+        m_k = working_history["magnitude"].iloc[k]
         spatial_weights.append(
             kernels["kappa"](m_k) * np.sum(kernels["f"](dx, dy, m_k))
         )
@@ -556,7 +558,7 @@ def run_etas_per_grid_point_inversion(
     step_index = 0
     while t < end_forecast:
         step_index += 1
-        h_t_days = catalog["time"].values / SECONDS_PER_DAY
+        h_t_days = working_history["time"].values / SECONDS_PER_DAY
         t_days = t / SECONDS_PER_DAY
 
         def total_rate(v_days):
@@ -592,9 +594,9 @@ def run_etas_per_grid_point_inversion(
                 t_star / SECONDS_PER_DAY,
                 x_flat,
                 y_flat,
-                catalog["x_utm"].values,
-                catalog["y_utm"].values,
-                catalog["magnitude"].values,
+                working_history["x_utm"].values,
+                working_history["y_utm"].values,
+                working_history["magnitude"].values,
                 h_t_days,
                 kernels=kernels,
             )
@@ -634,7 +636,7 @@ def run_etas_per_grid_point_inversion(
                 "min_idx": min_idx,
                 "accepted": accepted,
                 "new_event": new_event_payload,
-                "n_catalog_before_step": int(len(catalog)),
+                "n_working_history_before_step": int(len(working_history)),
                 "n_history_original": int(n_past),
             }
             debug_file.write(
@@ -650,14 +652,14 @@ def run_etas_per_grid_point_inversion(
                 )
             break
 
-        # Working catalog (past + simulated-so-far); return merge is after the loop.
+        # Working history (past + simulated-so-far); return merge is after the loop.
         new_event = pd.DataFrame({
             "time": [t_star],
             "x_utm": [new_x],
             "y_utm": [new_y],
             "magnitude": [new_m]
         })
-        catalog = pd.concat([catalog, new_event], ignore_index=True)
+        working_history = pd.concat([working_history, new_event], ignore_index=True)
 
         new_dx = x_flat - new_x
         new_dy = y_flat - new_y
@@ -701,7 +703,7 @@ def run_etas_per_grid_point_inversion(
     if pbar:
         pbar.close()
 
-    forecast_only = catalog.iloc[n_past:].copy()
+    forecast_only = working_history.iloc[n_past:].copy()
     if return_full_catalog:
         if forecast_only.empty:
             return history_original.copy()
