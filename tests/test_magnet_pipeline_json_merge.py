@@ -25,11 +25,11 @@ def _load_pipeline_json_merge_helpers():
     if spec is None or spec.loader is None:
         pytest.skip("MAGNET_ETAS_pipeline not loadable")
     mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
     try:
         spec.loader.exec_module(mod)
     except Exception as exc:
         pytest.skip(f"MAGNET_ETAS_pipeline import failed: {exc}")
+    sys.modules[name] = mod
     return mod
 
 
