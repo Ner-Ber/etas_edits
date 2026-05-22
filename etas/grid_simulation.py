@@ -569,7 +569,7 @@ def run_etas_per_grid_point_inversion(
 
         u = float(np.random.uniform(0.0, 1.0))
         d_comp = -np.log(u)
-        current_rate = float(total_rate(t_days))
+        current_rate = float(total_rate(t_days)) * cell_area_km2
 
         def objective(t_prime_days):
             area, _ = integrate.quad(total_rate, t_days, t_prime_days, limit=50)

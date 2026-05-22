@@ -11,6 +11,8 @@ import pytest
 
 import run_magnet_continuation_classic_then_grid as driver
 
+pytestmark = pytest.mark.integration
+
 
 class TestDeepMergeSimulateContinuation:
     def test_classic_mode_sets_fields(
@@ -26,6 +28,7 @@ class TestDeepMergeSimulateContinuation:
         assert scc["continuation_mode"] == "classic"
         assert scc["max_forecast_events"] == 5000
         assert scc["magnitude_generator"] == "simulate_magnitudes"
+        assert scc["seed"] == driver._DEFAULT_CONTINUATION_SEED
         assert out["overrides"]["catalog"]["path"] == str(example_catalog_path.resolve())
 
     def test_grid_density_only_sets_grid_options(
@@ -52,6 +55,19 @@ class TestDeepMergeSimulateContinuation:
             catalog_csv=example_catalog_path,
         )
         assert out["overrides"]["simulate_catalog_continuation"]["seed"] == 777
+
+    def test_cli_seed_overrides_base(
+        self, minimal_pipeline_base: dict, example_catalog_path: Path
+    ) -> None:
+        minimal_pipeline_base["overrides"]["simulate_catalog_continuation"]["seed"] = 777
+        out = driver._deep_merge_simulate_continuation(
+            minimal_pipeline_base,
+            continuation_mode="grid",
+            max_forecast_events=10,
+            catalog_csv=example_catalog_path,
+            seed=42,
+        )
+        assert out["overrides"]["simulate_catalog_continuation"]["seed"] == 42
 
     def test_merged_config_is_strict_json_roundtrip(
         self, minimal_pipeline_base: dict, example_catalog_path: Path

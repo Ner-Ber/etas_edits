@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import pytest
+
+pytestmark = pytest.mark.unit
+
 
 def test_import_etas_forecast_intensity() -> None:
     import etas.forecast_intensity as fi

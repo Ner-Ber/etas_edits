@@ -2,38 +2,11 @@
 
 from __future__ import annotations
 
-import importlib.util
-import sys
-from pathlib import Path
-
 import pytest
 
 from _helpers import flatten_dict
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-_CONTINUATION_CONFIG_MODULE_PATH = REPO_ROOT / "runnable_code" / "continuation_config.py"
-
-
-def _load_continuation_config_module():
-    """Load continuation_config from runnable_code (lightweight imports)."""
-    name = "continuation_config_test"
-    if name in sys.modules:
-        return sys.modules[name]
-    spec = importlib.util.spec_from_file_location(name, _CONTINUATION_CONFIG_MODULE_PATH)
-    if spec is None or spec.loader is None:
-        pytest.skip("could not load continuation_config module spec")
-    mod = importlib.util.module_from_spec(spec)
-    try:
-        spec.loader.exec_module(mod)
-    except Exception as exc:  # pragma: no cover - env-specific
-        pytest.skip(f"continuation_config import failed: {exc}")
-    sys.modules[name] = mod
-    return mod
-
-
-@pytest.fixture
-def continuation_config_mod():
-    return _load_continuation_config_module()
+pytestmark = pytest.mark.unit
 
 
 class TestContinuationSeedFromConfig:

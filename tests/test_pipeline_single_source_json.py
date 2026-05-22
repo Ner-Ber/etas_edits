@@ -10,6 +10,8 @@ import pytest
 
 from _helpers import load_json
 
+pytestmark = pytest.mark.unit
+
 
 def test_shipped_pipeline_single_source_files_parse(pipeline_config_paths: list[Path]) -> None:
     assert pipeline_config_paths, "expected pipeline_single_source*.json under config/"
@@ -17,7 +19,9 @@ def test_shipped_pipeline_single_source_files_parse(pipeline_config_paths: list[
         data = load_json(path)
         assert "templates" in data
         assert "overrides" in data
+        scc = data["overrides"]["simulate_catalog_continuation"]
         assert "simulate_catalog_continuation" in data["overrides"]
+        assert scc.get("seed") == 1905
 
 
 def test_json_line_comments_fail_like_run_magnet_driver() -> None:
