@@ -109,3 +109,16 @@ def log_events_batch(site: str, df: pd.DataFrame) -> None:
     with _LOCK:
         file_nonempty = os.path.exists(path) and os.path.getsize(path) > 0
         out.to_csv(path, mode="a", index=False, header=not file_nonempty)
+
+
+def aftershock_radius_from_uniform(log10_d, gamma, rho, mi, mc, y_r):
+    """
+    Aftershock radius (km) from uniform spatial CDF argument ``y_r`` in (0, 1).
+
+    Same map as inside ``etas.simulation.simulate_aftershock_radius`` (inverse spatial kernel).
+    """
+    mi = np.asarray(mi, dtype=float)
+    y_r = np.asarray(y_r, dtype=float)
+    d = np.power(10, log10_d)
+    d_g = d * np.exp(gamma * (mi - mc))
+    return np.sqrt(np.power(1 - y_r, -1 / rho) * d_g - d_g)
