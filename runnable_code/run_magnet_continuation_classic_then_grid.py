@@ -14,6 +14,7 @@ Optional:
   python runnable_code/run_magnet_continuation_classic_then_grid.py \\
     --repo-root /path/to/etas_edits \\
     --max-forecast-events 1000 \\
+    --seed 1905 \\
     --grid-n-xy 8 8
 
   # or density-based grid (nodes per km² inside the polygon; overrides --grid-n-xy):
@@ -42,6 +43,8 @@ import pathlib
 _COMPARE_NOTEBOOK = "notebooks/compare_continuation_trace_logs.ipynb"
 _REPORT_HTML_NAME = "compare_continuation_trace_logs.html"
 _INV_LINE_RE = re.compile(r"Inversion ID:\s*(\S+)")
+# Match ``ETASSimulation.DEFAULT_CONTINUATION_SEED`` / pipeline docs.
+_DEFAULT_CONTINUATION_SEED = 1905
 
 
 def _windows_path_if_wsl(path: pathlib.Path) -> str | None:
@@ -80,6 +83,7 @@ def _deep_merge_simulate_continuation(
     catalog_csv: pathlib.Path,
     grid_n_xy: tuple[int, int] | None = None,
     grid_point_density_km2: float | None = None,
+    seed: int | None = None,
 ) -> dict:
     cfg = copy.deepcopy(base)
     overrides = cfg.setdefault("overrides", {})
@@ -87,6 +91,10 @@ def _deep_merge_simulate_continuation(
     scc["continuation_mode"] = continuation_mode
     scc["magnitude_generator"] = "simulate_magnitudes"
     scc["max_forecast_events"] = int(max_forecast_events)
+    if seed is not None:
+        scc["seed"] = int(seed)
+    else:
+        scc.setdefault("seed", _DEFAULT_CONTINUATION_SEED)
     if continuation_mode == "grid" and (
         grid_n_xy is not None or grid_point_density_km2 is not None
     ):
@@ -271,6 +279,17 @@ def main() -> int:
         default=1000,
         help="Stop continuation after this many forecast-period events (or forecast end, whichever first).",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            f"RNG seed for classic and grid continuation "
+            f"(overrides pipeline JSON; default when omitted: {_DEFAULT_CONTINUATION_SEED} "
+            "or value already in --base-pipeline-json)."
+        ),
+    )
     grid_group = parser.add_argument_group(
         "grid continuation (grid run only)",
         "Configure the spatial grid passed to simulate_catalog_continuation_grid.",
@@ -352,6 +371,7 @@ def main() -> int:
         continuation_mode="classic",
         max_forecast_events=args.max_forecast_events,
         catalog_csv=example_catalog,
+        seed=args.seed,
     )
     grid_cfg = _deep_merge_simulate_continuation(
         base_pipeline,
@@ -360,6 +380,7 @@ def main() -> int:
         catalog_csv=example_catalog,
         grid_n_xy=grid_n_xy,
         grid_point_density_km2=args.grid_point_density_km2,
+        seed=args.seed,
     )
 
     classic_json = log_root / "pipeline_run_classic.json"

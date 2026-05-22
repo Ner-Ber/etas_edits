@@ -1545,15 +1545,16 @@ class ETASSimulation:
         )
         if continuation_mode == "grid":
             if grid_continuation_options is None:
-                grid_continuation_options = GridContinuationOptions(seed=1905)
+                grid_continuation_options = GridContinuationOptions(
+                    seed=DEFAULT_CONTINUATION_SEED
+                )
         effective_seed = seed
         if effective_seed is None and continuation_mode == "grid":
             effective_seed = grid_continuation_options.seed
+        if effective_seed is None:
+            effective_seed = DEFAULT_CONTINUATION_SEED
         start = dt.datetime.now()
-        if effective_seed is not None:
-            np.random.seed(effective_seed)
-        else:
-            np.random.seed()
+        np.random.seed(effective_seed)
         logger.debug("induced info: {}".format(self.induced))
 
         if m_threshold is None:
