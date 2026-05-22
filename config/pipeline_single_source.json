@@ -17,6 +17,7 @@
             "forecast_duration": 1000,
             "magnitude_generator": "simulate_magnitudes",
             "continuation_mode": "classic",
+            "seed": 1905,
             "grid_continuation_options": {
                 "grid_n_xy": [
                     4,

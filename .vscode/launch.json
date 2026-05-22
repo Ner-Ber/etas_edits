@@ -40,6 +40,66 @@
             "env": {
                 "MPLBACKEND": "TkAgg"
             }
+        },
+        {
+            "name": "Continuation driver: classic+grid (5k, density 0.05)",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "/home/neriberman/miniconda3/envs/etas_new/bin/python",
+            "pythonArgs": ["-u"],
+            "program": "${workspaceFolder}/runnable_code/run_magnet_continuation_classic_then_grid.py",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--max-forecast-events=5000",
+                "--grid-point-density-km2",
+                "0.05"
+            ],
+            "console": "integratedTerminal",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/runnable_code:/home/neriberman/REPOS/eq_mag_prediction",
+                "MPLBACKEND": "TkAgg"
+            }
+        },
+        {
+            "name": "Continuation driver: classic+grid (no HTML report)",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "/home/neriberman/miniconda3/envs/etas_new/bin/python",
+            "pythonArgs": ["-u"],
+            "program": "${workspaceFolder}/runnable_code/run_magnet_continuation_classic_then_grid.py",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--max-forecast-events=5000",
+                "--grid-point-density-km2",
+                "0.05",
+                "--no-report"
+            ],
+            "console": "integratedTerminal",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/runnable_code:/home/neriberman/REPOS/eq_mag_prediction",
+                "MPLBACKEND": "TkAgg"
+            }
+        },
+        {
+            "name": "MAGNET pipeline: grid only (20260521T105949Z trace)",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "/home/neriberman/miniconda3/envs/etas_new/bin/python",
+            "pythonArgs": ["-u"],
+            "program": "${workspaceFolder}/runnable_code/MAGNET_ETAS_pipeline.py",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--pipeline_config_json=${workspaceFolder}/outputs/pipeline_continuation_trace_logs/20260521T105949Z/pipeline_run_grid.json"
+            ],
+            "console": "integratedTerminal",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/runnable_code:/home/neriberman/REPOS/eq_mag_prediction",
+                "ETAS_SIM_TRACE_PARAMS_LOG": "${workspaceFolder}/outputs/pipeline_continuation_trace_logs/20260521T105949Z/run_grid_etas_params.jsonl",
+                "ETAS_SIM_TRACE_EVENTS_LOG": "${workspaceFolder}/outputs/pipeline_continuation_trace_logs/20260521T105949Z/run_grid_events.csv",
+                "ETAS_SAMPLE_KERNELS": "1",
+                "ETAS_KERNEL_SAMPLES_LOG": "${workspaceFolder}/outputs/pipeline_continuation_trace_logs/20260521T105949Z/run_grid_kernel_samples.json",
+                "MPLBACKEND": "TkAgg"
+            }
         }
     ]
 }
