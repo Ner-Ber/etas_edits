@@ -17,6 +17,12 @@
     },
     "indentRainbow.tabSize": 4,
     "indentRainbow.updateDelay": 100,
+    "python.defaultInterpreterPath": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/bin/python",
+    "python.terminal.activateEnvironment": true,
+    "terminal.integrated.env.linux": {
+        "LD_LIBRARY_PATH": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/lib:${env:LD_LIBRARY_PATH}",
+        "PYTHONPATH": "/a/home/cc/students/csguests/neriberman/Repos/etas:/a/home/cc/students/csguests/neriberman/Repos/etas/runnable_code:/a/home/cc/students/csguests/neriberman/Repos/eq_mag_prediction/eq_mag_prediction_clean:/a/home/cc/students/csguests/neriberman/Repos/eq_mag_prediction/eq_mag_prediction"
+    },
     "python.linting.pylintEnabled": true,
     "python.linting.enabled": true
 }

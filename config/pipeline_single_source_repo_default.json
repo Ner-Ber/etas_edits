@@ -1,9 +1,9 @@
 {
     "templates": {
-        "general_gin_config_path": "/home/neriberman/REPOS/eq_mag_prediction/eq_mag_prediction/forecasting/configs/magnitude_prediction/magnitude_prediction_general.gin",
-        "local_gin_config_path": "/home/neriberman/REPOS/eq_mag_prediction/eq_mag_prediction/forecasting/configs/magnitude_prediction/rsqsim_socal.gin",
-        "invert_etas_config_json_path": "/home/neriberman/REPOS/etas_edits/config/invert_etas_config.json",
-        "etas_catalog_continuation_config_json_path": "/home/neriberman/REPOS/etas_edits/config/simulate_catalog_continuation_config.json"
+        "general_gin_config_path": "/a/home/cc/students/csguests/neriberman/Repos/eq_mag_prediction/eq_mag_prediction_clean/eq_mag_prediction/forecasting/configs/magnitude_prediction/magnitude_prediction_general.gin",
+        "local_gin_config_path": "/a/home/cc/students/csguests/neriberman/Repos/eq_mag_prediction/eq_mag_prediction_clean/eq_mag_prediction/forecasting/configs/magnitude_prediction/rsqsim_socal.gin",
+        "invert_etas_config_json_path": "/a/home/cc/students/csguests/neriberman/Repos/etas/config/invert_etas_config.json",
+        "etas_catalog_continuation_config_json_path": "/a/home/cc/students/csguests/neriberman/Repos/etas/config/simulate_catalog_continuation_config.json"
     },
     "overrides": {
         "set_times": {
@@ -20,9 +20,9 @@
         },
         "catalog": {
             "format": "etas",
-            "path": "/home/neriberman/REPOS/etas_edits/input_data/example_catalog.csv"
+            "path": "/a/home/cc/students/csguests/neriberman/Repos/etas/input_data/example_catalog.csv"
         },
-        "shape_coords": "/home/neriberman/REPOS/etas_edits/input_data/california_shape.npy",
+        "shape_coords": "/a/home/cc/students/csguests/neriberman/Repos/etas/input_data/california_shape.npy",
         "forced_completeness": 3.6
     }
 }

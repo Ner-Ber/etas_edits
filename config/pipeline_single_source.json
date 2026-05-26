@@ -1,9 +1,9 @@
 {
     "templates": {
-        "general_gin_config_path": "/home/neriberman/REPOS/eq_mag_prediction/eq_mag_prediction/forecasting/configs/magnitude_prediction/magnitude_prediction_general.gin",
-        "local_gin_config_path": "/home/neriberman/REPOS/eq_mag_prediction/eq_mag_prediction/forecasting/configs/magnitude_prediction/hauksson_etas_pipeline_test.gin",
-        "invert_etas_config_json_path": "/home/neriberman/REPOS/etas_edits/config/invert_etas_config_hauksson_etas_pipeline_test.json",
-        "etas_catalog_continuation_config_json_path": "/home/neriberman/REPOS/etas_edits/config/simulate_catalog_continuation_config_hauksson_etas_pipeline_test.json"
+        "general_gin_config_path": "/a/home/cc/students/csguests/neriberman/Repos/eq_mag_prediction/eq_mag_prediction_clean/eq_mag_prediction/forecasting/configs/magnitude_prediction/magnitude_prediction_general.gin",
+        "local_gin_config_path": "/a/home/cc/students/csguests/neriberman/Repos/eq_mag_prediction/eq_mag_prediction_clean/eq_mag_prediction/forecasting/configs/magnitude_prediction/hauksson_etas_pipeline_test.gin",
+        "invert_etas_config_json_path": "/a/home/cc/students/csguests/neriberman/Repos/etas/config/invert_etas_config_hauksson_etas_pipeline_test.json",
+        "etas_catalog_continuation_config_json_path": "/a/home/cc/students/csguests/neriberman/Repos/etas/config/simulate_catalog_continuation_config_hauksson_etas_pipeline_test.json"
     },
     "overrides": {
         "run_magnet_training": true,
@@ -29,7 +29,7 @@
         "use_moment_angles": false,
         "catalog": {
             "format": "etas",
-            "path": "/home/neriberman/REPOS/eq_mag_prediction/results/catalogs/ingested/hauksson.csv"
+            "path": "/a/home/cc/students/csguests/neriberman/Repos/eq_mag_prediction/results/catalogs/ingested/hauksson.csv"
         },
         "train_and_evaluate_magnitude_prediction_model": {
             "learning_rate": 1e-4,

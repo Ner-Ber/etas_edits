@@ -26,7 +26,7 @@
             "activityBar.activeBackground": "#c48c1a",
             "activityBar.activeFocusBorder": "#ffcc00"
         },
-        "python.defaultInterpreterPath": "/home/neriberman/miniconda3/envs/etas_env/bin/python",
+        "python.defaultInterpreterPath": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/bin/python",
         "python.analysis.extraPaths": [
             "./"
         ],

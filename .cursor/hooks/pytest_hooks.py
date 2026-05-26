@@ -16,8 +16,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 STATE_FILE = ".cursor/hooks/.pytest-last-run.json"
+PIPELINE_SMOKE_STATE_FILE = ".cursor/hooks/.pipeline-smoke-last-run.json"
 STATE_MAX_AGE_SEC = 600
 OUTPUT_TAIL_LINES = 80
+
+PIPELINE_SMOKE_MODULES = frozenset(
+    {
+        "runnable_code/MAGNET_ETAS_pipeline.py",
+        "runnable_code/run_magnet_continuation_classic_then_grid.py",
+    }
+)
 
 TIMEOUT_BY_TIER = {
     "smoke": 30,
@@ -96,13 +104,43 @@ def _repo_root() -> Path:
 
 def _pythonpath(repo: Path) -> str:
     parts = [str(repo), str(repo / "runnable_code")]
-    sibling = repo.parent / "eq_mag_prediction"
-    if sibling.is_dir():
-        parts.append(str(sibling))
+    magnet_parent = repo.parent / "eq_mag_prediction"
+    for rel in (
+        "eq_mag_prediction_clean",
+        "eq_mag_prediction/eq_mag_prediction",
+        "eq_mag_prediction",
+    ):
+        candidate = magnet_parent / rel
+        if candidate.is_dir():
+            parts.append(str(candidate))
     existing = os.environ.get("PYTHONPATH", "")
     if existing:
         parts.append(existing)
     return os.pathsep.join(parts)
+
+
+def _conda_lib_from_python(python: Path) -> Path | None:
+    py = python.resolve()
+    if py.parent.name != "bin":
+        return None
+    lib = py.parent.parent / "lib"
+    return lib if lib.is_dir() else None
+
+
+def _subprocess_env(repo: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    env["PYTHONPATH"] = _pythonpath(repo)
+    conda_lib = None
+    if env.get("CONDA_PREFIX"):
+        candidate = Path(env["CONDA_PREFIX"]) / "lib"
+        if candidate.is_dir():
+            conda_lib = candidate
+    if conda_lib is None:
+        conda_lib = _conda_lib_from_python(Path(sys.executable))
+    if conda_lib is not None:
+        ld = env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = f"{conda_lib}{os.pathsep}{ld}" if ld else str(conda_lib)
+    return env
 
 
 def _should_skip(rel: str) -> bool:
@@ -197,8 +235,7 @@ def plan_to_pytest_args(plan: TestRunPlan) -> list[str]:
 def run_pytest(repo: Path, plan: TestRunPlan) -> tuple[int, str]:
     args = plan_to_pytest_args(plan)
     cmd = [sys.executable, "-m", "pytest", *args]
-    env = os.environ.copy()
-    env["PYTHONPATH"] = _pythonpath(repo)
+    env = _subprocess_env(repo)
     timeout = TIMEOUT_BY_TIER.get(plan.tier, TIMEOUT_BY_TIER["full"])
     try:
         proc = subprocess.run(
@@ -225,16 +262,16 @@ def _tail(text: str, n: int = OUTPUT_TAIL_LINES) -> str:
     return "\n".join(lines[-n:])
 
 
-def _write_state(repo: Path, payload: dict) -> None:
-    path = repo / STATE_FILE
+def _write_state(repo: Path, payload: dict, *, state_file: str = STATE_FILE) -> None:
+    path = repo / state_file
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
         f.write("\n")
 
 
-def _read_state(repo: Path) -> dict | None:
-    path = repo / STATE_FILE
+def _read_state(repo: Path, state_file: str = STATE_FILE) -> dict | None:
+    path = repo / state_file
     if not path.is_file():
         return None
     try:
@@ -256,6 +293,28 @@ def _state_fresh(state: dict) -> bool:
         return False
     age = (datetime.now(timezone.utc) - then).total_seconds()
     return age <= STATE_MAX_AGE_SEC
+
+
+def run_pipeline_dry_run(repo: Path) -> tuple[int, str]:
+    driver = repo / "runnable_code" / "run_magnet_continuation_classic_then_grid.py"
+    cmd = [sys.executable, str(driver), "--dry-run", "--no-report"]
+    env = _subprocess_env(repo)
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(repo),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT_BY_TIER["integration"],
+        )
+    except subprocess.TimeoutExpired as exc:
+        out = (exc.stdout or "") + (exc.stderr or "")
+        return 124, out
+    except OSError as exc:
+        return 127, str(exc)
+    output = (proc.stdout or "") + (proc.stderr or "")
+    return proc.returncode, output
 
 
 def on_edit(stdin_data: dict) -> None:
@@ -302,6 +361,35 @@ def on_edit(stdin_data: dict) -> None:
         },
     )
 
+    if rel in PIPELINE_SMOKE_MODULES and exit_code == 0:
+        smoke_code, smoke_output = run_pipeline_dry_run(repo)
+        smoke_status = "pass" if smoke_code == 0 else "fail"
+        _write_state(
+            repo,
+            {
+                "status": smoke_status,
+                "edited_file": rel or file_path,
+                "command": "run_magnet_continuation_classic_then_grid.py --dry-run",
+                "exit_code": smoke_code,
+                "output_tail": _tail(smoke_output),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+            state_file=PIPELINE_SMOKE_STATE_FILE,
+        )
+    elif rel in PIPELINE_SMOKE_MODULES:
+        _write_state(
+            repo,
+            {
+                "status": "skip",
+                "edited_file": rel or file_path,
+                "command": "run_magnet_continuation_classic_then_grid.py --dry-run",
+                "exit_code": 0,
+                "output_tail": "skipped because pytest failed first",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+            state_file=PIPELINE_SMOKE_STATE_FILE,
+        )
+
 
 def on_stop(stdin_data: dict) -> dict:
     repo = _repo_root()
@@ -312,31 +400,49 @@ def on_stop(stdin_data: dict) -> dict:
         return {}
 
     state = _read_state(repo)
-    if not state or state.get("status") != "fail" or not _state_fresh(state):
+    smoke = _read_state(repo, PIPELINE_SMOKE_STATE_FILE)
+    pytest_fail = state and state.get("status") == "fail" and _state_fresh(state)
+    smoke_fail = smoke and smoke.get("status") == "fail" and _state_fresh(smoke)
+    if not pytest_fail and not smoke_fail:
         return {}
 
-    edited = state.get("edited_file") or ""
+    edited = (state or smoke or {}).get("edited_file") or ""
     if edited and not (repo / edited).is_file():
         return {}
 
     if loop_count >= 3:
         return {}
 
-    targets = state.get("test_targets", [])
-    mapping = state.get("mapping", "?")
-    tier = state.get("tier", "?")
-    tail = state.get("output_tail", "")
-    targets_s = " ".join(targets) if targets else "(none)"
+    messages: list[str] = []
 
-    msg = (
-        "Pytest failed after your last edit. Fix the failures and re-run the tests.\n\n"
-        f"Edited: {edited or '?'}\n"
-        f"Mapping: {mapping}\n"
-        f"Tier: {tier}\n"
-        f"Tests: {targets_s}\n\n"
-        f"```\n{tail}\n```"
-    )
-    return {"followup_message": msg}
+    if pytest_fail and state:
+        targets = state.get("test_targets", [])
+        mapping = state.get("mapping", "?")
+        tier = state.get("tier", "?")
+        tail = state.get("output_tail", "")
+        targets_s = " ".join(targets) if targets else "(none)"
+        messages.append(
+            "Pytest failed after your last edit. Fix the failures and re-run the tests.\n\n"
+            f"Edited: {edited or '?'}\n"
+            f"Mapping: {mapping}\n"
+            f"Tier: {tier}\n"
+            f"Tests: {targets_s}\n\n"
+            f"```\n{tail}\n```"
+        )
+
+    if smoke_fail and smoke:
+        smoke_tail = smoke.get("output_tail", "")
+        smoke_cmd = smoke.get("command", "pipeline dry-run")
+        messages.append(
+            "Pipeline dry-run failed after your last edit to a continuation driver file.\n\n"
+            f"Command: {smoke_cmd}\n\n"
+            f"```\n{smoke_tail}\n```"
+        )
+
+    if not messages:
+        return {}
+
+    return {"followup_message": "\n\n".join(messages)}
 
 
 def main() -> int:

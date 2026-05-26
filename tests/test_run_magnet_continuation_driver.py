@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
+import copy
+import pathlib
 from unittest.mock import patch
 
 import pytest
@@ -12,6 +15,50 @@ import pytest
 import run_magnet_continuation_classic_then_grid as driver
 
 pytestmark = pytest.mark.integration
+
+
+class TestDryRun:
+    def test_dry_run_passes_prerequisites(self, repo_root: Path) -> None:
+        argv = [
+            "run_magnet_continuation_classic_then_grid.py",
+            "--repo-root",
+            str(repo_root),
+            "--dry-run",
+            "--no-report",
+        ]
+        with patch.object(sys, "argv", argv):
+            assert driver.main() == 0
+
+
+class TestPatchMagnetTemplatePaths:
+    def test_resolves_missing_gin_from_sibling_checkout(
+        self, repo_root: Path, minimal_pipeline_base: dict
+    ) -> None:
+        cfg = copy.deepcopy(minimal_pipeline_base)
+        cfg["templates"]["general_gin_config_path"] = "/nonexistent/magnitude_prediction_general.gin"
+        cfg["templates"]["local_gin_config_path"] = "/nonexistent/rsqsim_socal.gin"
+        patched = driver._patch_magnet_template_paths(cfg, repo_root)
+        general = pathlib.Path(patched["templates"]["general_gin_config_path"])
+        local = pathlib.Path(patched["templates"]["local_gin_config_path"])
+        if not general.is_file():
+            pytest.skip("no magnitude_prediction_general.gin beside etas repo")
+        assert general.is_file()
+        assert local.is_file()
+
+
+class TestPipelineSubprocessEnv:
+    def test_resolves_magnet_clean_sibling(self, repo_root: Path) -> None:
+        magnet = driver._resolve_magnet_repo_root(repo_root)
+        if magnet is None:
+            pytest.skip("no eq_mag_prediction checkout beside etas repo")
+        converter = magnet / driver._CATALOG_FORMAT_CONVERTER
+        assert converter.is_file(), f"missing {converter}"
+
+    def test_pythonpath_includes_etas_and_magnet(self, repo_root: Path) -> None:
+        env = driver._pipeline_subprocess_env(repo_root)
+        parts = env["PYTHONPATH"].split(os.pathsep)
+        assert str(repo_root.resolve()) in parts
+        assert str((repo_root / "runnable_code").resolve()) in parts
 
 
 class TestDeepMergeSimulateContinuation:

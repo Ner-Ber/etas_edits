@@ -37,3 +37,20 @@ def test_seed_written_into_continuation_json(
     assert updated["continuation_mode"] == "classic"
     assert updated["max_forecast_events"] == 5000
     assert updated["forecast_duration"] == 100
+
+
+def test_default_outputs_dir_from_trace_pipeline_json(
+    magnet_pipeline_module, repo_root: Path
+) -> None:
+    mod = magnet_pipeline_module
+    trace_cfg = (
+        repo_root
+        / "outputs"
+        / "pipeline_continuation_trace_logs"
+        / "20260526T122257Z"
+        / "pipeline_run_classic.json"
+    )
+    if not trace_cfg.is_file():
+        pytest.skip("no trace pipeline json on this machine")
+    out = mod._default_outputs_dir(trace_cfg)
+    assert out == repo_root.resolve() / "outputs"

@@ -45,6 +45,199 @@ _REPORT_HTML_NAME = "compare_continuation_trace_logs.html"
 _INV_LINE_RE = re.compile(r"Inversion ID:\s*(\S+)")
 # Match ``ETASSimulation.DEFAULT_CONTINUATION_SEED`` / pipeline docs.
 _DEFAULT_CONTINUATION_SEED = 1905
+_CATALOG_FORMAT_CONVERTER = (
+    "eq_mag_prediction/ingestion/catalog_format_converter.py"
+)
+
+
+def _magnet_gin_path_candidates(
+    repo: pathlib.Path, filename: str
+) -> list[pathlib.Path]:
+    rel = (
+        pathlib.Path("eq_mag_prediction")
+        / "forecasting"
+        / "configs"
+        / "magnitude_prediction"
+        / filename
+    )
+    magnet_parent = repo.parent / "eq_mag_prediction"
+    return [
+        magnet_parent / "eq_mag_prediction_clean" / rel,
+        magnet_parent / "eq_mag_prediction" / "eq_mag_prediction" / rel,
+        magnet_parent / "eq_mag_prediction" / rel,
+    ]
+
+
+def _resolve_magnet_gin_path(repo: pathlib.Path, filename: str) -> pathlib.Path | None:
+    for candidate in _magnet_gin_path_candidates(repo, filename):
+        if candidate.is_file():
+            return candidate.resolve()
+    return None
+
+
+def _patch_magnet_template_paths(base_pipeline: dict, repo: pathlib.Path) -> dict:
+    """Fix stale absolute gin paths when MAGNET clone layout differs by machine."""
+    templates = base_pipeline.get("templates")
+    if not isinstance(templates, dict):
+        return base_pipeline
+    gin_keys = (
+        ("general_gin_config_path", "magnitude_prediction_general.gin"),
+        ("local_gin_config_path", None),
+    )
+    for key, default_name in gin_keys:
+        current = templates.get(key)
+        if current and pathlib.Path(current).is_file():
+            continue
+        filename = default_name
+        if filename is None and current:
+            filename = pathlib.Path(str(current)).name
+        if not filename:
+            continue
+        resolved = _resolve_magnet_gin_path(repo, filename)
+        if resolved is not None:
+            templates[key] = str(resolved)
+    return base_pipeline
+
+
+def _magnet_repo_candidates(repo: pathlib.Path) -> list[pathlib.Path]:
+    magnet_parent = repo.parent / "eq_mag_prediction"
+    return [
+        magnet_parent / "eq_mag_prediction_clean",
+        magnet_parent / "eq_mag_prediction" / "eq_mag_prediction",
+        magnet_parent / "eq_mag_prediction",
+    ]
+
+
+def _resolve_magnet_repo_root(repo: pathlib.Path) -> pathlib.Path | None:
+    """Directory to put on PYTHONPATH so ``eq_mag_prediction`` imports resolve."""
+    for candidate in _magnet_repo_candidates(repo):
+        if (candidate / _CATALOG_FORMAT_CONVERTER).is_file():
+            return candidate.resolve()
+    for candidate in _magnet_repo_candidates(repo):
+        if (candidate / "eq_mag_prediction").is_dir():
+            return candidate.resolve()
+    magnet_repo = os.environ.get("MAGNET_REPO")
+    if magnet_repo:
+        path = pathlib.Path(magnet_repo).expanduser().resolve()
+        if path.is_dir():
+            return path
+    return None
+
+
+def _conda_lib_from_python(python: pathlib.Path | None = None) -> pathlib.Path | None:
+    """Return ``<env>/lib`` for a conda-style interpreter layout."""
+    py = (python or pathlib.Path(sys.executable)).resolve()
+    if py.parent.name != "bin":
+        return None
+    lib = py.parent.parent / "lib"
+    return lib if lib.is_dir() else None
+
+
+def _pipeline_subprocess_env(repo: pathlib.Path) -> dict[str, str]:
+    """PYTHONPATH / LD_LIBRARY_PATH for MAGNET_ETAS_pipeline child processes."""
+    env = os.environ.copy()
+    pythonpath_parts = [
+        str(repo.resolve()),
+        str((repo / "runnable_code").resolve()),
+    ]
+    magnet_root = _resolve_magnet_repo_root(repo)
+    if magnet_root is not None:
+        pythonpath_parts.append(str(magnet_root))
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    if existing_pythonpath:
+        pythonpath_parts.append(existing_pythonpath)
+    env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
+
+    conda_lib = None
+    conda_prefix = env.get("CONDA_PREFIX")
+    if conda_prefix:
+        candidate = pathlib.Path(conda_prefix) / "lib"
+        if candidate.is_dir():
+            conda_lib = candidate
+    if conda_lib is None:
+        conda_lib = _conda_lib_from_python()
+    if conda_lib is not None:
+        ld = env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = (
+            f"{conda_lib}{os.pathsep}{ld}" if ld else str(conda_lib)
+        )
+    return env
+
+
+def _validate_pipeline_prerequisites(
+    repo: pathlib.Path,
+    base_pipeline: dict,
+    example_catalog: pathlib.Path,
+) -> list[str]:
+    """Fast checks before a full classic+grid run (no inversion)."""
+    errors: list[str] = []
+    templates = base_pipeline.get("templates")
+    if not isinstance(templates, dict):
+        errors.append("pipeline config missing templates section")
+        return errors
+
+    for key in (
+        "general_gin_config_path",
+        "local_gin_config_path",
+        "invert_etas_config_json_path",
+        "etas_catalog_continuation_config_json_path",
+    ):
+        raw = templates.get(key)
+        if not raw:
+            errors.append(f"templates missing {key}")
+            continue
+        path = pathlib.Path(str(raw))
+        if not path.is_file():
+            errors.append(f"template file not found ({key}): {path}")
+
+    if not example_catalog.is_file():
+        errors.append(f"example catalog not found: {example_catalog}")
+
+    if _resolve_magnet_repo_root(repo) is None:
+        errors.append(
+            "eq_mag_prediction not found beside repo "
+            "(expected eq_mag_prediction_clean or eq_mag_prediction/eq_mag_prediction)"
+        )
+
+    env = _pipeline_subprocess_env(repo)
+    import_check = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sqlite3; import eq_mag_prediction.ingestion.catalog_format_converter",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    if import_check.returncode != 0:
+        err = (import_check.stderr or import_check.stdout or "").strip()
+        errors.append(f"MAGNET/ETAS import check failed: {err}")
+
+    ipython_check = subprocess.run(
+        [sys.executable, "-c", "from IPython.paths import get_ipython_dir"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    if ipython_check.returncode != 0:
+        err = (ipython_check.stderr or ipython_check.stdout or "").strip()
+        errors.append(
+            "IPython/sqlite check failed (nbconvert needs this): "
+            f"{err}. Try: conda install -n <env> -c conda-forge sqlite"
+        )
+
+    nbconvert_check = subprocess.run(
+        [sys.executable, "-m", "jupyter", "nbconvert", "--version"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    if nbconvert_check.returncode != 0:
+        err = (nbconvert_check.stderr or nbconvert_check.stdout or "").strip()
+        errors.append(f"jupyter nbconvert not runnable: {err}")
+
+    return errors
 
 
 def _windows_path_if_wsl(path: pathlib.Path) -> str | None:
@@ -213,35 +406,29 @@ def _build_comparison_html_report(
             "Could not determine inversion id from console logs or continuation folders."
         )
 
-    jupyter = shutil.which("jupyter")
-    if jupyter is None:
-        raise RuntimeError(
-            "jupyter not found on PATH (needed for nbconvert). "
-            "Install with: pip install jupyter nbconvert"
-        )
-
     out_html = log_root / _REPORT_HTML_NAME
-    env = os.environ.copy()
+    env = _pipeline_subprocess_env(repo)
     env["ETAS_COMPARE_REPO_ROOT"] = str(repo)
     env["ETAS_COMPARE_TRACE_LOG_DIR"] = str(log_root.resolve())
     env["ETAS_COMPARE_INV"] = inv
     env["ETAS_COMPARE_REPORT"] = "1"
-    # Inline backend embeds PNGs in notebook outputs (nbconvert → HTML). Agg + plt.show() does not.
     env.pop("MPLBACKEND", None)
 
+    kernel_name = os.environ.get("ETAS_NBCONVERT_KERNEL", "python3")
     cmd = [
-        jupyter,
+        sys.executable,
+        "-m",
+        "jupyter",
         "nbconvert",
         "--execute",
         "--to",
         "html",
-        "--matplotlib",
-        "inline",
         "--output",
         out_html.stem,
         "--output-dir",
         str(log_root),
         f"--ExecutePreprocessor.timeout={int(timeout_s)}",
+        f"--ExecutePreprocessor.kernel_name={kernel_name}",
         str(notebook),
     ]
     print(f"\n=== Building HTML comparison report ===\n{' '.join(cmd)}\n", flush=True)
@@ -323,6 +510,24 @@ def main() -> int:
         default=900,
         help="nbconvert execute timeout in seconds (default: 900).",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Validate config paths, MAGNET imports, sqlite/IPython, and nbconvert "
+            "without running inversion or continuation."
+        ),
+    )
+    parser.add_argument(
+        "--report-only",
+        type=pathlib.Path,
+        default=None,
+        metavar="TRACE_LOG_DIR",
+        help=(
+            "Rebuild compare_continuation_trace_logs.html for an existing trace "
+            "directory (skips pipeline runs)."
+        ),
+    )
     args = parser.parse_args()
 
     if args.grid_n_xy is not None and args.grid_point_density_km2 is not None:
@@ -361,6 +566,41 @@ def main() -> int:
 
     with open(base_path, "r", encoding="utf-8") as f:
         base_pipeline = json.load(f)
+    base_pipeline = _patch_magnet_template_paths(base_pipeline, repo)
+
+    if args.report_only is not None:
+        log_root = args.report_only.resolve()
+        if not log_root.is_dir():
+            print(f"Missing trace log directory: {log_root}", file=sys.stderr)
+            return 1
+        try:
+            report_path = _build_comparison_html_report(
+                repo,
+                log_root,
+                timeout_s=args.report_timeout,
+            )
+        except Exception as exc:
+            print(f"Report build failed: {exc}", file=sys.stderr)
+            return 1
+        print(
+            "Comparison HTML report saved to:\n"
+            f"{_format_path_for_terminal(report_path)}\n",
+            flush=True,
+        )
+        return 0
+
+    preflight_errors = _validate_pipeline_prerequisites(
+        repo, base_pipeline, example_catalog
+    )
+    if preflight_errors:
+        print("Pipeline prerequisite check failed:", file=sys.stderr)
+        for err in preflight_errors:
+            print(f"  - {err}", file=sys.stderr)
+        if args.dry_run:
+            return 1
+    elif args.dry_run:
+        print("Dry-run OK: config paths, imports, IPython/sqlite, and nbconvert.", flush=True)
+        return 0
 
     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     log_root = repo / "outputs" / "pipeline_continuation_trace_logs" / ts
@@ -432,7 +672,7 @@ def main() -> int:
         events_csv = log_root / f"run_{name}_events.csv"
         console_log = log_root / f"run_{name}_console.log"
 
-        env = os.environ.copy()
+        env = _pipeline_subprocess_env(repo)
         env["ETAS_SIM_TRACE_PARAMS_LOG"] = str(params_log)
         env["ETAS_SIM_TRACE_EVENTS_LOG"] = str(events_csv)
         env["ETAS_SAMPLE_KERNELS"] = "1"
