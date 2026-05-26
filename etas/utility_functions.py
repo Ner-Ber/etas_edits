@@ -12,6 +12,87 @@ from typing import Any, Mapping
 import numpy as np
 import pandas as pd
 
+EARTH_RADIUS_KM = 6.3781e3
+
+
+def _hav(theta):
+    """Haversine half-angle term (same as ``etas.inversion.hav``)."""
+    return np.square(np.sin(theta / 2))
+
+
+def haversine_km(
+    lat_rad_1,
+    lat_rad_2,
+    lon_rad_1,
+    lon_rad_2,
+    earth_radius=EARTH_RADIUS_KM,
+):
+    """
+    Great-circle distance in km on a sphere.
+
+    Same formula and argument order as ``etas.inversion.haversine``.
+    """
+    return (
+        2
+        * earth_radius
+        * np.arcsin(
+            np.sqrt(
+                _hav(lat_rad_1 - lat_rad_2)
+                + np.cos(lat_rad_1) * np.cos(lat_rad_2) * _hav(lon_rad_1 - lon_rad_2)
+            )
+        )
+    )
+
+
+def km_per_degree_at_latitude(lat_deg, earth_radius=EARTH_RADIUS_KM):
+    """
+    Return (km per degree latitude, km per degree longitude) at ``lat_deg``.
+
+    Matches ``generate_aftershocks`` in ``etas.simulation`` (``degree_lat`` /
+    ``degree_lon`` via haversine).
+    """
+    lat_rad = np.radians(np.asarray(lat_deg, dtype=float))
+    km_per_lat = haversine_km(
+        lat_rad - np.radians(0.5),
+        lat_rad + np.radians(0.5),
+        0.0,
+        0.0,
+        earth_radius,
+    )
+    km_per_lon = haversine_km(
+        lat_rad,
+        lat_rad,
+        0.0,
+        np.radians(1.0),
+        earth_radius,
+    )
+    if np.ndim(km_per_lat) == 0:
+        return float(km_per_lat), float(km_per_lon)
+    return km_per_lat, km_per_lon
+
+
+def spatial_distance_squared_km2(
+    lat_deg,
+    lon_deg,
+    lat_k_deg,
+    lon_k_deg,
+    earth_radius=EARTH_RADIUS_KM,
+):
+    """
+    Squared great-circle distance (km²) from source ``(lat_k_deg, lon_k_deg)`` to
+    each target ``(lat_deg, lon_deg)``.
+
+    Same metric as inversion (``np.square(haversine(...))`` on event pairs).
+    """
+    lat_rad = np.radians(np.asarray(lat_deg, dtype=float))
+    lon_rad = np.radians(np.asarray(lon_deg, dtype=float))
+    lat_k_rad = np.radians(float(lat_k_deg))
+    lon_k_rad = np.radians(float(lon_k_deg))
+    return np.square(
+        haversine_km(lat_k_rad, lat_rad, lon_k_rad, lon_rad, earth_radius)
+    )
+
+
 _LOCK = threading.Lock()
 
 

@@ -112,14 +112,72 @@ def test_full_theta_produces_keys_required_by_make_kernels() -> None:
     assert len(kernels["g"](np.array([0.1, 1.0]))) == 2
 
 
-def test_spatial_kernel_uses_km_for_utm_metre_offsets() -> None:
-    """UTM dx/dy in metres must pair with inversion d in km² (not m²)."""
+def test_spatial_kernel_uses_haversine_km_distance() -> None:
+    """Spatial kernel must use squared haversine distance in km² (same as inversion)."""
     params = etas_forecast_intensity.force_inversion_on_default_params(FULL_THETA)
     params["m0"] = 3.6
     kernels = etas_forecast_intensity.make_kernels(params)
     m = 4.0
-    # 400 km span in UTM metres
-    x_m = np.linspace(-200_000.0, 200_000.0, 101)
-    y_m = np.zeros_like(x_m)
-    r_vals = kernels["f"](x_m, y_m, m)
+    lat_k, lon_k = 34.0, -118.0
+    lons = np.linspace(lon_k - 2.0, lon_k + 2.0, 101)
+    lats = np.full_like(lons, lat_k)
+    dist_sq = etas_forecast_intensity.spatial_distance_squared_km2(
+        lats, lons, lat_k, lon_k
+    )
+    r_vals = kernels["f"](dist_sq, m)
     assert float(np.sum(r_vals)) > 1.0e-4
+    assert float(dist_sq.max()) > 100.0
+
+
+def test_spatial_distance_matches_inversion_haversine() -> None:
+    """Grid haversine helpers must match ``etas.inversion.haversine`` exactly."""
+    try:
+        import etas.inversion as inversion
+    except Exception as exc:
+        pytest.skip(f"inversion not importable: {exc}")
+
+    lat_k, lon_k = 34.0, -118.0
+    lats = np.array([34.1, 33.9, 34.0])
+    lons = np.array([-117.9, -118.1, -118.2])
+    from etas import utility_functions
+
+    got = utility_functions.spatial_distance_squared_km2(lats, lons, lat_k, lon_k)
+    expected = np.square(
+        inversion.haversine(
+            np.radians(lat_k),
+            np.radians(lats),
+            np.radians(lon_k),
+            np.radians(lons),
+            utility_functions.EARTH_RADIUS_KM,
+        )
+    )
+    np.testing.assert_allclose(got, expected, rtol=0, atol=1e-12)
+
+
+def test_km_per_degree_matches_classic_aftershock_scaling() -> None:
+    """Grid spacing uses the same haversine km/deg as classic ``degree_lat`` / ``degree_lon``."""
+    try:
+        import etas.inversion as inversion
+    except Exception as exc:
+        pytest.skip(f"inversion not importable: {exc}")
+
+    from etas import utility_functions
+
+    lat = 34.0
+    km_per_lat, km_per_lon = utility_functions.km_per_degree_at_latitude(lat)
+    classic_lat = inversion.haversine(
+        np.radians(lat - 0.5),
+        np.radians(lat + 0.5),
+        np.radians(0),
+        np.radians(0),
+        utility_functions.EARTH_RADIUS_KM,
+    )
+    classic_lon = inversion.haversine(
+        np.radians(lat),
+        np.radians(lat),
+        np.radians(0),
+        np.radians(1),
+        utility_functions.EARTH_RADIUS_KM,
+    )
+    assert km_per_lat == pytest.approx(float(classic_lat))
+    assert km_per_lon == pytest.approx(float(classic_lon))

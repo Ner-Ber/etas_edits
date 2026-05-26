@@ -8,6 +8,8 @@ rate computation for use with grid-based thinning simulation.
 import numpy as np
 import pandas as pd
 
+import etas.utility_functions as utility_functions
+
 # Default ETAS parameters (same names as in bf_ETAS notebook)
 DEFAULT_PARAMS = {
     # "mu": 0.1,
@@ -93,13 +95,11 @@ def force_inversion_on_default_params(inversion_params: dict, default_params: di
 KERNEL_VARIANT_DEFAULT = "default"
 KERNEL_VARIANT_ALTERNATE = "alternate"
 
-# Grid / UTM offsets are in metres; inversion ``d`` and ``D`` pair with km (haversine).
-_UTM_M_TO_KM = 1.0e-3
-
-
-def _spatial_offsets_km(dx, dy):
-    """Convert UTM offsets (m) to km for kernels that use inversion ``d`` in km²."""
-    return np.asarray(dx, dtype=float) * _UTM_M_TO_KM, np.asarray(dy, dtype=float) * _UTM_M_TO_KM
+# Spatial kernels use great-circle haversine distance in km (classic / inversion).
+EARTH_RADIUS_KM = utility_functions.EARTH_RADIUS_KM
+km_per_degree_at_latitude = utility_functions.km_per_degree_at_latitude
+spatial_distance_squared_km2 = utility_functions.spatial_distance_squared_km2
+haversine_km = utility_functions.haversine_km
 
 
 def _make_kernels_default(params):
@@ -140,24 +140,20 @@ def _make_kernels_default(params):
             return float(out)
         return out
 
-    def r(dx, dy, m):
-        dx_km, dy_km = _spatial_offsets_km(dx, dy)
-        r2_km2 = dx_km**2 + dy_km**2
+    def r(dist_sq_km2, m):
         return (
-            r2_km2 + params["d"] * np.exp(params["gamma"] * (m - params["m0"]))
+            dist_sq_km2
+            + params["d"] * np.exp(params["gamma"] * (m - params["m0"]))
         ) ** (-(1 + params["rho"]))
 
-    def f(dx, dy, m):
+    def f(dist_sq_km2, m):
         k = kappa(m)
-        dx_km, dy_km = _spatial_offsets_km(dx, dy)
-        r2_km2 = dx_km**2 + dy_km**2
         return (params["q"] - 1) / (
             np.pi * params["D"] ** 2 * k
-        ) * (1 + r2_km2 / (params["D"] ** 2 * k)) ** (-params["q"])
+        ) * (1 + dist_sq_km2 / (params["D"] ** 2 * k)) ** (-params["q"])
 
-    def summand(dx, dy, m, t):
-        # return kappa(m) * f(dx, dy, m) * g(t)
-        return kappa(m) * r(dx, dy, m) * g(t)
+    def summand(dist_sq_km2, m, t):
+        return kappa(m) * r(dist_sq_km2, m) * g(t)
 
     return {
         "mu": mu,
@@ -195,8 +191,8 @@ def make_kernels(params=None, variant: str = KERNEL_VARIANT_DEFAULT):
         - mu(x, y): background rate (may ignore x, y if constant)
         - kappa(m, A=1): productivity
         - g(t): temporal kernel (t in days)
-        - f(dx, dy, m): spatial kernel (dx, dy from parent)
-        - summand(dx, dy, m, t): kappa(m) * f(dx, dy, m) * g(t)
+        - f(dist_sq_km2, m): spatial kernel (squared haversine distance in km²)
+        - summand(dist_sq_km2, m, t): kappa(m) * f(dist_sq_km2, m) * g(t)
     """
     if params is None:
         params = DEFAULT_PARAMS.copy()
@@ -221,19 +217,19 @@ def make_kernels(params=None, variant: str = KERNEL_VARIANT_DEFAULT):
     )
 
 
-def return_local_rate(history, x, y, kernels=None):
+def return_local_rate(history, lat, lon, kernels=None):
     """
-    Return a callable current_local_rate(t0) that gives ETAS intensity at (x, y).
+    Return a callable current_local_rate(t0) that gives ETAS intensity at (lat, lon).
 
     Args:
-        history: DataFrame with columns x_utm, y_utm, magnitude, time.
+        history: DataFrame with columns latitude, longitude, magnitude, time.
                  time is in seconds.
-        x, y: UTM coordinates (scalars).
+        lat, lon: WGS84 coordinates (scalars).
         kernels: Dict from make_kernels(); if None, uses make_kernels().
 
     Returns:
         current_local_rate(t0) where t0 is current time in seconds.
-        Intensity = mu + sum over history of kappa(m_k)*f(x-x_k,y-y_k,m_k)*g(t0-t_k).
+        Intensity = mu + sum over history of kappa(m_k)*f(dist²,m_k)*g(t0-t_k).
         g expects time in days, so t0 is converted to days inside.
     """
     if kernels is None:
@@ -247,23 +243,24 @@ def return_local_rate(history, x, y, kernels=None):
         t0_days = t0 / 86400.0
         local_intensity = 0.0
         for row in history.itertuples():
-            x_k, y_k = row.x_utm, row.y_utm
+            lat_k, lon_k = row.latitude, row.longitude
             m_k = row.magnitude
             t_k = row.time / 86400.0
+            dist_sq = spatial_distance_squared_km2(lat, lon, lat_k, lon_k)
             local_intensity += (
-                kappa_fn(m_k) * f_fn(x - x_k, y - y_k, m_k) * g_fn(t0_days - t_k)
+                kappa_fn(m_k) * f_fn(dist_sq, m_k) * g_fn(t0_days - t_k)
             )
-        return mu_fn(x, y) + local_intensity
+        return mu_fn(lat, lon) + local_intensity
 
     return current_local_rate
 
 
 def rate_at_t_all_grid(
     t_days: float,
-    x_flat: np.ndarray,
-    y_flat: np.ndarray,
-    h_x: np.ndarray,
-    h_y: np.ndarray,
+    lat_flat: np.ndarray,
+    lon_flat: np.ndarray,
+    h_lat: np.ndarray,
+    h_lon: np.ndarray,
     h_m: np.ndarray,
     h_t_days: np.ndarray,
     kernels: dict | None = None,
@@ -274,9 +271,9 @@ def rate_at_t_all_grid(
     Args:
         t_days: Current time on the same absolute scale as h_t_days (see below).
             When history times are Unix epoch seconds, pass t_sec / 86400.
-        x_flat: 1D array of x (UTM) for each grid point.
-        y_flat: 1D array of y (UTM) for each grid point.
-        h_x, h_y, h_m: 1D arrays from history (x_utm, y_utm, magnitude).
+        lat_flat: 1D array of latitude (degrees) for each grid point.
+        lon_flat: 1D array of longitude (degrees) for each grid point.
+        h_lat, h_lon, h_m: 1D arrays from history (latitude, longitude, magnitude).
         h_t_days: History event times on the **same** absolute scale as t_days
             (typically Unix epoch seconds divided by 86400). Then
             ``t_days - h_t_days[k]`` equals elapsed time in **days** since event k,
@@ -293,31 +290,32 @@ def rate_at_t_all_grid(
     f_fn = kernels["f"]
     mu_fn = kernels["mu"]
 
-    n_grid = len(x_flat)
+    n_grid = len(lat_flat)
     local_intensity = np.zeros(n_grid)
 
-    for k in range(len(h_x)):
-        x_k, y_k, m_k, t_k_days = h_x[k], h_y[k], h_m[k], h_t_days[k]
+    for k in range(len(h_lat)):
+        lat_k, lon_k, m_k, t_k_days = h_lat[k], h_lon[k], h_m[k], h_t_days[k]
         dt_days = t_days - t_k_days
         if dt_days <= 0:
             continue
-        dx = x_flat - x_k
-        dy = y_flat - y_k
+        dist_sq = spatial_distance_squared_km2(
+            lat_flat, lon_flat, lat_k, lon_k
+        )
         kappa_val = kappa_fn(m_k)
-        f_vals = f_fn(dx, dy, m_k)
+        f_vals = f_fn(dist_sq, m_k)
         g_vals = g_fn(dt_days)
         local_intensity += kappa_val * f_vals * g_vals
 
-    mu_val = mu_fn(x_flat[0], y_flat[0])
+    mu_val = mu_fn(lat_flat[0], lon_flat[0])
     return mu_val + local_intensity
 
 
 def rate_time_lambdas_on_grid(
     t_days: float,
-    x_flat: np.ndarray,
-    y_flat: np.ndarray,
-    h_x: np.ndarray,
-    h_y: np.ndarray,
+    lat_flat: np.ndarray,
+    lon_flat: np.ndarray,
+    h_lat: np.ndarray,
+    h_lon: np.ndarray,
     h_m: np.ndarray,
     h_t_days: np.ndarray,
     kernels: dict | None = None,
@@ -328,9 +326,9 @@ def rate_time_lambdas_on_grid(
     Args:
         t_days: Current time on the same absolute scale as h_t_days (see below).
             When history times are Unix epoch seconds, pass t_sec / 86400.
-        x_flat: 1D array of x (UTM) for each grid point.
-        y_flat: 1D array of y (UTM) for each grid point.
-        h_x, h_y, h_m: 1D arrays from history (x_utm, y_utm, magnitude).
+        lat_flat: 1D array of latitude (degrees) for each grid point.
+        lon_flat: 1D array of longitude (degrees) for each grid point.
+        h_lat, h_lon, h_m: 1D arrays from history (latitude, longitude, magnitude).
         h_t_days: History event times on the **same** absolute scale as t_days
             (typically Unix epoch seconds divided by 86400). Then
             ``t_days - h_t_days[k]`` equals elapsed time in **days** since event k,
@@ -347,43 +345,56 @@ def rate_time_lambdas_on_grid(
     f_fn = kernels["f"]
     mu_fn = kernels["mu"]
 
-    n_grid = len(x_flat)
+    n_grid = len(lat_flat)
     local_intensity = np.zeros(n_grid)
 
     lambda_i_list = []
-    for k in range(len(h_x)):
-        x_k, y_k, m_k, t_k_days = h_x[k], h_y[k], h_m[k], h_t_days[k]
+    for k in range(len(h_lat)):
+        lat_k, lon_k, m_k, t_k_days = h_lat[k], h_lon[k], h_m[k], h_t_days[k]
         dt_days = t_days - t_k_days
         if dt_days <= 0:
             continue
-        dx = x_flat - x_k
-        dy = y_flat - y_k
+        dist_sq = spatial_distance_squared_km2(
+            lat_flat, lon_flat, lat_k, lon_k
+        )
         kappa_val = kappa_fn(m_k)
-        f_vals = f_fn(dx, dy, m_k)
+        f_vals = f_fn(dist_sq, m_k)
         g_vals = g_fn(dt_days)
         local_intensity += kappa_val * f_vals * g_vals
         lambda_i_list.append(local_intensity)
-    mu_val = mu_fn(x_flat[0], y_flat[0])
+    mu_val = mu_fn(lat_flat[0], lon_flat[0])
     return mu_val + local_intensity
 
 
 def build_spatial_grid(history, n_x=4, n_y=4):
     """
-    Build a regular spatial grid covering the catalog's UTM extent.
+    Build a regular lat/lon grid covering the catalog extent.
 
     Args:
-        history: DataFrame with x_utm, y_utm.
-        n_x, n_y: Number of grid points in x and y.
+        history: DataFrame with latitude, longitude.
+        n_x, n_y: Number of grid points in longitude and latitude.
 
     Returns:
-        x_min, x_max, y_min, y_max, x_grid, y_grid, XX, YY, x_flat, y_flat
-        where XX, YY are meshgrids and x_flat, y_flat are flattened grid coords.
+        lat_min, lat_max, lon_min, lon_max, lat_grid, lon_grid, Lat, Lon,
+        lat_flat, lon_flat where Lat, Lon are meshgrids and lat_flat, lon_flat
+        are flattened grid coords.
     """
-    x_min, x_max = history["x_utm"].min(), history["x_utm"].max()
-    y_min, y_max = history["y_utm"].min(), history["y_utm"].max()
-    x_grid = np.linspace(x_min, x_max, n_x)
-    y_grid = np.linspace(y_min, y_max, n_y)
-    XX, YY = np.meshgrid(x_grid, y_grid)
-    x_flat = XX.flatten()
-    y_flat = YY.flatten()
-    return x_min, x_max, y_min, y_max, x_grid, y_grid, XX, YY, x_flat, y_flat
+    lat_min, lat_max = history["latitude"].min(), history["latitude"].max()
+    lon_min, lon_max = history["longitude"].min(), history["longitude"].max()
+    lat_grid = np.linspace(lat_min, lat_max, n_x)
+    lon_grid = np.linspace(lon_min, lon_max, n_y)
+    Lat, Lon = np.meshgrid(lat_grid, lon_grid)
+    lat_flat = Lat.flatten()
+    lon_flat = Lon.flatten()
+    return (
+        lat_min,
+        lat_max,
+        lon_min,
+        lon_max,
+        lat_grid,
+        lon_grid,
+        Lat,
+        Lon,
+        lat_flat,
+        lon_flat,
+    )

@@ -39,8 +39,8 @@ aftershock_radius_from_uniform = utility_functions.aftershock_radius_from_unifor
 from etas.data_utils import (
     bin_to_precision,
     get_fallback_projection,
+    latlon_rectangular_grid_in_polygon,
     to_seconds,
-    utm_rectangular_grid_in_polygon,
 )
 from etas.forecast_intensity import DEFAULT_PARAMS as GRID_DEFAULT_PARAMS
 from etas.forecast_intensity import KERNEL_VARIANT_DEFAULT
@@ -1139,8 +1139,8 @@ def simulate_catalog_continuation_grid(
         Number of grid nodes in x and y on the history/polygon bounding box
         (used when ``grid_point_density_km2`` is None).
     grid_point_density_km2 : float, optional
-        If set, build a rectangular UTM grid clipped to ``polygon`` with this
-        many nodes per km² inside the region (see ``utm_rectangular_grid_in_polygon``).
+        If set, build a rectangular lat/lon grid clipped to ``polygon`` with this
+        many nodes per km² inside the region (see ``latlon_rectangular_grid_in_polygon``).
         When provided, ``grid_n_xy`` is ignored.
     grid_params : dict, optional
         Passed to ``run_grid_etas_simulation``; if None, built from ``parameters``
@@ -1194,12 +1194,30 @@ def simulate_catalog_continuation_grid(
     history = auxiliary_catalog.loc[mask].copy()
     if len(history) == 0:
         history = pd.DataFrame(
-            columns=["time", "magnitude", "x_utm", "y_utm", "latitude", "longitude"]
+            columns=["time", "magnitude", "latitude", "longitude", "x_utm", "y_utm"]
         )
 
     if projection is None and pyproj is not None:
         centroid = polygon.centroid
         projection = get_fallback_projection(lon=centroid.y, lat=centroid.x)
+
+    if "latitude" not in history.columns or "longitude" not in history.columns:
+        if len(history) > 0 and "x_utm" in history.columns and projection is not None:
+            lonlat = np.array([
+                projection(
+                    history["x_utm"].values[i],
+                    history["y_utm"].values[i],
+                    inverse=True,
+                )
+                for i in range(len(history))
+            ])
+            history["longitude"] = lonlat[:, 0]
+            history["latitude"] = lonlat[:, 1]
+        elif len(history) > 0:
+            raise ValueError(
+                "auxiliary_catalog has no latitude/longitude and no projection "
+                "to derive them for grid ETAS."
+            )
 
     if "x_utm" not in history.columns and "latitude" in history.columns and len(history) > 0:
         if projection is not None:
@@ -1209,63 +1227,48 @@ def simulate_catalog_continuation_grid(
             ])
             history["x_utm"] = xy[:, 0]
             history["y_utm"] = xy[:, 1]
-        else:
-            raise ValueError(
-                "auxiliary_catalog has no x_utm/y_utm and no projection provided; "
-                "install pyproj or pass projection for grid ETAS."
-            )
 
     if "time" in history.columns:
         history = history.copy()
         history["time"] = history["time"].apply(to_seconds)
 
-    if len(history) > 0 and "x_utm" in history.columns:
-        x_min, x_max = history["x_utm"].min(), history["x_utm"].max()
-        y_min, y_max = history["y_utm"].min(), history["y_utm"].max()
+    min_lat, min_lon, max_lat, max_lon = polygon.bounds
+    if len(history) > 0 and "latitude" in history.columns:
+        lat_min = min(min_lat, history["latitude"].min())
+        lat_max = max(max_lat, history["latitude"].max())
+        lon_min = min(min_lon, history["longitude"].min())
+        lon_max = max(max_lon, history["longitude"].max())
     else:
-        if projection is None or pyproj is None:
-            raise ValueError(
-                "Cannot build grid: no history with x_utm and no projection."
-            )
-        min_lat, min_lon, max_lat, max_lon = polygon.bounds
-        xy_ll = projection(min_lon, min_lat, inverse=False)
-        xy_ur = projection(max_lon, max_lat, inverse=False)
-        x_min, y_min = xy_ll[0], xy_ll[1]
-        x_max, y_max = xy_ur[0], xy_ur[1]
+        lat_min, lon_min, lat_max, lon_max = min_lat, min_lon, max_lat, max_lon
 
     if grid_point_density_km2 is not None:
-        if projection is None:
-            raise ValueError(
-                "grid_point_density_km2 requires a projection to build the UTM grid."
-            )
-        x_flat, y_flat, grid_info = utm_rectangular_grid_in_polygon(
+        lat_flat, lon_flat, grid_info = latlon_rectangular_grid_in_polygon(
             polygon,
-            projection,
             grid_point_density_km2,
         )
         logger.info(
             "Grid from density %.4g pts/km²: %s nodes inside polygon "
-            "(target %s, spacing %.1f m, rectangle %s)",
+            "(target %s, spacing %.3f km, rectangle %s)",
             grid_point_density_km2,
             grid_info["n_points"],
             grid_info["target_n"],
-            grid_info["spacing_m"],
+            grid_info["spacing_km"],
             grid_info["grid_n_xy"],
         )
     else:
         n_x, n_y = grid_n_xy
-        x_flat = np.linspace(x_min, x_max, n_x)
-        y_flat = np.linspace(y_min, y_max, n_y)
-        XX, YY = np.meshgrid(x_flat, y_flat)
-        x_flat = XX.flatten()
-        y_flat = YY.flatten()
+        lat_1d = np.linspace(lat_min, lat_max, n_x)
+        lon_1d = np.linspace(lon_min, lon_max, n_y)
+        Lat, Lon = np.meshgrid(lat_1d, lon_1d)
+        lat_flat = Lat.flatten()
+        lon_flat = Lon.flatten()
 
-    for col in ["time", "magnitude", "x_utm", "y_utm"]:
+    for col in ["time", "magnitude", "latitude", "longitude"]:
         if col not in history.columns and len(history) > 0:
             history[col] = np.nan
     if len(history) == 0:
         history = pd.DataFrame({
-            "time": [], "magnitude": [], "x_utm": [], "y_utm": [],
+            "time": [], "magnitude": [], "latitude": [], "longitude": [],
         })
 
     # history = grid_simulation.run_etas_on_grid_thinning(
@@ -1291,8 +1294,8 @@ def simulate_catalog_continuation_grid(
         history,
         start_sec,
         end_sec,
-        x_flat,
-        y_flat,
+        lat_flat,
+        lon_flat,
         params=grid_params,
         in_place=False,
         projection=projection,
@@ -1307,17 +1310,13 @@ def simulate_catalog_continuation_grid(
     new_mask = history["time"] >= start_sec
     new_ev = history.loc[new_mask].copy()
     new_ev["time"] = pd.to_datetime(new_ev["time"], unit="s")
-    # Forecast rows come from grid_simulation with x_utm/y_utm only. `history` can still
-    # carry empty latitude/longitude columns inherited from the auxiliary catalog; the old
-    # guard `if "latitude" not in new_ev.columns` then skipped inverse projection, leaving
-    # NaN lat/lon so ETASSimulation.simulate(..., filter_polygon=True) dropped every event.
-    if projection is not None and len(new_ev) > 0 and "x_utm" in new_ev.columns:
-        lonlat = np.array([
-            projection(new_ev["x_utm"].values[i], new_ev["y_utm"].values[i], inverse=True)
+    if projection is not None and len(new_ev) > 0 and "x_utm" not in new_ev.columns:
+        xy = np.array([
+            projection(new_ev["longitude"].values[i], new_ev["latitude"].values[i], inverse=False)
             for i in range(len(new_ev))
         ])
-        new_ev["longitude"] = lonlat[:, 0]
-        new_ev["latitude"] = lonlat[:, 1]
+        new_ev["x_utm"] = xy[:, 0]
+        new_ev["y_utm"] = xy[:, 1]
 
     new_ev["generation"] = 0
     new_ev["parent"] = 0

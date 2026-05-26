@@ -77,8 +77,8 @@ def run_etas_on_grid_thinning(
     history,
     start_forecast,
     end_forecast,
-    x_flat,
-    y_flat,
+    lat_flat,
+    lon_flat,
     params=None,
     *,
     in_place=False,
@@ -93,23 +93,24 @@ def run_etas_on_grid_thinning(
     Time is in seconds. Intensity uses time in days internally.
 
     Args:
-        history: DataFrame with columns time, magnitude, x_utm, y_utm (and optionally
-                 latitude, longitude). Must have time < start_forecast for initial catalog.
+        history: DataFrame with columns time, magnitude, latitude, longitude
+                 (and optionally x_utm, y_utm). Must have time < start_forecast.
         start_forecast: Start time in seconds.
         end_forecast: End time in seconds.
-        x_flat, y_flat: 1D arrays of grid point UTM coordinates.
+        lat_flat, lon_flat: 1D arrays of grid point WGS84 coordinates.
         params: ETAS parameter dict; if None, uses DEFAULT_PARAMS.
         in_place: If True, mutate history; else work on a copy and return it.
         projection: Optional callable (x_utm, y_utm, inverse=True) -> (lon, lat)
-                    used to set latitude/longitude for new events.
+                    or forward (lon, lat) -> (x_utm, y_utm); used to set x_utm/y_utm
+                    for new events when provided.
         progress_bar: If True, show tqdm progress.
         log_interval: Log every this many iterations (0 to disable).
         seed: Optional random seed for reproducibility.
 
     Returns:
         DataFrame: Updated catalog (history with new events appended).
-        New events have time, magnitude, x_utm, y_utm; latitude, longitude
-        are set if projection is provided.
+        New events have time, magnitude, latitude, longitude; x_utm/y_utm are set
+        if projection is provided.
     """
     if params is None:
         params = etas_forecast_intensity.DEFAULT_PARAMS.copy()
@@ -120,7 +121,7 @@ def run_etas_on_grid_thinning(
     if not in_place:
         history = history.copy()
 
-    n_grid = len(x_flat)
+    n_grid = len(lat_flat)
     t = float(start_forecast)
     events_generated = 0
     iterations = 0
@@ -130,23 +131,23 @@ def run_etas_on_grid_thinning(
     while t < end_forecast:
         iterations += 1
 
-        h_x = history["x_utm"].values
-        h_y = history["y_utm"].values
+        h_lat = history["latitude"].values
+        h_lon = history["longitude"].values
         h_m = history["magnitude"].values
         h_t_days = history["time"].values / SECONDS_PER_DAY
 
         t_days = t / SECONDS_PER_DAY
         B = etas_forecast_intensity.rate_at_t_all_grid(
-            t_days, x_flat, y_flat, h_x, h_y, h_m, h_t_days, kernels=kernels
+            t_days, lat_flat, lon_flat, h_lat, h_lon, h_m, h_t_days, kernels=kernels
         )
 
         dt_vec = np.random.exponential(1.0 / np.clip(B, 1e-15, None))
         rate_future = etas_forecast_intensity.rate_at_t_all_grid(
             t_days + dt_vec,
-            x_flat,
-            y_flat,
-            h_x,
-            h_y,
+            lat_flat,
+            lon_flat,
+            h_lat,
+            h_lon,
             h_m,
             h_t_days,
             kernels=kernels,
@@ -162,8 +163,8 @@ def run_etas_on_grid_thinning(
         if has_valid_dt:
             valid_idx = np.flatnonzero(~reject_vec)
             winner = valid_idx[np.argmin(dt_vec[valid_idx])]
-            x = float(x_flat[winner])
-            y = float(y_flat[winner])
+            lat = float(lat_flat[winner])
+            lon = float(lon_flat[winner])
 
             mag_value = magnitude_gen(1, params=params)
             mag_value = (
@@ -174,13 +175,13 @@ def run_etas_on_grid_thinning(
             catalog_append = {
                 "time": event_time,
                 "magnitude": mag_value,
-                "x_utm": x,
-                "y_utm": y,
+                "latitude": lat,
+                "longitude": lon,
             }
             if projection is not None:
-                lon, lat = projection(x, y, inverse=True)
-                catalog_append["longitude"] = lon
-                catalog_append["latitude"] = lat
+                x_utm, y_utm = projection(lon, lat, inverse=False)
+                catalog_append["x_utm"] = x_utm
+                catalog_append["y_utm"] = y_utm
 
             history.loc[len(history)] = catalog_append
             events_generated += 1
@@ -222,8 +223,8 @@ def run_etas_on_grid_poisson_sampling(
     history,
     start_forecast,
     end_forecast,
-    x_flat,
-    y_flat,
+    lat_flat,
+    lon_flat,
     params=None,
     *,
     in_place=False,
@@ -242,7 +243,7 @@ def run_etas_on_grid_poisson_sampling(
     if not in_place:
         history = history.copy()
 
-    n_grid = len(x_flat)
+    n_grid = len(lat_flat)
     t = float(start_forecast)
     events_generated = 0
     iterations = 0
@@ -252,23 +253,23 @@ def run_etas_on_grid_poisson_sampling(
     while t < end_forecast:
         iterations += 1
 
-        h_x = history["x_utm"].values
-        h_y = history["y_utm"].values
+        h_lat = history["latitude"].values
+        h_lon = history["longitude"].values
         h_m = history["magnitude"].values
         h_t_days = history["time"].values / SECONDS_PER_DAY
 
         t_days = t / SECONDS_PER_DAY
         B = etas_forecast_intensity.rate_at_t_all_grid(
-            t_days, x_flat, y_flat, h_x, h_y, h_m, h_t_days, kernels=kernels
+            t_days, lat_flat, lon_flat, h_lat, h_lon, h_m, h_t_days, kernels=kernels
         )
 
         dt_vec = np.random.exponential(1.0 / np.clip(B, 1e-15, None))
         rate_future = etas_forecast_intensity.rate_at_t_all_grid(
             t_days + dt_vec,
-            x_flat,
-            y_flat,
-            h_x,
-            h_y,
+            lat_flat,
+            lon_flat,
+            h_lat,
+            h_lon,
             h_m,
             h_t_days,
             kernels=kernels,
@@ -281,8 +282,8 @@ def run_etas_on_grid_inversion_sampling(
     history,
     start_forecast,
     end_forecast,
-    x_flat,
-    y_flat,
+    lat_flat,
+    lon_flat,
     params=None,
     *,
     in_place=False,
@@ -303,7 +304,7 @@ def run_etas_on_grid_inversion_sampling(
         if not isinstance(history, pd.DataFrame):
             history = pd.DataFrame(history)
 
-    n_grid = len(x_flat)
+    n_grid = len(lat_flat)
     t = float(start_forecast)
     events_generated = 0
     total_duration = end_forecast - start_forecast
@@ -311,15 +312,19 @@ def run_etas_on_grid_inversion_sampling(
 
     # Precompute spatial weights for the initial history
     spatial_weights = []
-    mu_total = kernels["mu"](x_flat[0], y_flat[0]) * n_grid 
+    mu_total = kernels["mu"](lat_flat[0], lon_flat[0]) * n_grid
 
     for k in range(len(history)):
-        dx = x_flat - history["x_utm"].iloc[k]
-        dy = y_flat - history["y_utm"].iloc[k]
+        dist_sq = etas_forecast_intensity.spatial_distance_squared_km2(
+            lat_flat,
+            lon_flat,
+            history["latitude"].iloc[k],
+            history["longitude"].iloc[k],
+        )
         m_k = history["magnitude"].iloc[k]
 
-        # W_k = kappa(m_k) * sum(f(dx, dy, m_k))
-        w = kernels["kappa"](m_k) * np.sum(kernels["f"](dx, dy, m_k))
+        # W_k = kappa(m_k) * sum(f(dist², m_k))
+        w = kernels["kappa"](m_k) * np.sum(kernels["f"](dist_sq, m_k))
         spatial_weights.append(w)
 
     spatial_weights = np.array(spatial_weights)
@@ -373,8 +378,8 @@ def run_etas_on_grid_inversion_sampling(
         # Calculate spatial distribution ONCE at the new time
         t_prime_days = t_prime / SECONDS_PER_DAY
         rates_at_t_prime = etas_forecast_intensity.rate_at_t_all_grid(
-            t_prime_days, x_flat, y_flat, 
-            history["x_utm"].values, history["y_utm"].values, 
+            t_prime_days, lat_flat, lon_flat,
+            history["latitude"].values, history["longitude"].values,
             history["magnitude"].values, h_t_days, kernels=kernels
         )
 
@@ -382,8 +387,8 @@ def run_etas_on_grid_inversion_sampling(
         total_rate_t_prime = np.sum(rates_at_t_prime)
         spatial_probs = rates_at_t_prime / total_rate_t_prime
         grid_idx = np.random.choice(n_grid, p=spatial_probs)
-        new_x = x_flat[grid_idx]
-        new_y = y_flat[grid_idx]
+        new_lat = lat_flat[grid_idx]
+        new_lon = lon_flat[grid_idx]
 
         # Magnitude sampling (Standard Gutenberg-Richter); use ``m0`` when present
         # (ETAS grid params) so magnitudes stay above the catalog completeness used
@@ -395,16 +400,17 @@ def run_etas_on_grid_inversion_sampling(
         # Update history
         new_event = pd.DataFrame({
             "time": [t_prime],
-            "x_utm": [new_x],
-            "y_utm": [new_y],
+            "latitude": [new_lat],
+            "longitude": [new_lon],
             "magnitude": [new_m]
         })
         history = pd.concat([history, new_event], ignore_index=True)
 
         # Append spatial weight for the single new event
-        new_dx = x_flat - new_x
-        new_dy = y_flat - new_y
-        new_w = kernels["kappa"](new_m) * np.sum(kernels["f"](new_dx, new_dy, new_m))
+        new_dist_sq = etas_forecast_intensity.spatial_distance_squared_km2(
+            lat_flat, lon_flat, new_lat, new_lon
+        )
+        new_w = kernels["kappa"](new_m) * np.sum(kernels["f"](new_dist_sq, new_m))
         spatial_weights = np.append(spatial_weights, new_w)
 
         if pbar:
@@ -423,8 +429,8 @@ def run_etas_per_grid_point_inversion(
     history,
     start_forecast,
     end_forecast,
-    x_flat,
-    y_flat,
+    lat_flat,
+    lon_flat,
     params=None,
     *,
     in_place=False,
@@ -441,7 +447,7 @@ def run_etas_per_grid_point_inversion(
     Grid ETAS simulation via compensator inversion (Ogata-style) on a spatial grid.
 
   Time advance uses the **total** regional intensity
-  ``mu * area_km2 + sum_k kappa(m_k) g(t) sum_j f(x_j-x_k, ...)`` (same spatial
+  ``mu * area_km2 + sum_k kappa(m_k) g(t) sum_j f(dist²_jk, ...)`` (same spatial
   aggregation as ``run_etas_on_grid_inversion_sampling``), then samples the event
   location from per-node rates at ``t_star``. This avoids the near-zero per-cell
   kernels that occur when the grid is coarse relative to the spatial bandwidth.
@@ -449,12 +455,12 @@ def run_etas_per_grid_point_inversion(
     Args:
         history: Catalog used as initial state; times in seconds if numeric.
         start_forecast, end_forecast: Forecast interval (same time units as ``history``).
-        x_flat, y_flat: Grid coordinates (1D, same length).
+        lat_flat, lon_flat: Grid WGS84 coordinates (1D, same length).
         area_km2: Study region area in km² for scaling background rate ``mu`` (events/day/km²).
             If None, estimated from grid spacing and extent.
         params: ETAS parameter dict; defaults from ``forecast_intensity``.
         in_place: If False, copy ``history`` before any updates.
-        projection: Unused; reserved for API compatibility.
+        projection: Optional forward transform ``(lon, lat) -> (x_utm, y_utm)`` for new events.
         progress_bar: If True, show tqdm over simulated time.
         log_interval: Reserved (unused in this routine).
         seed: Optional RNG seed.
@@ -472,7 +478,7 @@ def run_etas_per_grid_point_inversion(
         params,
         start_forecast=float(start_forecast),
         end_forecast=float(end_forecast),
-        n_grid_points=int(len(x_flat)),
+        n_grid_points=int(len(lat_flat)),
         max_forecast_events=max_forecast_events,
         kernel_variant=kernel_variant,
     )
@@ -492,7 +498,7 @@ def run_etas_per_grid_point_inversion(
     # Frozen input catalog: unchanged while simulating; handy for debug breakpoints.
     history_original = working_history.copy()
     n_past = len(history_original)
-    n_grid = len(x_flat)
+    n_grid = len(lat_flat)
     t = float(start_forecast)
     events_generated = 0
     total_duration = end_forecast - start_forecast
@@ -506,9 +512,9 @@ def run_etas_per_grid_point_inversion(
         else None
     )
 
-    mu_density = float(kernels["mu"](x_flat[0], y_flat[0]))
+    mu_density = float(kernels["mu"](lat_flat[0], lon_flat[0]))
     if area_km2 is None:
-        area_km2 = data_utils.estimate_area_km2_from_grid(x_flat, y_flat)
+        area_km2 = data_utils.estimate_area_km2_from_latlon_grid(lat_flat, lon_flat)
         logger.warning(
             "area_km2 not provided; estimated %.1f km² from grid layout.",
             area_km2,
@@ -521,11 +527,15 @@ def run_etas_per_grid_point_inversion(
     # Aggregate spatial weights per history event (sum f over grid nodes).
     spatial_weights = []
     for k in range(len(working_history)):
-        dx = x_flat - working_history["x_utm"].iloc[k]
-        dy = y_flat - working_history["y_utm"].iloc[k]
+        dist_sq = etas_forecast_intensity.spatial_distance_squared_km2(
+            lat_flat,
+            lon_flat,
+            working_history["latitude"].iloc[k],
+            working_history["longitude"].iloc[k],
+        )
         m_k = working_history["magnitude"].iloc[k]
         spatial_weights.append(
-            kernels["kappa"](m_k) * np.sum(kernels["f"](dx, dy, m_k))
+            kernels["kappa"](m_k) * np.sum(kernels["f"](dist_sq, m_k))
         )
     spatial_weights = np.asarray(spatial_weights, dtype=float)
 
@@ -546,8 +556,8 @@ def run_etas_per_grid_point_inversion(
             "start_forecast": float(start_forecast),
             "end_forecast": float(end_forecast),
             "n_grid": int(n_grid),
-            "x_flat": [float(x) for x in x_flat],
-            "y_flat": [float(y) for y in y_flat],
+            "lat_flat": [float(x) for x in lat_flat],
+            "lon_flat": [float(x) for x in lon_flat],
             "history_original": hist_json,
             "n_history_original": int(n_past),
         }
@@ -596,10 +606,10 @@ def run_etas_per_grid_point_inversion(
         if accepted:
             rates_at_loc = etas_forecast_intensity.rate_at_t_all_grid(
                 t_star / SECONDS_PER_DAY,
-                x_flat,
-                y_flat,
-                working_history["x_utm"].values,
-                working_history["y_utm"].values,
+                lat_flat,
+                lon_flat,
+                working_history["latitude"].values,
+                working_history["longitude"].values,
                 working_history["magnitude"].values,
                 h_t_days,
                 kernels=kernels,
@@ -617,8 +627,8 @@ def run_etas_per_grid_point_inversion(
                 min_idx = int(
                     np.random.choice(n_grid, p=rates_at_loc / total_spatial)
                 )
-            new_x = x_flat[min_idx]
-            new_y = y_flat[min_idx]
+            new_lat = lat_flat[min_idx]
+            new_lon = lon_flat[min_idx]
             b_value = params.get('b', 1.0)
             # ETAS grid params use ``m0`` (completeness / lower magnitude bound); older code
             # only read ``m_ref`` and defaulted to 2.0, producing sub-m_ref magnitudes that
@@ -629,8 +639,8 @@ def run_etas_per_grid_point_inversion(
             )
             new_event_payload = {
                 "time": t_star,
-                "x_utm": float(new_x),
-                "y_utm": float(new_y),
+                "latitude": float(new_lat),
+                "longitude": float(new_lon),
                 "magnitude": new_m,
             }
 
@@ -664,17 +674,22 @@ def run_etas_per_grid_point_inversion(
         # Working history (past + simulated-so-far); return merge is after the loop.
         new_event = pd.DataFrame({
             "time": [t_star],
-            "x_utm": [new_x],
-            "y_utm": [new_y],
+            "latitude": [new_lat],
+            "longitude": [new_lon],
             "magnitude": [new_m]
         })
+        if projection is not None:
+            x_utm, y_utm = projection(float(new_lon), float(new_lat), inverse=False)
+            new_event["x_utm"] = x_utm
+            new_event["y_utm"] = y_utm
         working_history = pd.concat([working_history, new_event], ignore_index=True)
 
-        new_dx = x_flat - new_x
-        new_dy = y_flat - new_y
+        new_dist_sq = etas_forecast_intensity.spatial_distance_squared_km2(
+            lat_flat, lon_flat, new_lat, new_lon
+        )
         spatial_weights = np.append(
             spatial_weights,
-            kernels["kappa"](new_m) * np.sum(kernels["f"](new_dx, new_dy, new_m)),
+            kernels["kappa"](new_m) * np.sum(kernels["f"](new_dist_sq, new_m)),
         )
 
         if pbar:
@@ -693,8 +708,10 @@ def run_etas_per_grid_point_inversion(
 
         evt_log = new_event.copy()
         evt_log["time"] = pd.to_datetime(evt_log["time"], unit="s", utc=True)
-        evt_log["latitude"] = np.nan
-        evt_log["longitude"] = np.nan
+        if projection is not None:
+            x_utm, y_utm = projection(float(new_lon), float(new_lat), inverse=False)
+            evt_log["x_utm"] = x_utm
+            evt_log["y_utm"] = y_utm
         utility_functions.log_events_batch(
             "grid_simulation.run_etas_per_grid_point_inversion",
             evt_log,
