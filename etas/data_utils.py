@@ -13,6 +13,7 @@ from shapely.ops import transform as shapely_transform
 from shapely.prepared import prep
 
 from etas.inversion import polygon_surface
+from etas.utility_functions import km_per_degree_at_latitude
 from etas.mc_b_est import round_half_up
 
 try:
@@ -84,7 +85,7 @@ def utm_rectangular_grid_in_polygon(
             return x_utm, y_utm
         return x_utm, y_utm, z
 
-    polygon_xy = shapely_transform(_fwd, polygon)
+    polygon_xy = shapely_transform(_fwd, polygon)   # returns polygon in utm
     minx, miny, maxx, maxy = polygon_xy.bounds
     if not all(np.isfinite([minx, miny, maxx, maxy])):
         raise ValueError(
@@ -143,6 +144,129 @@ def utm_rectangular_grid_in_polygon(
         "grid_point_density_km2": float(grid_point_density_km2),
     }
     return x_flat, y_flat, info
+
+
+def latlon_rectangular_grid_in_polygon(
+    polygon: Polygon,
+    grid_point_density_km2: float,
+    *,
+    earth_radius: float = 6.3781e3,
+    rtol: float = 0.05,
+    max_iterations: int = 40,
+) -> tuple[np.ndarray, np.ndarray, dict]:
+    """
+    Fill a polygon with a regular lat/lon grid at a target density.
+
+    Spacing is chosen in km using the same haversine km-per-degree scaling as
+    classic ETAS aftershock placement (see ``forecast_intensity.km_per_degree_at_latitude``).
+
+    Args:
+        polygon: Study region in ETAS convention: Shapely ``(x, y) = (lat, lon)`` WGS84.
+        grid_point_density_km2: Target grid-node count per km² inside ``polygon``.
+        earth_radius: Earth radius in km for haversine spacing.
+        rtol: Stop when ``|n_inside - target| / target <= rtol``.
+        max_iterations: Maximum spacing-adjustment iterations.
+
+    Returns:
+        lat_flat, lon_flat: 1D WGS84 coordinates of nodes inside ``polygon``.
+        info: Dict with ``area_km2``, ``target_n``, ``n_points``, ``spacing_km``,
+            ``grid_n_xy`` (nodes per axis on the covering rectangle).
+    """
+    if grid_point_density_km2 <= 0:
+        raise ValueError("grid_point_density_km2 must be positive")
+
+    area_km2 = float(polygon_surface(polygon))
+    target_n = max(1, int(round(area_km2 * grid_point_density_km2)))
+
+    min_lat, min_lon, max_lat, max_lon = polygon.bounds
+    if not all(np.isfinite([min_lat, min_lon, max_lat, max_lon])):
+        raise ValueError("Polygon bounds are not finite; check polygon coords.")
+    if min_lat >= max_lat or min_lon >= max_lon:
+        raise ValueError(
+            f"Degenerate polygon bounds: {(min_lat, min_lon, max_lat, max_lon)}"
+        )
+
+    lat_c = 0.5 * (min_lat + max_lat)
+    km_per_lat, km_per_lon = km_per_degree_at_latitude(lat_c, earth_radius)
+    prep_poly = prep(polygon)
+
+    spacing_km = float(np.sqrt(area_km2 / target_n))
+    lat_flat = lon_flat = np.empty(0)
+    n_lat = n_lon = 0
+
+    for _ in range(max_iterations):
+        spacing_lat = spacing_km / km_per_lat
+        spacing_lon = spacing_km / km_per_lon
+        n_lat = max(2, int(np.ceil((max_lat - min_lat) / spacing_lat)) + 1)
+        n_lon = max(2, int(np.ceil((max_lon - min_lon) / spacing_lon)) + 1)
+        lats = np.linspace(min_lat, max_lat, n_lat)
+        lons = np.linspace(min_lon, max_lon, n_lon)
+        if n_lat == 0 or n_lon == 0:
+            spacing_km *= 0.5
+            continue
+
+        lat_mesh, lon_mesh = np.meshgrid(lats, lons)
+        lat_cand = lat_mesh.ravel()
+        lon_cand = lon_mesh.ravel()
+        inside = np.fromiter(
+            (
+                prep_poly.contains(Point(lat, lon))
+                for lat, lon in zip(lat_cand, lon_cand)
+            ),
+            dtype=bool,
+            count=lat_cand.size,
+        )
+        n_inside = int(inside.sum())
+        if n_inside == 0:
+            spacing_km *= 0.5
+            continue
+
+        lat_flat = lat_cand[inside]
+        lon_flat = lon_cand[inside]
+        if abs(n_inside - target_n) / target_n <= rtol:
+            break
+        spacing_km *= np.sqrt(n_inside / target_n)
+
+    if lat_flat.size == 0:
+        raise RuntimeError(
+            "Could not place any grid nodes inside the polygon; "
+            f"area_km2={area_km2:.4g}, target_n={target_n}, spacing_km={spacing_km:.4g}"
+        )
+
+    info = {
+        "area_km2": area_km2,
+        "target_n": target_n,
+        "n_points": int(lat_flat.size),
+        "spacing_km": spacing_km,
+        "grid_n_xy": (n_lat, n_lon),
+        "grid_point_density_km2": float(grid_point_density_km2),
+    }
+    return lat_flat, lon_flat, info
+
+
+def estimate_area_km2_from_latlon_grid(
+    lat_flat,
+    lon_flat,
+    earth_radius=6.3781e3,
+) -> float:
+    """Approximate total study area (km²) from a regular lat/lon grid layout."""
+    lat_flat = np.asarray(lat_flat, dtype=float)
+    lon_flat = np.asarray(lon_flat, dtype=float)
+    unique_lat = np.unique(lat_flat)
+    unique_lon = np.unique(lon_flat)
+    if len(unique_lat) > 1 and len(unique_lon) > 1:
+        dlat = float(np.mean(np.diff(np.sort(unique_lat))))
+        dlon = float(np.mean(np.diff(np.sort(unique_lon))))
+        mean_lat = float(np.mean(lat_flat))
+        km_per_lat, km_per_lon = km_per_degree_at_latitude(mean_lat, earth_radius)
+        cell_km2 = (dlat * km_per_lat) * (dlon * km_per_lon)
+        return cell_km2 * len(lat_flat)
+    km_per_lat, km_per_lon = km_per_degree_at_latitude(
+        float(np.mean(lat_flat)), earth_radius
+    )
+    span_lat = float(lat_flat.max() - lat_flat.min())
+    span_lon = float(lon_flat.max() - lon_flat.min())
+    return max(span_lat * km_per_lat * span_lon * km_per_lon, 1e-12)
 
 
 def estimate_area_km2_from_grid(x_flat, y_flat) -> float:
