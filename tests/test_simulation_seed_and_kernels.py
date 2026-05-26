@@ -24,6 +24,8 @@ def _python_for_simulation_tests() -> Path | None:
     """First interpreter that can import etas.simulation (etas_new before hook env)."""
     candidates = [
         Path.home() / "miniconda3/envs/etas_new/bin/python",
+        Path.home() / "anaconda3/envs/etas_remote/bin/python",
+        Path.home() / "anaconda3/envs/etas_env/bin/python",
         Path(os.environ.get("CONDA_PREFIX", "")) / "bin" / "python",
         Path(sys.executable),
     ]
@@ -53,17 +55,6 @@ def _import_simulation_or_skip():
     return etas_simulation
 
 
-class TestGridMagnitudeGenSeed:
-    def test_same_seed_same_samples(self) -> None:
-        try:
-            import etas.grid_simulation as etas_grid_simulation
-        except Exception as exc:
-            pytest.skip(f"grid_simulation not importable: {exc}")
-        a = etas_grid_simulation.magnitude_gen(8, beta=1.0, m0=0.0, seed=1905)
-        b = etas_grid_simulation.magnitude_gen(8, beta=1.0, m0=0.0, seed=1905)
-        np.testing.assert_array_equal(a, b)
-
-
 class TestAftershockRadiusFromUniform:
     def test_deterministic_given_u(self) -> None:
         m = np.array([4.0, 5.0])
@@ -87,6 +78,17 @@ class TestAftershockRadiusFromUniform:
             -0.32, 1.19, 0.618, m, 2.5, u
         )
         assert not np.allclose(r_low, r_high)
+
+
+class TestGridMagnitudeGenSeed:
+    def test_same_seed_same_samples(self) -> None:
+        try:
+            import etas.grid_simulation as etas_grid_simulation
+        except Exception as exc:
+            pytest.skip(f"grid_simulation not importable: {exc}")
+        a = etas_grid_simulation.magnitude_gen(8, beta=1.0, m0=0.0, seed=1905)
+        b = etas_grid_simulation.magnitude_gen(8, beta=1.0, m0=0.0, seed=1905)
+        np.testing.assert_array_equal(a, b)
 
 
 class TestEtasSimulationSimulateSeed:
