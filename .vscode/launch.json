@@ -26,10 +26,10 @@
             }
         },
         {
-            "name": "MAGNET pipeline: classic (etas_new, trace log run)",
+            "name": "MAGNET pipeline: classic (etas_remote, trace log run)",
             "type": "debugpy",
             "request": "launch",
-            "python": "/home/neriberman/miniconda3/envs/etas_new/bin/python",
+            "python": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/bin/python",
             "pythonArgs": ["-u"],
             "program": "${workspaceFolder}/runnable_code/MAGNET_ETAS_pipeline.py",
             "cwd": "${workspaceFolder}",
@@ -45,7 +45,7 @@
             "name": "Continuation driver: classic+grid (5k, density 0.05)",
             "type": "debugpy",
             "request": "launch",
-            "python": "/home/neriberman/miniconda3/envs/etas_new/bin/python",
+            "python": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/bin/python",
             "pythonArgs": ["-u"],
             "program": "${workspaceFolder}/runnable_code/run_magnet_continuation_classic_then_grid.py",
             "cwd": "${workspaceFolder}",
@@ -56,7 +56,7 @@
             ],
             "console": "integratedTerminal",
             "env": {
-                "PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/runnable_code:/home/neriberman/REPOS/eq_mag_prediction",
+                "PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/runnable_code:/a/home/cc/students/csguests/neriberman/Repos/eq_mag_prediction/eq_mag_prediction",
                 "MPLBACKEND": "TkAgg"
             }
         },
@@ -64,7 +64,7 @@
             "name": "Continuation driver: classic+grid (no HTML report)",
             "type": "debugpy",
             "request": "launch",
-            "python": "/home/neriberman/miniconda3/envs/etas_new/bin/python",
+            "python": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/bin/python",
             "pythonArgs": ["-u"],
             "program": "${workspaceFolder}/runnable_code/run_magnet_continuation_classic_then_grid.py",
             "cwd": "${workspaceFolder}",
@@ -76,7 +76,7 @@
             ],
             "console": "integratedTerminal",
             "env": {
-                "PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/runnable_code:/home/neriberman/REPOS/eq_mag_prediction",
+                "PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/runnable_code:/a/home/cc/students/csguests/neriberman/Repos/eq_mag_prediction/eq_mag_prediction",
                 "MPLBACKEND": "TkAgg"
             }
         },
@@ -84,7 +84,7 @@
             "name": "MAGNET pipeline: grid only (20260521T105949Z trace)",
             "type": "debugpy",
             "request": "launch",
-            "python": "/home/neriberman/miniconda3/envs/etas_new/bin/python",
+            "python": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/bin/python",
             "pythonArgs": ["-u"],
             "program": "${workspaceFolder}/runnable_code/MAGNET_ETAS_pipeline.py",
             "cwd": "${workspaceFolder}",
@@ -93,7 +93,7 @@
             ],
             "console": "integratedTerminal",
             "env": {
-                "PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/runnable_code:/home/neriberman/REPOS/eq_mag_prediction",
+                "PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/runnable_code:/a/home/cc/students/csguests/neriberman/Repos/eq_mag_prediction/eq_mag_prediction",
                 "ETAS_SIM_TRACE_PARAMS_LOG": "${workspaceFolder}/outputs/pipeline_continuation_trace_logs/20260521T105949Z/run_grid_etas_params.jsonl",
                 "ETAS_SIM_TRACE_EVENTS_LOG": "${workspaceFolder}/outputs/pipeline_continuation_trace_logs/20260521T105949Z/run_grid_events.csv",
                 "ETAS_SAMPLE_KERNELS": "1",

@@ -2,6 +2,7 @@
 import argparse
 import ast
 import datetime
+import errno
 import hashlib
 import inspect
 import json
@@ -179,11 +180,53 @@ def _create_shape_coords_from_catalog(
     return shape_coords_npy
 
 
+def _resolve_etas_repo_root(anchor: pathlib.Path | str | None = None) -> pathlib.Path:
+    """Locate the etas repo root from a config path, cwd, or this script."""
+    candidates: list[pathlib.Path] = []
+    if anchor is not None:
+        path = pathlib.Path(anchor).resolve()
+        if path.is_file():
+            candidates.extend(path.parents)
+        else:
+            candidates.extend(path.parents)
+            candidates.append(path)
+    candidates.append(pathlib.Path.cwd().resolve())
+    candidates.append(pathlib.Path(__file__).resolve().parents[1])
+
+    seen: set[pathlib.Path] = set()
+    for base in candidates:
+        if base in seen:
+            continue
+        seen.add(base)
+        if (base / "runnable_code" / "MAGNET_ETAS_pipeline.py").is_file() and (
+            base / "pytest.ini"
+        ).is_file():
+            return base
+    return pathlib.Path(__file__).resolve().parents[1]
+
+
+def _default_outputs_dir(anchor: pathlib.Path | str | None = None) -> pathlib.Path:
+    return _resolve_etas_repo_root(anchor) / "outputs"
+
+
+def _resolve_magnet_results_dir(repo_root: pathlib.Path) -> pathlib.Path:
+    magnet_parent = repo_root.parent / "eq_mag_prediction"
+    candidates = [
+        magnet_parent / "results",
+        magnet_parent / "eq_mag_prediction" / "results",
+        magnet_parent / "eq_mag_prediction_clean" / "results",
+    ]
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    return magnet_parent / "results"
+
+
 def _build_temp_configs_from_single_source(
     *,
     pipeline_config_path: str,
     val_to_train_time_ratio: float,
-    permanent_inv_dir: pathlib.Path | str = "/home/neriberman/REPOS/etas_edits/outputs/inversions",
+    permanent_inv_dir: pathlib.Path | str | None = None,
 ) -> dict[str, str]:
     """
     Single-source config mode:
@@ -221,6 +264,11 @@ def _build_temp_configs_from_single_source(
     """
     with open(pipeline_config_path, "r") as f:
         pcfg = json.load(f)
+
+    if permanent_inv_dir is None:
+        permanent_inv_dir = _default_outputs_dir(pipeline_config_path) / "inversions"
+    else:
+        permanent_inv_dir = pathlib.Path(permanent_inv_dir)
 
     templates = pcfg["templates"]
     overrides = pcfg["overrides"]
@@ -571,6 +619,19 @@ def _safe_unique_path(desired_path: pathlib.Path) -> pathlib.Path:
 
     raise RuntimeError(f"Could not find a free filename near {desired_path}")
 
+
+def _promote_temp_file(tmp_path: pathlib.Path, output_path: pathlib.Path) -> None:
+    """Move a temp catalog into its final path (works across filesystems, e.g. /tmp vs home)."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.replace(tmp_path, output_path)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+        shutil.copyfile(tmp_path, output_path)
+        tmp_path.unlink()
+
+
 def _magnet_catalogs_equivalent(
     path_a: pathlib.Path,
     path_b: pathlib.Path,
@@ -678,7 +739,9 @@ def _ensure_magnet_catalog_for_etas_catalog(
     desired_output = ingested_dir / filename
 
     # Convert ETAS -> MAGNET once into a temp file, then compare against existing ingested catalogs.
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as tmp:
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".csv", delete=False, dir=str(ingested_dir)
+    ) as tmp:
         tmp_path = pathlib.Path(tmp.name)
     try:
         print(f"Converting ETAS -> MAGNET to temp:\n  {etas_catalog_path} -> {tmp_path}")
@@ -702,8 +765,7 @@ def _ensure_magnet_catalog_for_etas_catalog(
 
         # No match exists; promote temp to a new unique filename WITHOUT overwriting.
         output_path = _safe_unique_path(desired_output)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(tmp_path, output_path)
+        _promote_temp_file(tmp_path, output_path)
 
         # If we used the default name, keep binding unchanged; otherwise point gin to new filename.
         if output_path.name == filename and desired_output == output_path:
@@ -788,7 +850,9 @@ def _find_or_create_magnet_catalog(
     desired_output = ingested_dir / source_catalog_path.name
 
     # Create temp file with MAGNET format
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as tmp:
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".csv", delete=False, dir=str(ingested_dir)
+    ) as tmp:
         tmp_path = pathlib.Path(tmp.name)
     try:
         if source_format == "magnet":
@@ -819,8 +883,7 @@ def _find_or_create_magnet_catalog(
 
         # No match found; create new file with unique name
         output_path = _safe_unique_path(desired_output)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(tmp_path, output_path)
+        _promote_temp_file(tmp_path, output_path)
         print(f"Created new MAGNET catalog: {output_path}")
         return output_path
     finally:
@@ -858,7 +921,9 @@ def _find_or_create_etas_catalog_for_magnet(
     desired_path = etas_output_dir / base_name
 
     # Convert MAGNET -> ETAS to temp file first
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as tmp:
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".csv", delete=False, dir=str(etas_output_dir)
+    ) as tmp:
         tmp_path = pathlib.Path(tmp.name)
     try:
         print(f"Converting MAGNET -> ETAS to temp:\n  {magnet_catalog_path} -> {tmp_path}")
@@ -881,8 +946,7 @@ def _find_or_create_etas_catalog_for_magnet(
 
         # No match found; create new file with unique name
         output_path = _safe_unique_path(desired_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(tmp_path, output_path)
+        _promote_temp_file(tmp_path, output_path)
         print(f"Created new ETAS catalog: {output_path}")
         return output_path
     finally:
@@ -1561,7 +1625,7 @@ def run_etas_inversion(
         inversion_config = json.load(f)
 
     if permanent_inv_dir is None:
-        permanent_inv_dir = pathlib.Path("/home/neriberman/REPOS/etas_edits/outputs/inversions")
+        permanent_inv_dir = _default_outputs_dir(config_path) / "inversions"
     else:
         permanent_inv_dir = pathlib.Path(permanent_inv_dir)
 
@@ -1913,17 +1977,17 @@ def run_etas_catalog_continuation_old(config_path: str) -> None:
 if __name__ == "__main__":
     val_to_train_time_ratio = 3/4
 
+    _repo_root = _resolve_etas_repo_root()
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--pipeline_config_json",
-        # default="/home/neriberman/REPOS/etas_edits/config/pipeline_single_source.json",
-        default="/home/neriberman/REPOS/etas_edits/config/pipeline_single_source_repo_default.json",
+        default=str(_repo_root / "config" / "pipeline_single_source_repo_default.json"),
         help="Single-source pipeline config JSON (templates + overrides).",
     )
     args = parser.parse_args()
 
-    # Define Base Output Directories
-    default_output_dir = pathlib.Path("/home/neriberman/REPOS/etas_edits/outputs")
+    # Define Base Output Directories (relative to repo containing this script / config)
+    default_output_dir = _default_outputs_dir(args.pipeline_config_json)
     permanent_inv_dir = default_output_dir / "inversions"
 
     temp_paths = _build_temp_configs_from_single_source(
@@ -1951,7 +2015,9 @@ if __name__ == "__main__":
         # No trained MAGNET checkpoint is needed unless continuation uses MAGNET_magnitude.
         skip_magnet_training = _magnitude_gen != "MAGNET_magnitude"
 
-    trained_models_base_dir = pathlib.Path("/home/neriberman/REPOS/eq_mag_prediction/results/trained_models")
+    trained_models_base_dir = _resolve_magnet_results_dir(
+        _resolve_etas_repo_root(args.pipeline_config_json)
+    ) / "trained_models"
 
     if skip_magnet_training:
         print(
