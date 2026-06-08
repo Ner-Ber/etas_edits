@@ -968,6 +968,7 @@ def simulate_catalog_continuation(
         "simulate_catalog_continuation",
         parameters,
         mc=float(mc) if mc is not None else None,
+        beta=float(beta_main) if beta_main is not None else None,
     )
 
     # preparing betas

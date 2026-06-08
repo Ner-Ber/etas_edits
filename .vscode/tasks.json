@@ -1,0 +1,17 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "prepare-vscode-classic-debug-trace-dir",
+            "type": "shell",
+            "command": "mkdir -p \"${workspaceFolder}/outputs/pipeline_continuation_trace_logs/vscode_classic_debug\"",
+            "problemMatcher": []
+        },
+        {
+            "label": "prepare-vscode-grid-debug-trace-dir",
+            "type": "shell",
+            "command": "mkdir -p \"${workspaceFolder}/outputs/pipeline_continuation_trace_logs/vscode_grid_debug\"",
+            "problemMatcher": []
+        }
+    ]
+}

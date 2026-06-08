@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -158,6 +159,66 @@ class TestEtasSimulationSimulateSeed:
 
         assert calls, "np.random.seed should be called once"
         assert calls[0] == expected_call
+
+
+class TestKernelTrace:
+    _THETA = {
+        "log10_mu": -7.33105975591647,
+        "log10_k0": -2.449522240330126,
+        "a": 1.8147284901476872,
+        "log10_c": -3.1123279388711307,
+        "omega": -0.0360643447488232,
+        "log10_tau": 3.6098916759499717,
+        "log10_d": -0.320277070746616,
+        "gamma": 1.1908402144983095,
+        "rho": 0.6176230718737372,
+    }
+
+    def test_sample_kernels_stores_run_parameters_and_random_draws(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import etas.kernel_trace as kernel_trace
+
+        monkeypatch.setenv("ETAS_KERNEL_RANDOM_SAMPLES", "64")
+        monkeypatch.setenv("ETAS_KERNEL_RANDOM_SEED", "7")
+        out = tmp_path / "kernel_samples.json"
+        kernel_trace.sample_kernels_to_log(
+            self._THETA,
+            3.55,
+            site="simulate_catalog_continuation",
+            path=str(out),
+            beta=2.3025850929940455,
+        )
+        payload = json.loads(out.read_text(encoding="utf-8"))
+        assert payload["parameters"]["log10_mu"] == self._THETA["log10_mu"]
+        assert payload["kernel_variant"] == "default"
+        assert payload["random"]["n"] == 64
+        assert len(payload["random"]["delta_t_days"]) == 64
+        assert len(payload["random"]["sampled_magnitudes"]) == 64
+        assert len(payload["random"]["radii_km"]) == 3
+
+    def test_grid_site_uses_logged_params_without_double_merge(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import etas.forecast_intensity as fi
+        import etas.kernel_trace as kernel_trace
+
+        monkeypatch.setenv("ETAS_KERNEL_RANDOM_SAMPLES", "8")
+        grid_params = fi.force_inversion_on_default_params(dict(self._THETA))
+        grid_params["m0"] = 3.55
+        grid_params["beta"] = 2.3025850929940455
+        out = tmp_path / "grid_kernel_samples.json"
+        kernel_trace.sample_kernels_to_log(
+            grid_params,
+            3.55,
+            site="grid_simulation.run_etas_per_grid_point_inversion",
+            path=str(out),
+            kernel_variant="default",
+            beta=grid_params["beta"],
+        )
+        payload = json.loads(out.read_text(encoding="utf-8"))
+        assert payload["parameters"]["m0"] == 3.55
+        assert payload["site"] == "grid_simulation.run_etas_per_grid_point_inversion"
 
 
 def test_simulate_default_seed_subprocess() -> None:

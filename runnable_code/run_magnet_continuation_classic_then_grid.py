@@ -42,6 +42,13 @@ import pathlib
 
 _COMPARE_NOTEBOOK = "notebooks/compare_continuation_trace_logs.ipynb"
 _REPORT_HTML_NAME = "compare_continuation_trace_logs.html"
+_REPORT_HTML_HIDE_CODE_STYLE = """<style id="etas-compare-report-hide-code">
+.jp-CodeCell .jp-Cell-inputWrapper,
+.jp-CodeCell .jp-InputPrompt,
+.jp-CodeCell .jp-OutputPrompt {
+  display: none !important;
+}
+</style>"""
 _INV_LINE_RE = re.compile(r"Inversion ID:\s*(\S+)")
 # Match ``ETASSimulation.DEFAULT_CONTINUATION_SEED`` / pipeline docs.
 _DEFAULT_CONTINUATION_SEED = 1905
@@ -388,6 +395,36 @@ def _enrich_run_meta_after_runs(
     _write_run_meta(meta_path, meta)
 
 
+def _prepare_notebook_for_nbconvert(
+    notebook: pathlib.Path, work_dir: pathlib.Path
+) -> pathlib.Path:
+    """Return a notebook copy with code outputs cleared for a clean ``nbconvert --execute``."""
+    import nbformat
+
+    nb = nbformat.read(notebook, as_version=4)
+    for cell in nb.cells:
+        if cell.get("cell_type") != "code":
+            continue
+        cell["outputs"] = []
+        cell["execution_count"] = None
+    work_dir.mkdir(parents=True, exist_ok=True)
+    prepared = work_dir / notebook.name
+    nbformat.write(nb, prepared)
+    return prepared
+
+
+def _postprocess_comparison_html_report(out_html: pathlib.Path) -> None:
+    """Hide code inputs in the exported HTML; keep markdown and cell outputs visible."""
+    text = out_html.read_text(encoding="utf-8")
+    if _REPORT_HTML_HIDE_CODE_STYLE in text:
+        return
+    if "</head>" in text:
+        text = text.replace("</head>", f"{_REPORT_HTML_HIDE_CODE_STYLE}\n</head>", 1)
+    else:
+        text = _REPORT_HTML_HIDE_CODE_STYLE + text
+    out_html.write_text(text, encoding="utf-8")
+
+
 def _build_comparison_html_report(
     repo: pathlib.Path,
     log_root: pathlib.Path,
@@ -414,6 +451,10 @@ def _build_comparison_html_report(
     env["ETAS_COMPARE_REPORT"] = "1"
     env.pop("MPLBACKEND", None)
 
+    prepared_nb = _prepare_notebook_for_nbconvert(
+        notebook, log_root / ".nbconvert_work"
+    )
+
     kernel_name = os.environ.get("ETAS_NBCONVERT_KERNEL", "python3")
     cmd = [
         sys.executable,
@@ -429,7 +470,7 @@ def _build_comparison_html_report(
         str(log_root),
         f"--ExecutePreprocessor.timeout={int(timeout_s)}",
         f"--ExecutePreprocessor.kernel_name={kernel_name}",
-        str(notebook),
+        str(prepared_nb),
     ]
     print(f"\n=== Building HTML comparison report ===\n{' '.join(cmd)}\n", flush=True)
     proc = subprocess.run(cmd, cwd=str(repo), env=env)
@@ -437,6 +478,7 @@ def _build_comparison_html_report(
         raise RuntimeError(f"nbconvert failed with exit code {proc.returncode}")
     if not out_html.is_file():
         raise RuntimeError(f"Expected HTML report missing after nbconvert: {out_html}")
+    _postprocess_comparison_html_report(out_html)
     return out_html.resolve()
 
 

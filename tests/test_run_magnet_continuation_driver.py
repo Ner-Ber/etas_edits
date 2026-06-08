@@ -177,6 +177,30 @@ class TestRunMeta:
         assert meta["comparison_html_report"].endswith("compare_continuation_trace_logs.html")
 
 
+class TestComparisonHtmlReport:
+    def test_postprocess_hides_code_inputs(self, tmp_path: Path) -> None:
+        out_html = tmp_path / "report.html"
+        out_html.write_text("<html><head></head><body>x</body></html>", encoding="utf-8")
+        driver._postprocess_comparison_html_report(out_html)
+        text = out_html.read_text(encoding="utf-8")
+        assert "etas-compare-report-hide-code" in text
+        assert ".jp-CodeCell .jp-Cell-inputWrapper" in text
+        assert "display: none !important" in text
+
+    def test_prepare_notebook_clears_code_outputs(self, tmp_path: Path, repo_root: Path) -> None:
+        src = repo_root / driver._COMPARE_NOTEBOOK
+        if not src.is_file():
+            pytest.skip("comparison notebook missing")
+        prepared = driver._prepare_notebook_for_nbconvert(src, tmp_path / "work")
+        import nbformat
+
+        nb = nbformat.read(prepared, as_version=4)
+        code_cells = [c for c in nb.cells if c.get("cell_type") == "code"]
+        assert code_cells
+        assert all(c.get("outputs") == [] for c in code_cells)
+        assert all(c.get("execution_count") is None for c in code_cells)
+
+
 class TestMainCliValidation:
     def test_rejects_both_grid_size_and_density(self, repo_root: Path) -> None:
         argv = [
