@@ -192,7 +192,9 @@ def run_etas_on_grid_thinning(
                 min_dt,
             )
 
-        t += min_dt * SECONDS_PER_DAY
+        t_next = t + min_dt * SECONDS_PER_DAY
+        assert t_next >= t
+        t = t_next
 
         if log_interval and iterations % log_interval == 0:
             logger.info(
@@ -598,6 +600,7 @@ def run_etas_per_grid_point_inversion(
             maxiter=50,
         )
         t_star = float(res.root * SECONDS_PER_DAY)
+        assert t_star >= t
 
         accepted = t_star < end_forecast
         new_event_payload = None
