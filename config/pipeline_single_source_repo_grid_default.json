@@ -15,11 +15,12 @@
         "simulate_catalog_continuation": {
             "forecast_duration": 1000,
             "magnitude_generator": "simulate_magnitudes",
-            "continuation_mode": "grid",
+            "continuation_mode": "thinning",
             "seed": 1905,
             "max_forecast_events": 500,
-            "grid_continuation_options": {
-                "grid_point_density_km2": 1e-5
+            "thinning_continuation_options": {
+                "a_h_resolution": 500,
+                "a_h_stretch": 3.5
             }
         },
         "catalog": {

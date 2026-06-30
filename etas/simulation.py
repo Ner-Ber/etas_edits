@@ -44,6 +44,7 @@ from etas.data_utils import (
 )
 from etas.forecast_intensity import DEFAULT_PARAMS as GRID_DEFAULT_PARAMS
 from etas.forecast_intensity import KERNEL_VARIANT_DEFAULT
+import etas.rate_simulation as rate_simulation
 
 try:
     import pyproj
@@ -55,7 +56,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-# Fixed RNG seed when continuation JSON omits ``seed`` (classic and grid).
+# Fixed RNG seed when continuation JSON omits ``seed`` (classic and thinning).
 DEFAULT_CONTINUATION_SEED = 1905
 
 
@@ -1526,8 +1527,8 @@ class ETASSimulation:
             i_start: int = 0,
             magnitude_generator=simulate_magnitudes,
             magnitude_generator_kwargs=None,
-            continuation_mode: Literal["classic", "grid"] = "classic",
-            grid_continuation_options: Optional[GridContinuationOptions] = None,
+            continuation_mode: Literal["classic", "thinning"] = "classic",
+            thinning_continuation_options=None,
             max_forecast_events: int | None = None,
             seed: Optional[int] = None,
     ):
@@ -1536,14 +1537,7 @@ class ETASSimulation:
         magnitude_generator = resolve_magnitude_generator(
             magnitude_generator, **magnitude_generator_kwargs
         )
-        if continuation_mode == "grid":
-            if grid_continuation_options is None:
-                grid_continuation_options = GridContinuationOptions(
-                    seed=DEFAULT_CONTINUATION_SEED
-                )
         effective_seed = seed
-        if effective_seed is None and continuation_mode == "grid":
-            effective_seed = grid_continuation_options.seed
         if effective_seed is None:
             effective_seed = DEFAULT_CONTINUATION_SEED
         start = dt.datetime.now()
@@ -1583,28 +1577,29 @@ class ETASSimulation:
 
         simulations = pd.DataFrame()
         for sim_id in np.arange(i_start, n_simulations):
-            if continuation_mode == "grid":
-                gopts = grid_continuation_options
-                continuation = simulate_catalog_continuation_grid(
-                    self.catalog,
-                    self.forecast_start_date,
-                    self.forecast_end_date,
-                    self.polygon,
-                    self.inversion_params.theta,
+            if continuation_mode == "thinning":
+                if thinning_continuation_options is None:
+                    thinning_continuation_options = (
+                        rate_simulation.ThinningContinuationOptions()
+                    )
+                topts = thinning_continuation_options
+                continuation = rate_simulation.simulate_catalog_continuation_thinning(
+                    auxiliary_catalog=self.catalog,
+                    auxiliary_end=self.forecast_start_date,
+                    simulation_end=self.forecast_end_date,
+                    polygon=self.polygon,
+                    parameters=self.inversion_params.theta,
                     mc=(
                         self.inversion_params.m_ref
                         - self.inversion_params.delta_m / 2
                     ),
                     beta_main=self.inversion_params.beta,
                     filter_polygon=False,
-                    grid_n_xy=gopts.grid_n_xy,
-                    grid_point_density_km2=gopts.grid_point_density_km2,
-                    grid_params=gopts.grid_params,
-                    projection=gopts.projection,
-                    seed=gopts.seed,
-                    progress_bar=gopts.progress_bar,
-                    kernel_variant=gopts.kernel_variant,
+                    magnitude_generator=magnitude_generator,
+                    a_h_resolution=topts.a_h_resolution,
+                    a_h_stretch=topts.a_h_stretch,
                     max_forecast_events=max_forecast_events,
+                    catalog=self.catalog,
                 )
             else:
                 continuation = simulate_catalog_continuation(
@@ -1662,8 +1657,8 @@ class ETASSimulation:
         i_start: int = 0,
         magnitude_generator=simulate_magnitudes,
         magnitude_generator_kwargs=None,
-        continuation_mode: Literal["classic", "grid"] = "classic",
-        grid_continuation_options: Optional[GridContinuationOptions] = None,
+        continuation_mode: Literal["classic", "thinning"] = "classic",
+        thinning_continuation_options=None,
         max_forecast_events: int | None = None,
         seed: Optional[int] = None,
     ) -> None:
@@ -1686,7 +1681,7 @@ class ETASSimulation:
                 magnitude_generator=magnitude_generator,
                 magnitude_generator_kwargs=magnitude_generator_kwargs,
                 continuation_mode=continuation_mode,
-                grid_continuation_options=grid_continuation_options,
+                thinning_continuation_options=thinning_continuation_options,
                 max_forecast_events=max_forecast_events,
                 seed=seed,
             )
@@ -1738,7 +1733,7 @@ class ETASSimulation:
                     magnitude_generator=magnitude_generator,
                     magnitude_generator_kwargs=magnitude_generator_kwargs,
                     continuation_mode=continuation_mode,
-                    grid_continuation_options=grid_continuation_options,
+                    thinning_continuation_options=thinning_continuation_options,
                     max_forecast_events=max_forecast_events,
                     seed=seed,
                 )

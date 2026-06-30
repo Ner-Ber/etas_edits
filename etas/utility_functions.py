@@ -15,6 +15,18 @@ import pandas as pd
 EARTH_RADIUS_KM = 6.3781e3
 
 
+def expand_theta_log10(theta: dict) -> dict:
+    """Linearize ``log10_*`` ETAS keys (e.g. ``log10_mu`` → ``mu``)."""
+    out = dict(theta)
+    for key, val in list(out.items()):
+        if not key.startswith("log10_") or val is None:
+            continue
+        linear = key.replace("log10_", "", 1)
+        if linear not in out or out.get(linear) is None:
+            out[linear] = 10.0 ** float(val)
+    return out
+
+
 def _hav(theta):
     """Haversine half-angle term (same as ``etas.inversion.hav``)."""
     return np.square(np.sin(theta / 2))

@@ -40,19 +40,23 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import pyproj
-from matplotlib.path import Path as MplPath
-from shapely.geometry import Point, Polygon
+from shapely.geometry import Polygon
 
-import etas.mc_b_est as mc_b_est
-import etas.simulation as simulation
+import etas.rate_simulation as rate_simulation
 import etas.utility_functions as utility_functions
-from etas.inversion import ETASParameterCalculation
 
 ETAS_COLOR = "seagreen"
 THINNING_COLOR = "indianred"
 _DEFAULT_CONFIG = "config/catalog_california_etas_vs_thinning_config.json"
 _REPORT_NAME = "catalog_etas_vs_thinning_report.html"
+
+# Re-export thinning helpers (implemented in rate_simulation) for notebooks / ensemble.
+expand_theta_log10 = rate_simulation.expand_theta_log10
+history_row_to_dict = rate_simulation.history_row_to_dict
+to_history_dict = rate_simulation.history_row_to_dict
+lambda_s_total = rate_simulation.lambda_s_total
+A_h = rate_simulation.A_h
+g = rate_simulation.g
 
 
 class History(TypedDict):
@@ -92,152 +96,6 @@ def plot_polygon_map(ax, poly: Polygon, **plot_kwargs):
     ax.plot(lons, lats, **plot_kwargs)
 
 
-_A_H_CACHE: dict = {}
-
-
-def a_h(lat: float, lon: float, H: History, params: EtasParams):
-    dist_sq_km2 = utility_functions.spatial_distance_squared_km2(
-        lat, lon, H["y"], H["x"]
-    )
-    K = params["k0"] * np.exp(params["a"] * (H["m"] - params["m_c"]))
-    C = params["d"] * np.exp(params["gamma"] * (H["m"] - params["m_c"]))
-    return K / (dist_sq_km2 + C) ** (1 + params["rho"])
-
-
-def A_h(
-    poly: Polygon,
-    H: History,
-    params: EtasParams,
-    resolution: int = 500,
-    stretch: float = 3.5,
-) -> float:
-    min_lat, min_lon, max_lat, max_lon = poly.bounds
-    if min_lat == max_lat or min_lon == max_lon:
-        return 0.0
-
-    key = (
-        poly.wkt,
-        H["m"],
-        H["x"],
-        H["y"],
-        params["k0"],
-        params["a"],
-        params["d"],
-        params["gamma"],
-        params["rho"],
-        params["m_c"],
-        resolution,
-        stretch,
-    )
-    cached = _A_H_CACHE.get(key)
-    if cached is not None:
-        return cached
-
-    lat0, lon0 = H["y"], H["x"]
-    km_per_lat, km_per_lon = utility_functions.km_per_degree_at_latitude(lat0)
-
-    ext_y = max(abs(max_lat - lat0), abs(lat0 - min_lat)) * km_per_lat
-    ext_x = max(abs(max_lon - lon0), abs(lon0 - min_lon)) * km_per_lon
-
-    u = np.linspace(-1.0, 1.0, resolution)
-    sx = np.sign(u) * np.abs(u) ** stretch * ext_x
-    sy = np.sign(u) * np.abs(u) ** stretch * ext_y
-    SX, SY = np.meshgrid(sx, sy)
-    WX, WY = np.meshgrid(np.gradient(sx), np.gradient(sy))
-    dA_km2 = np.abs(WX * WY)
-
-    LAT = lat0 + SY / km_per_lat
-    LON = lon0 + SX / km_per_lon
-
-    mask = MplPath(poly.exterior.coords).contains_points(
-        np.column_stack((LAT.ravel(), LON.ravel()))
-    ).reshape(LAT.shape)
-
-    K = params["k0"] * np.exp(params["a"] * (H["m"] - params["m_c"]))
-    C = params["d"] * np.exp(params["gamma"] * (H["m"] - params["m_c"]))
-    dist_sq_km2 = utility_functions.spatial_distance_squared_km2(
-        LAT.ravel(), LON.ravel(), H["y"], H["x"]
-    ).reshape(LAT.shape)
-    kernel = K / (dist_sq_km2 + C) ** (1 + params["rho"])
-
-    val = float(np.sum((kernel * dA_km2)[mask]))
-    _A_H_CACHE[key] = val
-    return val
-
-
-def polygon_area(polygon: Polygon) -> float:
-    geod = pyproj.Geod(ellps="WGS84")
-    lon_lat = Polygon([(lon, lat) for lat, lon in polygon.exterior.coords])
-    area_m2, _ = geod.geometry_area_perimeter(lon_lat)
-    return abs(area_m2) / 1e6
-
-
-def g(t: float, H: History, params: EtasParams):
-    return np.exp(-(t - H["t"]) / params["tau"]) / (t - H["t"] + params["c"]) ** (
-        1 + params["omega"]
-    )
-
-
-def to_history_dict(row) -> History:
-    return {
-        "m": float(row["m"]),
-        "x": float(row["x"]),
-        "y": float(row["y"]),
-        "t": float(row["t"]),
-    }
-
-
-def lambda_s_total(
-    t, events, poly, params, resolution: int
-) -> float:
-    rate = params["mu"] * polygon_area(poly)
-    for H in events:
-        if H["t"] <= t:
-            rate += A_h(poly, H, params, resolution) * g(t, H, params)
-    return rate
-
-
-def parent_weights(t, events, poly, params, resolution: int):
-    contribs = [
-        (A_h(poly, H, params, resolution) * g(t, H, params)) if H["t"] < t else 0.0
-        for H in events
-    ]
-    contribs.append(params["mu"] * polygon_area(poly))
-    w = np.asarray(contribs, dtype=float)
-    return w / w.sum()
-
-
-def sample_background_location(poly: Polygon):
-    min_lat, min_lon, max_lat, max_lon = poly.bounds
-    while True:
-        lat = np.random.uniform(min_lat, max_lat)
-        lon = np.random.uniform(min_lon, max_lon)
-        if poly.contains(Point(lat, lon)):
-            return lat, lon
-
-
-def sample_aftershock_location(H: History, params: EtasParams):
-    r = simulation.simulate_aftershock_radius(
-        params["log10_d"], params["gamma"], params["rho"], [H["m"]], params["m_c"]
-    )[0]
-    angle = np.random.uniform(0, 2 * np.pi)
-    km_per_lat, km_per_lon = utility_functions.km_per_degree_at_latitude(H["y"])
-    lat = H["y"] + (r * np.cos(angle)) / km_per_lat
-    lon = H["x"] + (r * np.sin(angle)) / km_per_lon
-    return float(lat), float(lon)
-
-
-def expand_theta_log10(theta: dict) -> dict:
-    out = dict(theta)
-    for key, val in list(out.items()):
-        if not key.startswith("log10_") or val is None:
-            continue
-        linear = key.replace("log10_", "", 1)
-        if linear not in out or out.get(linear) is None:
-            out[linear] = 10.0 ** float(val)
-    return out
-
-
 def filter_catalog_to_polygon(cat: pd.DataFrame, poly: Polygon) -> pd.DataFrame:
     if cat.empty:
         return cat
@@ -259,63 +117,6 @@ def inversion_id_from_config(cfg, *, store_pij=False, store_distances=False):
         "shape_coords": str(cfg.get("shape_coords")),
     }
     return hashlib.sha1(json.dumps(key_params, sort_keys=True).encode()).hexdigest()[:16]
-
-
-def thinning_next_event_time(intensity_fn, t0, t_end):
-    bound = intensity_fn(t0)
-    t = t0
-    while True:
-        if bound <= 0:
-            return None
-        t += np.random.exponential(1.0 / bound)
-        if t > t_end:
-            return None
-        cand = intensity_fn(t)
-        if np.random.uniform() < cand / bound:
-            return t
-        bound = cand
-
-
-def simulate_thinning_continuation(
-    history_df,
-    poly,
-    params,
-    t_start,
-    t_end,
-    beta,
-    mc,
-    resolution: int,
-    filter_polygon: bool = True,
-):
-    events = [to_history_dict(row) for _, row in history_df.iterrows()]
-    forecast = []
-    intensity = lambda t: lambda_s_total(t, events, poly, params, resolution)
-
-    t = t_start
-    while True:
-        t_next = thinning_next_event_time(intensity, t, t_end)
-        if t_next is None:
-            break
-
-        w = parent_weights(t_next, events, poly, params, resolution)
-        idx = np.random.choice(len(w), p=w)
-        if idx == len(w) - 1:
-            lat, lon = sample_background_location(poly)
-            source = "background"
-        else:
-            lat, lon = sample_aftershock_location(events[idx], params)
-            source = "triggered"
-
-        m = float(mc_b_est.simulate_magnitudes(1, beta, mc)[0])
-        event = {"m": m, "x": float(lon), "y": float(lat), "t": float(t_next)}
-        events.append(event)
-        forecast.append({**event, "event_source": source})
-        t = t_next
-
-    out = pd.DataFrame(forecast, columns=["t", "x", "y", "m", "event_source"])
-    if filter_polygon:
-        out = filter_catalog_to_polygon(out, poly)
-    return out
 
 
 def _events_from_catalog(cat, hist_events):
@@ -514,9 +315,16 @@ def save_intensity_and_magnitude_freq(
     fig, (ax_t, ax_m) = plt.subplots(1, 2, figsize=(16, 5.2))
     t_grid = np.linspace(forecast_start_t, forecast_end_t, 400)
     dt_grid = t_grid - forecast_start_t
-    hist_events = [to_history_dict(row) for _, row in history_df.iterrows()]
+    hist_events = [
+        rate_simulation.history_row_to_dict(row) for _, row in history_df.iterrows()
+    ]
     lam_hist = np.array(
-        [lambda_s_total(t, hist_events, polygon, theta_0, a_h_resolution) for t in t_grid]
+        [
+            rate_simulation.lambda_s_total(
+                t, hist_events, polygon, theta_0, a_h_resolution
+            )
+            for t in t_grid
+        ]
     )
     ax_t.plot(dt_grid, lam_hist, color="black", lw=2.0, label="history-only baseline")
 
@@ -527,7 +335,12 @@ def save_intensity_and_magnitude_freq(
     ]:
         evs = _events_from_catalog(cat, hist_events)
         lam = np.array(
-            [lambda_s_total(t, evs, polygon, theta_0, a_h_resolution) for t in t_grid]
+            [
+                rate_simulation.lambda_s_total(
+                    t, evs, polygon, theta_0, a_h_resolution
+                )
+                for t in t_grid
+            ]
         )
         ax_t.plot(
             dt_grid, lam, color=color, lw=1.2, alpha=0.9, label=f"{label} conditional λ(t)"
@@ -855,6 +668,8 @@ def run_inversion(
     store_distances: bool,
     gof_threshold: float,
 ) -> tuple[str, pathlib.Path, dict]:
+    from etas.inversion import ETASParameterCalculation
+
     inv_id = inversion_id_from_config(
         inversion_config, store_pij=store_pij, store_distances=store_distances
     )
@@ -900,7 +715,11 @@ def run_forecasts(
     forecast_end_t: float,
     seed: int,
     a_h_resolution: int,
+    methods: tuple[str, ...] = ("etas", "thinning"),
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    import etas.mc_b_est as mc_b_est
+    import etas.simulation as simulation
+
     theta = {
         key: theta_0[key]
         for key in [
@@ -917,9 +736,14 @@ def run_forecasts(
         if key in theta_0
     }
     auxiliary_start_dt = pd.to_datetime(auxiliary_start, utc=True).tz_convert(None)
+    method_set = {m.lower() for m in methods}
+    run_etas = "etas" in method_set
+    run_thinning = "thinning" in method_set
 
-    np.random.seed(seed)
-    etas_cont = simulation.simulate_catalog_continuation(
+    etas_catalog = pd.DataFrame()
+    if run_etas:
+        np.random.seed(seed)
+        etas_cont = simulation.simulate_catalog_continuation(
         auxiliary_catalog=auxiliary_catalog,
         auxiliary_start=auxiliary_start_dt,
         auxiliary_end=forecast_start_dt,
@@ -929,36 +753,58 @@ def run_forecasts(
         mc=float(mc),
         beta_main=beta_main,
         filter_polygon=True,
-        magnitude_generator=mc_b_est.simulate_magnitudes,
-    )
-    etas_cont["time"] = pd.to_datetime(etas_cont["time"], utc=True).dt.tz_convert(None)
-    etas_catalog = (
-        etas_cont.loc[etas_cont["time"] > forecast_start_dt]
-        .sort_values("time")
-        .reset_index(drop=True)
-    )
-    etas_catalog["t"] = (etas_catalog["time"] - pd.Timestamp("1970-01-01")) / pd.Timedelta("1D")
-    etas_catalog["dt_days"] = etas_catalog["t"] - forecast_start_t
-    etas_catalog["x"] = etas_catalog["longitude"]
-    etas_catalog["y"] = etas_catalog["latitude"]
-    etas_catalog["m"] = etas_catalog["magnitude"]
-    if "is_background" in etas_catalog.columns:
-        etas_catalog["event_source"] = np.where(
-            etas_catalog["is_background"].astype(bool), "background", "triggered"
+            magnitude_generator=mc_b_est.simulate_magnitudes,
         )
+        etas_cont["time"] = pd.to_datetime(etas_cont["time"], utc=True).dt.tz_convert(None)
+        etas_catalog = (
+            etas_cont.loc[etas_cont["time"] > forecast_start_dt]
+            .sort_values("time")
+            .reset_index(drop=True)
+        )
+        etas_catalog["t"] = (etas_catalog["time"] - pd.Timestamp("1970-01-01")) / pd.Timedelta("1D")
+        etas_catalog["dt_days"] = etas_catalog["t"] - forecast_start_t
+        etas_catalog["x"] = etas_catalog["longitude"]
+        etas_catalog["y"] = etas_catalog["latitude"]
+        etas_catalog["m"] = etas_catalog["magnitude"]
+        if "is_background" in etas_catalog.columns:
+            etas_catalog["event_source"] = np.where(
+                etas_catalog["is_background"].astype(bool), "background", "triggered"
+            )
 
-    np.random.seed(seed)
-    thinning_catalog = simulate_thinning_continuation(
-        history_df,
-        polygon,
-        theta_0,
-        forecast_start_t,
-        forecast_end_t,
-        beta_main,
-        mc,
-        resolution=a_h_resolution,
-    )
-    thinning_catalog["dt_days"] = thinning_catalog["t"] - forecast_start_t
+    thinning_catalog = pd.DataFrame()
+    if run_thinning:
+        np.random.seed(seed)
+        thinning_cont = rate_simulation.simulate_catalog_continuation_thinning(
+        auxiliary_catalog=auxiliary_catalog,
+        auxiliary_end=forecast_start_dt,
+        simulation_end=forecast_end_dt,
+        polygon=polygon,
+        parameters=dict(theta),
+        mc=float(mc),
+        beta_main=beta_main,
+        filter_polygon=True,
+        magnitude_generator=mc_b_est.simulate_magnitudes,
+            a_h_resolution=a_h_resolution,
+        )
+        thinning_cont["time"] = pd.to_datetime(
+            thinning_cont["time"], utc=True
+        ).dt.tz_convert(None)
+        thinning_catalog = (
+            thinning_cont.loc[thinning_cont["time"] > forecast_start_dt]
+            .sort_values("time")
+            .reset_index(drop=True)
+        )
+        thinning_catalog["t"] = (
+            thinning_catalog["time"] - pd.Timestamp("1970-01-01")
+        ) / pd.Timedelta("1D")
+        thinning_catalog["dt_days"] = thinning_catalog["t"] - forecast_start_t
+        thinning_catalog["x"] = thinning_catalog["longitude"]
+        thinning_catalog["y"] = thinning_catalog["latitude"]
+        thinning_catalog["m"] = thinning_catalog["magnitude"]
+        if "is_background" in thinning_catalog.columns:
+            thinning_catalog["event_source"] = np.where(
+                thinning_catalog["is_background"].astype(bool), "background", "triggered"
+            )
     return etas_catalog, thinning_catalog
 
 
@@ -1100,9 +946,11 @@ def main(argv: list[str] | None = None) -> int:
         store_distances=store_distances,
         gof_threshold=gof_threshold,
     )
+    from etas.inversion import ETASParameterCalculation
+
     etas_inversion = ETASParameterCalculation.load_calculation(inversion_output)
 
-    theta_0 = expand_theta_log10(dict(etas_inversion.theta))
+    theta_0 = rate_simulation.expand_theta_log10(dict(etas_inversion.theta))
     mc = float(etas_inversion.m_ref - etas_inversion.delta_m / 2)
     theta_0["m_c"] = mc
     beta_main = float(etas_inversion.beta)
