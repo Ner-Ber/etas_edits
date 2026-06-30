@@ -161,6 +161,72 @@ class TestEtasSimulationSimulateSeed:
         assert calls[0] == expected_call
 
 
+class TestThinningContinuationDispatch:
+    def test_simulate_thinning_mode_dispatches_to_rate_simulation(self) -> None:
+        etas_simulation = _import_simulation_or_skip()
+        import datetime as dt
+        import pandas as pd
+
+        forecast_start = dt.datetime(2020, 1, 1)
+        inv = MagicMock()
+        inv.theta = {"log10_mu": -7.0, "log10_k0": -2.5, "a": 1.8}
+        inv.m_ref = 2.5
+        inv.delta_m = 0.1
+        inv.beta = 1.0
+        inv.timewindow_end = forecast_start
+        inv.auxiliary_start = dt.datetime(2010, 1, 1)
+
+        sim = etas_simulation.ETASSimulation(inv)
+        sim.catalog = pd.DataFrame(
+            {
+                "latitude": [34.0],
+                "longitude": [-118.0],
+                "magnitude": [3.0],
+                "time": [forecast_start - dt.timedelta(days=1)],
+            }
+        )
+        sim.polygon = MagicMock()
+        sim.induced = None
+        sim.logger = MagicMock()
+
+        continuation = pd.DataFrame(
+            {
+                "latitude": [34.1],
+                "longitude": [-118.1],
+                "magnitude": [3.1],
+                "time": [forecast_start + dt.timedelta(hours=1)],
+                "is_background": [True],
+            }
+        )
+
+        with patch.object(
+            etas_simulation.np.random, "seed"
+        ), patch.object(
+            etas_simulation.utility_functions, "log_etas_params"
+        ), patch(
+            "etas.rate_simulation.simulate_catalog_continuation_thinning",
+            return_value=continuation,
+        ) as mock_thinning:
+            gen = sim.simulate(
+                forecast_n_days=1,
+                n_simulations=1,
+                continuation_mode="thinning",
+                filter_polygon=False,
+                info_cols=["is_background"],
+            )
+            chunk = next(gen)
+
+        mock_thinning.assert_called_once()
+        assert list(chunk.columns) == [
+            "latitude",
+            "longitude",
+            "magnitude",
+            "time",
+            "is_background",
+        ]
+        assert len(chunk) == 1
+
+
 class TestKernelTrace:
     _THETA = {
         "log10_mu": -7.33105975591647,

@@ -251,10 +251,10 @@ def _build_temp_configs_from_single_source(
         },
         "catalog": { "format": "etas" | "magnet", "path": "/abs/or/rel/path/to/catalog.csv" },
         "simulate_catalog_continuation": {
-          "continuation_mode": "classic" | "grid",
+          "continuation_mode": "classic" | "thinning",
           "magnitude_generator": "simulate_magnitudes" | "MAGNET_magnitude" | ...,
           "seed": 1905,
-          "grid_continuation_options": { "grid_n_xy": [4, 4], ... }
+          "thinning_continuation_options": { "a_h_resolution": 500, ... }
         },
         "run_magnet_training": true | false,
         "train_and_evaluate_magnitude_prediction_model": { "learning_rate": 1e-4, ... },
@@ -1792,14 +1792,11 @@ def run_etas_catalog_continuation(
     Runs the ETAS simulation/continuation using the provided config.
 
     Continuation JSON may include:
-      - ``continuation_mode``: ``\"classic\"`` or ``\"grid\"`` (default ``\"grid\"``
-        when omitted, matching prior pipeline behavior).
-      - ``seed``: optional RNG seed for reproducibility (classic and grid). For
-        grid, also overridable via ``grid_continuation_options.seed``.
-      - ``grid_continuation_options``: optional object with keys such as
-        ``grid_n_xy``, ``seed``, ``grid_params``, ``progress_bar``,
-        ``kernel_variant``. When ``grid_params`` is omitted, it is built from
-        the loaded inversion via ``force_inversion_on_default_params``.
+      - ``continuation_mode``: ``\"classic\"`` or ``\"thinning\"`` (default ``\"classic\"``
+        when omitted).
+      - ``seed``: optional RNG seed for reproducibility.
+      - ``thinning_continuation_options``: optional object with keys such as
+        ``a_h_resolution``, ``a_h_stretch`` (Ogata branching thinning only).
 
     Args:
         config_path: Path to the continuation config JSON.
@@ -1853,19 +1850,18 @@ def run_etas_catalog_continuation(
         magnitude_generator_kwargs["model_dir"] = str(model_dir)
         print(f"Using MAGNET model from: {model_dir}")
 
-    # continuation_mode / grid_continuation_options: set in the continuation JSON
+    # continuation_mode / thinning_continuation_options: set in the continuation JSON
     # (or under pipeline overrides -> simulate_catalog_continuation -> ...).
-    continuation_mode = simulation_config.get("continuation_mode", "grid")
-    if continuation_mode not in ("classic", "grid"):
+    continuation_mode = simulation_config.get("continuation_mode", "classic")
+    if continuation_mode not in ("classic", "thinning"):
         raise ValueError(
-            f"continuation_mode must be 'classic' or 'grid', got: {continuation_mode!r}"
+            f"continuation_mode must be 'classic' or 'thinning', got: {continuation_mode!r}"
         )
 
-    grid_opts = None
-    if continuation_mode == "grid":
-        grid_opts = continuation_config.grid_continuation_options_from_config(
+    thinning_opts = None
+    if continuation_mode == "thinning":
+        thinning_opts = continuation_config.thinning_continuation_options_from_config(
             simulation_config,
-            etas_inversion_reload.theta,
         )
 
     max_forecast_events = simulation_config.get("max_forecast_events")
@@ -1881,7 +1877,7 @@ def run_etas_catalog_continuation(
         magnitude_generator=magnitude_generator,
         magnitude_generator_kwargs=magnitude_generator_kwargs if magnitude_generator_kwargs else None,
         continuation_mode=continuation_mode,
-        grid_continuation_options=grid_opts,
+        thinning_continuation_options=thinning_opts,
         max_forecast_events=max_forecast_events,
         seed=continuation_seed,
     )
@@ -2072,12 +2068,12 @@ if __name__ == "__main__":
     # ---- 3. Catalog Continuation ---------------------------------------------
 
     _continuation_mode = _continuation_early.get("continuation_mode", "classic")
-    if _continuation_mode not in ("classic", "grid"):
+    if _continuation_mode not in ("classic", "thinning"):
         raise ValueError(
-            f"continuation_mode must be 'classic' or 'grid', got: {_continuation_mode!r}"
+            f"continuation_mode must be 'classic' or 'thinning', got: {_continuation_mode!r}"
         )
 
-    # Separate output per continuation mode so back-to-back classic/grid runs do not
+    # Separate output per continuation mode so back-to-back classic/thinning runs do not
     # overwrite the same simulated_catalog.csv (same model_id + inversion_id).
     continuation_subfolder = (
         default_output_dir

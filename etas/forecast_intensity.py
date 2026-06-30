@@ -140,31 +140,20 @@ def _make_kernels_default(params):
             return float(out)
         return out
 
-    def r(x, y, m):
+    def f(dist_sq_km2, m):
         return (
-            x**2 + y**2 + params["d"] * np.exp(params["gamma"] * (m - params["m0"]))
+            dist_sq_km2
+            + params["d"] * np.exp(params["gamma"] * (m - params["m0"]))
         ) ** (-(1 + params["rho"]))
 
-    # def r(dist_sq_km2, m):
-    #     return (
-    #         dist_sq_km2
-    #         + params["d"] * np.exp(params["gamma"] * (m - params["m0"]))
-    #     ) ** (-(1 + params["rho"]))
-
-    # def f(dist_sq_km2, m):
-    #     k = kappa(m)
-    #     return (params["q"] - 1) / (
-    #         np.pi * params["D"] ** 2 * k
-    #     ) * (1 + dist_sq_km2 / (params["D"] ** 2 * k)) ** (-params["q"])
-
     def summand(dist_sq_km2, m, t):
-        return kappa(m) * r(dist_sq_km2, m) * g(t)
+        return kappa(m) * f(dist_sq_km2, m) * g(t)
 
     return {
         "mu": mu,
         "kappa": kappa,
         "g": g,
-        "f": r,
+        "f": f,
         "summand": summand,
     }
 

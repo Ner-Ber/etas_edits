@@ -1,4 +1,4 @@
-"""Continuation seed wiring (classic + grid) and pipeline flatten merge."""
+"""Continuation seed wiring (classic + thinning) and pipeline flatten merge."""
 
 from __future__ import annotations
 
@@ -21,36 +21,32 @@ class TestContinuationSeedFromConfig:
         assert continuation_config_mod.continuation_seed_from_config({"seed": None}) is None
 
 
-class TestGridContinuationOptionsFromConfig:
-    def test_default_grid_seed_1905_when_omitted(self, continuation_config_mod) -> None:
-        opts = continuation_config_mod.grid_continuation_options_from_config(
-            {"continuation_mode": "grid"},
-            {"rho": 0.62, "log10_mu": -7.0},
+class TestThinningContinuationOptionsFromConfig:
+    def test_defaults_when_omitted(self, continuation_config_mod) -> None:
+        opts = continuation_config_mod.thinning_continuation_options_from_config(
+            {"continuation_mode": "thinning"},
         )
-        assert opts.seed == 1905
+        assert opts.a_h_resolution == 500
+        assert opts.a_h_stretch == pytest.approx(3.5)
 
-    def test_top_level_seed_used_for_grid(self, continuation_config_mod) -> None:
-        opts = continuation_config_mod.grid_continuation_options_from_config(
-            {"seed": 42},
-            {},
-        )
-        assert opts.seed == 42
-
-    def test_nested_grid_seed_overrides_top_level(self, continuation_config_mod) -> None:
-        opts = continuation_config_mod.grid_continuation_options_from_config(
+    def test_nested_options(self, continuation_config_mod) -> None:
+        opts = continuation_config_mod.thinning_continuation_options_from_config(
             {
-                "seed": 42,
-                "grid_continuation_options": {"seed": 99},
+                "thinning_continuation_options": {
+                    "a_h_resolution": 200,
+                    "a_h_stretch": 2.0,
+                },
             },
-            {},
         )
-        assert opts.seed == 99
+        assert opts.a_h_resolution == 200
+        assert opts.a_h_stretch == pytest.approx(2.0)
 
-    def test_grid_continuation_options_must_be_object(self, continuation_config_mod) -> None:
+    def test_thinning_continuation_options_must_be_object(
+        self, continuation_config_mod
+    ) -> None:
         with pytest.raises(TypeError, match="JSON object"):
-            continuation_config_mod.grid_continuation_options_from_config(
-                {"grid_continuation_options": "not-a-dict"},
-                {},
+            continuation_config_mod.thinning_continuation_options_from_config(
+                {"thinning_continuation_options": "not-a-dict"},
             )
 
 
@@ -59,14 +55,14 @@ class TestSimulateContinuationFlattenMerge:
 
     def test_top_level_seed_flattens_to_continuation_json_key(self) -> None:
         overrides = {
-            "continuation_mode": "grid",
+            "continuation_mode": "thinning",
             "seed": 1905,
-            "grid_continuation_options": {"grid_n_xy": [2, 2]},
+            "thinning_continuation_options": {"a_h_resolution": 200},
         }
         flat = flatten_dict(overrides)
         assert flat["seed"] == 1905
-        assert flat["continuation_mode"] == "grid"
-        assert flat["grid_continuation_options.grid_n_xy"] == [2, 2]
+        assert flat["continuation_mode"] == "thinning"
+        assert flat["thinning_continuation_options.a_h_resolution"] == 200
 
     def test_omit_seed_leaves_no_flat_key(self) -> None:
         flat = flatten_dict({"continuation_mode": "classic"})

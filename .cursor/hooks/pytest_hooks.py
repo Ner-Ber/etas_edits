@@ -46,7 +46,16 @@ MODULE_TO_TESTS: dict[str, list[str]] = {
     "etas/forecast_intensity.py": ["tests/test_forecast_intensity_force_inversion.py"],
     "etas/grid_simulation.py": ["tests/test_simulation_seed_and_kernels.py"],
     "etas/simulation.py": ["tests/test_simulation_seed_and_kernels.py"],
+    "etas/rate_simulation.py": [
+        "tests/test_catalog_california_etas_vs_thinning_continuation.py",
+    ],
     "etas/utility_functions.py": ["tests/test_simulation_seed_and_kernels.py"],
+    "runnable_code/catalog_california_etas_vs_thinning_continuation.py": [
+        "tests/test_catalog_california_etas_vs_thinning_continuation.py",
+    ],
+    "runnable_code/catalog_california_etas_vs_thinning_ensemble.py": [
+        "tests/test_catalog_california_etas_vs_thinning_continuation.py",
+    ],
     "runnable_code/continuation_config.py": [
         "tests/test_continuation_seed_and_grid_options.py",
     ],

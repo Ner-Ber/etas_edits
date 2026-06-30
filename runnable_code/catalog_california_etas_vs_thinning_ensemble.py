@@ -44,7 +44,6 @@ import pandas as pd
 from shapely.geometry import Polygon
 
 import catalog_california_etas_vs_thinning_continuation as cat_cmp
-from etas.inversion import ETASParameterCalculation
 
 _DEFAULT_CONFIG = cat_cmp._DEFAULT_CONFIG
 _REPORT_NAME = "catalog_etas_vs_thinning_ensemble_report.html"
@@ -115,8 +114,22 @@ def find_cached_realization_dir(ensemble_dir: pathlib.Path, seed: int) -> pathli
     return None
 
 
-def realization_is_complete(run_dir: pathlib.Path) -> bool:
-    return all((run_dir / name).is_file() for name in _REALIZATION_CATALOG_NAMES)
+def realization_is_complete(
+    run_dir: pathlib.Path,
+    methods: tuple[str, ...] = ("etas", "thinning"),
+) -> bool:
+    required = catalog_names_for_methods(methods)
+    return all((run_dir / name).is_file() for name in required)
+
+
+def catalog_names_for_methods(methods: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+    method_set = {m.lower() for m in methods}
+    names: list[str] = []
+    if "etas" in method_set:
+        names.append("etas_catalog.csv")
+    if "thinning" in method_set:
+        names.append("thinning_catalog.csv")
+    return tuple(names)
 
 
 def expected_realization_meta(
@@ -649,6 +662,8 @@ def main(argv: list[str] | None = None) -> int:
         store_distances=store_distances,
         gof_threshold=gof_threshold,
     )
+    from etas.inversion import ETASParameterCalculation
+
     etas_inversion = ETASParameterCalculation.load_calculation(inversion_output)
 
     theta_0 = cat_cmp.expand_theta_log10(dict(etas_inversion.theta))
