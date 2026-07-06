@@ -634,6 +634,51 @@ def configure_etas_logging(level: int) -> None:
         logging.getLogger(name).setLevel(level)
 
 
+def thinning_magnitude_config_from_dict(cfg: dict) -> dict:
+    """Thinning-only magnitude generator settings from pipeline config."""
+    return {
+        "magnitude_generator": cfg.get("thinning_magnitude_generator", "simulate_magnitudes"),
+        "model_dir": cfg.get("thinning_model_dir"),
+    }
+
+
+def thinning_magnitude_meta(cfg: dict, repo_root: pathlib.Path) -> dict:
+    """Cache-key metadata for thinning magnitude generator settings."""
+    thin = thinning_magnitude_config_from_dict(cfg)
+    meta = {"thinning_magnitude_generator": thin["magnitude_generator"]}
+    if thin["model_dir"] is not None:
+        meta["thinning_model_dir"] = str(_resolve_path(repo_root, thin["model_dir"]))
+    return meta
+
+
+def resolve_thinning_magnitude_generator(
+    *,
+    magnitude_generator: str = "simulate_magnitudes",
+    model_dir: str | pathlib.Path | None = None,
+    repo_root: pathlib.Path | None = None,
+):
+    """Resolve thinning continuation magnitude generator (supports MAGNET_magnitude)."""
+    kwargs: dict = {}
+    if model_dir is not None:
+        if repo_root is None:
+            raise ValueError("repo_root is required when thinning_model_dir is set")
+        kwargs["model_dir"] = str(_resolve_path(repo_root, model_dir))
+    if magnitude_generator == "MAGNET_magnitude" and "model_dir" not in kwargs:
+        raise ValueError(
+            "thinning_model_dir is required when thinning_magnitude_generator "
+            "is 'MAGNET_magnitude'"
+        )
+
+    if magnitude_generator == "MAGNET_magnitude":
+        import etas.magnet_inference as magnet_inference
+
+        return magnet_inference.get_magnet_generator(kwargs["model_dir"])
+
+    import etas.simulation as simulation
+
+    return simulation.resolve_magnitude_generator(magnitude_generator, **kwargs)
+
+
 def apply_cli_overrides(cfg: dict, args: argparse.Namespace, repo_root: pathlib.Path) -> dict:
     out = dict(cfg)
     if args.catalog is not None:
@@ -652,6 +697,10 @@ def apply_cli_overrides(cfg: dict, args: argparse.Namespace, repo_root: pathlib.
         out["seed"] = int(args.seed)
     if args.a_h_resolution is not None:
         out["a_h_resolution"] = int(args.a_h_resolution)
+    if getattr(args, "thinning_magnitude_generator", None) is not None:
+        out["thinning_magnitude_generator"] = args.thinning_magnitude_generator
+    if getattr(args, "thinning_model_dir", None) is not None:
+        out["thinning_model_dir"] = str(_resolve_path(repo_root, args.thinning_model_dir))
     if args.force_inversion:
         out["force_inversion"] = True
     if args.output_dir is not None:
@@ -677,9 +726,9 @@ def run_inversion(
     params_json = inv_run_dir / f"parameters_{inv_id}.json"
 
     if params_json.exists() and not force_inversion:
-        print(f"Using cached inversion parameters: {params_json}")
+        print(f"Stage: using cached ETAS inversion parameters ({params_json})", flush=True)
     else:
-        print("Running ETAS inversion (this may take a while)...")
+        print("Stage: running ETAS parameter inversion (this may take a while)...", flush=True)
         inversion_config = dict(inversion_config)
         inversion_config["id"] = inv_id
         inv_run_dir.mkdir(parents=True, exist_ok=True)
@@ -692,7 +741,7 @@ def run_inversion(
             store_pij=store_pij,
             store_distances=store_distances,
         )
-        print(f"Inversion stored in {inv_run_dir}")
+        print(f"Stage: ETAS inversion complete — stored in {inv_run_dir}", flush=True)
 
     with open(params_json, encoding="utf-8") as f:
         inversion_output = json.load(f)
@@ -715,10 +764,14 @@ def run_forecasts(
     forecast_end_t: float,
     seed: int,
     a_h_resolution: int,
+    thinning_magnitude_generator=None,
     methods: tuple[str, ...] = ("etas", "thinning"),
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     import etas.mc_b_est as mc_b_est
     import etas.simulation as simulation
+
+    if thinning_magnitude_generator is None:
+        thinning_magnitude_generator = mc_b_est.simulate_magnitudes
 
     theta = {
         key: theta_0[key]
@@ -739,20 +792,27 @@ def run_forecasts(
     method_set = {m.lower() for m in methods}
     run_etas = "etas" in method_set
     run_thinning = "thinning" in method_set
+    thinning_uses_magnet = (
+        thinning_magnitude_generator.__class__.__name__ == "MagnetMagnitudeGenerator"
+    )
 
     etas_catalog = pd.DataFrame()
     if run_etas:
+        print(
+            f"Stage: running classic ETAS catalog continuation (seed={seed})...",
+            flush=True,
+        )
         np.random.seed(seed)
         etas_cont = simulation.simulate_catalog_continuation(
-        auxiliary_catalog=auxiliary_catalog,
-        auxiliary_start=auxiliary_start_dt,
-        auxiliary_end=forecast_start_dt,
-        polygon=polygon,
-        simulation_end=forecast_end_dt,
-        parameters=dict(theta),
-        mc=float(mc),
-        beta_main=beta_main,
-        filter_polygon=True,
+            auxiliary_catalog=auxiliary_catalog,
+            auxiliary_start=auxiliary_start_dt,
+            auxiliary_end=forecast_start_dt,
+            polygon=polygon,
+            simulation_end=forecast_end_dt,
+            parameters=dict(theta),
+            mc=float(mc),
+            beta_main=beta_main,
+            filter_polygon=True,
             magnitude_generator=mc_b_est.simulate_magnitudes,
         )
         etas_cont["time"] = pd.to_datetime(etas_cont["time"], utc=True).dt.tz_convert(None)
@@ -770,20 +830,33 @@ def run_forecasts(
             etas_catalog["event_source"] = np.where(
                 etas_catalog["is_background"].astype(bool), "background", "triggered"
             )
+        print(
+            f"Stage: classic ETAS continuation finished ({len(etas_catalog)} forecast events)",
+            flush=True,
+        )
 
     thinning_catalog = pd.DataFrame()
     if run_thinning:
+        thinning_label = (
+            "Ogata thinning + MAGNET magnitudes"
+            if thinning_uses_magnet
+            else "Ogata thinning"
+        )
+        print(
+            f"Stage: running {thinning_label} catalog continuation (seed={seed})...",
+            flush=True,
+        )
         np.random.seed(seed)
         thinning_cont = rate_simulation.simulate_catalog_continuation_thinning(
-        auxiliary_catalog=auxiliary_catalog,
-        auxiliary_end=forecast_start_dt,
-        simulation_end=forecast_end_dt,
-        polygon=polygon,
-        parameters=dict(theta),
-        mc=float(mc),
-        beta_main=beta_main,
-        filter_polygon=True,
-        magnitude_generator=mc_b_est.simulate_magnitudes,
+            auxiliary_catalog=auxiliary_catalog,
+            auxiliary_end=forecast_start_dt,
+            simulation_end=forecast_end_dt,
+            polygon=polygon,
+            parameters=dict(theta),
+            mc=float(mc),
+            beta_main=beta_main,
+            filter_polygon=True,
+            magnitude_generator=thinning_magnitude_generator,
             a_h_resolution=a_h_resolution,
         )
         thinning_cont["time"] = pd.to_datetime(
@@ -805,6 +878,10 @@ def run_forecasts(
             thinning_catalog["event_source"] = np.where(
                 thinning_catalog["is_background"].astype(bool), "background", "triggered"
             )
+        print(
+            f"Stage: thinning continuation finished ({len(thinning_catalog)} forecast events)",
+            flush=True,
+        )
     return etas_catalog, thinning_catalog
 
 
@@ -873,6 +950,18 @@ def main(argv: list[str] | None = None) -> int:
         help="Quadrature resolution for A_h spatial integral.",
     )
     parser.add_argument(
+        "--thinning-magnitude-generator",
+        default=None,
+        choices=["simulate_magnitudes", "MAGNET_magnitude"],
+        help="Magnitude generator for thinning continuation only.",
+    )
+    parser.add_argument(
+        "--thinning-model-dir",
+        type=pathlib.Path,
+        default=None,
+        help="Trained MAGNET model directory (required for thinning MAGNET_magnitude).",
+    )
+    parser.add_argument(
         "--force-inversion",
         action="store_true",
         help="Re-run ETAS inversion even if cached parameters exist.",
@@ -903,6 +992,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     cfg = apply_cli_overrides(load_config(config_path), args, repo_root)
+
+    print("=== Catalog California: ETAS vs Ogata thinning continuation ===", flush=True)
+    print(f"Config: {config_path}", flush=True)
 
     catalog_path = _resolve_path(repo_root, cfg["fn_catalog"])
     shape_coords_path = _resolve_path(repo_root, cfg["shape_coords"])
@@ -946,6 +1038,7 @@ def main(argv: list[str] | None = None) -> int:
         store_distances=store_distances,
         gof_threshold=gof_threshold,
     )
+    print(f"Stage: loading inversion results (inv_{inv_id})...", flush=True)
     from etas.inversion import ETASParameterCalculation
 
     etas_inversion = ETASParameterCalculation.load_calculation(inversion_output)
@@ -1001,6 +1094,24 @@ def main(argv: list[str] | None = None) -> int:
         f"({forecast_days:.1f} days)"
     )
 
+    thin_mag_settings = thinning_magnitude_config_from_dict(cfg)
+    thinning_mag_gen = resolve_thinning_magnitude_generator(
+        **thin_mag_settings,
+        repo_root=repo_root,
+    )
+    if thin_mag_settings["magnitude_generator"] == "MAGNET_magnitude":
+        import etas.magnet_inference as magnet_inference
+
+        print(
+            f"Stage: thinning magnitude generator = MAGNET ({thin_mag_settings['model_dir']})",
+            flush=True,
+        )
+        magnet_inference.warm_magnet_session(
+            thin_mag_settings["model_dir"],
+            feature_cache_dir=cfg.get("magnet_feature_cache_dir"),
+        )
+
+    print(f"Stage: running forecast continuations (seed={seed})...", flush=True)
     etas_catalog, thinning_catalog = run_forecasts(
         etas_inversion=etas_inversion,
         history_df=history_df,
@@ -1016,6 +1127,7 @@ def main(argv: list[str] | None = None) -> int:
         forecast_end_t=forecast_end_t,
         seed=seed,
         a_h_resolution=a_h_resolution,
+        thinning_magnitude_generator=thinning_mag_gen,
     )
     print(f"ETAS continuation: {len(etas_catalog)} events in the {forecast_days:.1f}-day window")
     print(
@@ -1024,6 +1136,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     summary = build_summary_table(etas_catalog, thinning_catalog)
+    print("Stage: saving catalogs, figures, and report...", flush=True)
     etas_catalog.to_csv(run_dir / "etas_catalog.csv", index=False)
     thinning_catalog.to_csv(run_dir / "thinning_catalog.csv", index=False)
     summary.to_csv(run_dir / "summary.csv")
