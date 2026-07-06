@@ -233,6 +233,28 @@ def thinning_next_event_time(intensity_fn, t0, t_end):
         bound = cand
 
 
+def _append_event_to_available_catalog(
+    catalog_df: pd.DataFrame,
+    *,
+    lat: float,
+    lon: float,
+    t_days: float,
+    magnitude: float,
+    is_background: bool,
+) -> pd.DataFrame:
+    """Append one simulated event to the MAGNET-visible history catalog."""
+    row = pd.DataFrame(
+        {
+            "latitude": [lat],
+            "longitude": [lon],
+            "time": [_EPOCH + pd.Timedelta(days=t_days)],
+            "magnitude": [magnitude],
+            "is_background": [is_background],
+        }
+    )
+    return pd.concat([catalog_df, row], ignore_index=True)
+
+
 def _thinning_magnitude(
     magnitude_generator,
     beta_main,
@@ -245,21 +267,24 @@ def _thinning_magnitude(
 ):
     mag_kwargs = {"beta": beta_main, "mc": mc}
     if catalog is not None:
-        mag_kwargs["catalog"] = catalog
+        mag_kwargs["catalog"] = catalog.copy()
+    event_time = _EPOCH + pd.Timedelta(days=t_days)
+    aftershock_row = {
+        "latitude": [lat],
+        "longitude": [lon],
+        "time": [event_time],
+    }
     if parent_H is not None:
-        event_time = _EPOCH + pd.Timedelta(days=t_days)
         parent_time = _EPOCH + pd.Timedelta(days=parent_H["t"])
-        mag_kwargs["aftershock_df"] = pd.DataFrame(
+        aftershock_row.update(
             {
                 "parent_latitude": [parent_H["y"]],
                 "parent_longitude": [parent_H["x"]],
                 "parent_magnitude": [parent_H["m"]],
                 "parent_time": [parent_time],
-                "latitude": [lat],
-                "longitude": [lon],
-                "time": [event_time],
             }
         )
+    mag_kwargs["aftershock_df"] = pd.DataFrame(aftershock_row)
     return float(magnitude_generator(1, **mag_kwargs)[0])
 
 
@@ -296,6 +321,13 @@ def simulate_catalog_continuation_thinning(
     ].copy()
     history = history.sort_values("time").reset_index(drop=True)
     events = [_catalog_row_to_history(row) for _, row in history.iterrows()]
+    available_catalog = history.copy()
+    if catalog is not None:
+        catalog_upto_aux = catalog.loc[catalog["time"] <= auxiliary_end].copy()
+        if len(catalog_upto_aux) > len(available_catalog):
+            available_catalog = catalog_upto_aux.sort_values("time").reset_index(
+                drop=True
+            )
 
     t_start = (
         float(max(H["t"] for H in events))
@@ -334,7 +366,7 @@ def simulate_catalog_continuation_thinning(
             magnitude_generator,
             beta_main,
             mc,
-            catalog if catalog is not None else auxiliary_catalog,
+            available_catalog,
             parent_H,
             lat,
             lon,
@@ -343,6 +375,14 @@ def simulate_catalog_continuation_thinning(
         event = {"m": m, "x": float(lon), "y": float(lat), "t": float(t_next)}
         events.append(event)
         forecast.append({**event, "event_source": source})
+        available_catalog = _append_event_to_available_catalog(
+            available_catalog,
+            lat=lat,
+            lon=lon,
+            t_days=t_next,
+            magnitude=m,
+            is_background=source == "background",
+        )
         t = t_next
 
     if not forecast:
