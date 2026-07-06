@@ -32,6 +32,7 @@ import numpy as np
 import pandas as pd
 import joblib
 import gin
+import etas.magnet_inference as magnet_inference
 os.environ["TF_USE_LEGACY_KERAS"] = "1"
 # import unused for gin config
 
@@ -280,139 +281,19 @@ def MAGNET_magnitude(
         catalog: pd.DataFrame | None = None,
         aftershock_df: pd.DataFrame | None = None,
         model_dir: str | None = None):
-    """
-    Alternative to simulate_magnitudes that uses the catalog history.
-
-    Args:
-      n: number of magnitudes to simulate
-      beta: beta value
-      mc: completeness magnitude
-      m_max: maximum magnitude
-      loc: location of the earthquake
-      time: time of the earthquake
-      catalog: pandas DataFrame containing the catalog history
-      aftershock_df: DataFrame containing aftershock information
-      model_dir: Optional path to directory containing trained MAGNET model.
-                 If None, uses default hardcoded path.
-
-    Returns:
-      Array of n simulated magnitudes
-    """
-    # Default model directory if not provided
+    """Alternative to simulate_magnitudes that uses MAGNET (delegates to magnet_inference)."""
     if model_dir is None:
-        MODEL_NAME = 'Hauksson_recreate'
-        experiment_dir = os.path.join(
-            '/home/neriberman/REPOS/eq_mag_pred_clean_test_20251104/results/trained_models/', MODEL_NAME)
-    else:
-        experiment_dir = str(model_dir)
-
-    available_history = pd.concat([catalog, aftershock_df])
-    available_history = available_history.sort_values(by='time')
-    available_history = available_history.reset_index(drop=True)
-
-    custom_objects = {'_repeat': encoders._repeat}
-    loaded_model = tf.keras.models.load_model(
-        os.path.join(experiment_dir, 'model'),
-        custom_objects=custom_objects,
-        compile=False,
-        # safe_mode=True
-    )
-
-
-    CatalogDomain = training_examples.CatalogDomain
-    with open(os.path.join(experiment_dir, 'domain'), 'rb') as f:
-        original_domain = joblib.load(f)
-
-    # Parse gin config from model directory to ensure gin bindings match training
-    # This is critical for build_features_uuid() to match saved scalers
-    gin_config_path = os.path.join(experiment_dir, 'config.gin')
-    if os.path.exists(gin_config_path):
-        gin.parse_config_file(gin_config_path, skip_unknown=True)
-
-    # Build encoders using original_domain - this ensures encoder UUIDs match training
-    # Encoders must be built before loading scalers since scaler filenames depend on encoder UUIDs
-    all_encoders = one_region_model.build_encoders(original_domain)
-
-    # Load scalers using original_domain (not the simulation domain)
-    # Scalers were saved using original_domain's UUID, so we must use the same domain here
-    scalers, location_scalers = one_region_model.load_scalers_from_directory(
-        original_domain,
-        all_encoders,
-        str(Path(experiment_dir) / "features_scalers_encoders"),
-    )
-
-    # Now create the simulation domain for actual prediction
-    # This domain has different test_times/test_locations but uses the same scalers
-    earthquakes_catalog = available_history.copy()
-    earthquakes_catalog['time'] = pd.to_datetime(earthquakes_catalog['time']).astype(np.int64) // 10**9
-    if 'depth' not in earthquakes_catalog.columns:
-        earthquakes_catalog['depth'] = 0
-    # TODO: this is a workaround. Should be fixed by eliminating the need for them in the gin config
-    if 'strike' not in earthquakes_catalog.columns:
-        earthquakes_catalog['strike'] = 0
-    if 'rake' not in earthquakes_catalog.columns:
-        earthquakes_catalog['rake'] = 0
-    if 'dip' not in earthquakes_catalog.columns:
-        earthquakes_catalog['dip'] = 0
-    times = pd.to_datetime(aftershock_df['time']).astype(np.int64) // 10**9
-    locations = aftershock_df[['longitude', 'latitude']].values
-    domain = training_examples.CatalogDomain(
-        test_times=times,
-        test_locations=locations,
-        earthquakes_catalog=earthquakes_catalog,
-        user_magnitude_threshold=original_domain.magnitude_threshold,
-    )
-
-    # Create a vector of sorted times, and sort locations by the same order
-    sorted_indices = np.argsort(times)
-    sorted_times = times[sorted_indices]
-    sorted_locations = locations[sorted_indices]
-    all_sampled_magnitudes = []
-    for (time, location) in zip(sorted_times, sorted_locations):
-        model_prediction = forecasts.create_altered_prediction_single_loc(
-            evaluation_time=time,
-            loc=geometry.Point(lng=location[0], lat=location[1]),
-            catalog_domain=domain,
-            loaded_model=loaded_model,
-            scalers=scalers,
-            spatially_dependent_scalers=location_scalers,
+        model_dir = os.path.join(
+            '/home/neriberman/REPOS/eq_mag_pred_clean_test_20251104/results/trained_models/',
+            'Hauksson_recreate',
         )
-        sampled_magnitude = _sample_from_model_prediction(model_prediction, statistic='sample')
-        all_sampled_magnitudes.append(sampled_magnitude)
-        earthquakes_catalog = domain.earthquakes_catalog.copy()
-        earthquakes_catalog.loc[
-            (earthquakes_catalog['time'] == time) & 
-            (earthquakes_catalog['longitude'] == location[0]) & 
-            (earthquakes_catalog['latitude'] == location[1]), 
-            'magnitude'
-        ] = sampled_magnitude
-        domain.earthquakes_catalog = earthquakes_catalog
-    return all_sampled_magnitudes
-
-
-
-
-
-    # scaler_saving_dir = os.path.join(experiment_dir, 'scalers')
-    # features_dir = Path(experiment_dir) / "features_scalers_encoders"
-
-    # # Parse gin config from model directory to ensure gin bindings match training
-    # # This is critical for build_features_uuid() to match saved scalers
-
-    # gin_config_path = os.path.join(experiment_dir, 'config.gin')
-    # if os.path.exists(gin_config_path):
-    #     gin.parse_config_file(gin_config_path, skip_unknown=True)
-
-
-    # )
-
-    #     model_prediction = forecasts.create_altered_prediction_single_loc(
-    # evaluation_time=time,
-    # loc=loc,
-    # catalog_domain=domain,
-    # loaded_model=loaded_model,
-    # scalers=scalers,
-    # spatially_dependent_scalers=location_scalers,
-    # )
-    #     sampled_magnitudes = _sample_from_model_prediction(model_prediction, statistic='sample', n_samples=n)
-    #     return sampled_magnitudes
+    generator = magnet_inference.get_magnet_generator(model_dir)
+    return generator(
+        n,
+        beta=beta,
+        mc=mc,
+        m_max=m_max,
+        catalog=catalog,
+        aftershock_df=aftershock_df,
+        model_dir=model_dir,
+    )
