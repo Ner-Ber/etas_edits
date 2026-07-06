@@ -1,0 +1,64 @@
+---
+description: Keep imports at module top; defer heavy optional deps only when rarely used
+globs:
+  - etas/**/*.py
+  - runnable_code/**/*.py
+  - tests/**/*.py
+alwaysApply: true
+---
+
+# Python imports
+
+## Default: module top
+
+Put all imports at the **top of the file** (after `from __future__` and module docstring). Do **not** hide imports inside functions, loops, or `if` blocks unless the exception below applies.
+
+```python
+# ✅ GOOD
+import etas.simulation as simulation
+from etas.inversion import ETASParameterCalculation
+
+def run_forecasts(...):
+    etas_inversion = ETASParameterCalculation.load_calculation(path)
+```
+
+```python
+# ❌ BAD — avoid unless exception applies
+def run_forecasts(...):
+    from etas.inversion import ETASParameterCalculation
+    ...
+```
+
+## Exception: heavy, rarely-used optional deps
+
+Import **inside** a function or `if` branch **only** when all of these hold:
+
+1. The dependency is **expensive** at import time (e.g. TensorFlow, large ML stacks) or creates a hard optional dependency.
+2. The code path is **usually not taken** in typical runs (the guarding condition is false most of the time).
+3. A top-level import would **materially slow** startup or break lightweight callers (unit tests, CLI paths that never use the feature).
+
+When deferring, keep the import as close as possible to the single use site and add a one-line comment explaining why.
+
+```python
+# ✅ OK — MAGNET / TensorFlow only when thinning uses MAGNET_magnitude
+if magnitude_generator == "MAGNET_magnitude":
+    import etas.magnet_inference as magnet_inference
+    return magnet_inference.get_magnet_generator(kwargs["model_dir"])
+```
+
+```python
+# ✅ OK — legacy unpickle fallback, almost never executed
+def find_class(self, module, name):
+    if name == "CatalogDomain":
+        from eq_mag_prediction.forecasting import training_examples
+        return training_examples.CatalogDomain
+```
+
+## Split modules instead of inline imports
+
+If only part of a module needs a heavy stack, prefer a **light sibling module** so most callers import the light path at the top.
+
+## Upstream files
+
+Do not refactor import layout in upstream-owned modules (`inversion.py`, `simulation.py`, etc.) unless the user explicitly asks.
+
