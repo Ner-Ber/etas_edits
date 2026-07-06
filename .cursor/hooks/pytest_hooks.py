@@ -38,6 +38,8 @@ INTEGRATION_TEST_FILES = frozenset(
     {
         "tests/test_magnet_pipeline_json_merge.py",
         "tests/test_run_magnet_continuation_driver.py",
+        "tests/test_catalog_california_continuation_ensemble_smoke.py",
+        "tests/test_magnet_etas_integration_smoke.py",
     }
 )
 
@@ -48,13 +50,27 @@ MODULE_TO_TESTS: dict[str, list[str]] = {
     "etas/simulation.py": ["tests/test_simulation_seed_and_kernels.py"],
     "etas/rate_simulation.py": [
         "tests/test_catalog_california_etas_vs_thinning_continuation.py",
+        "tests/test_magnet_inference.py",
+        "tests/test_magnet_etas_integration_smoke.py",
     ],
     "etas/utility_functions.py": ["tests/test_simulation_seed_and_kernels.py"],
+    "etas/magnet_inference.py": [
+        "tests/test_magnet_inference.py",
+        "tests/test_magnet_etas_integration_smoke.py",
+    ],
+    "etas/magnet_inference_cache.py": [
+        "tests/test_magnet_inference.py",
+        "tests/test_magnet_etas_integration_smoke.py",
+    ],
     "runnable_code/catalog_california_etas_vs_thinning_continuation.py": [
         "tests/test_catalog_california_etas_vs_thinning_continuation.py",
     ],
     "runnable_code/catalog_california_etas_vs_thinning_ensemble.py": [
         "tests/test_catalog_california_etas_vs_thinning_continuation.py",
+    ],
+    "runnable_code/catalog_california_continuation_ensemble.py": [
+        "tests/test_catalog_california_etas_vs_thinning_continuation.py",
+        "tests/test_catalog_california_continuation_ensemble_smoke.py",
     ],
     "runnable_code/continuation_config.py": [
         "tests/test_continuation_seed_and_grid_options.py",
