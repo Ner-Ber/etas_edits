@@ -1,8 +1,8 @@
 {
-  "status": "skip",
-  "edited_file": "runnable_code/run_magnet_continuation_classic_then_grid.py",
+  "status": "pass",
+  "edited_file": "runnable_code/MAGNET_ETAS_pipeline.py",
   "command": "run_magnet_continuation_classic_then_grid.py --dry-run",
   "exit_code": 0,
-  "output_tail": "skipped because pytest failed first",
-  "timestamp": "2026-05-26T20:42:53.589848+00:00"
+  "output_tail": "Dry-run OK: config paths, imports, IPython/sqlite, and nbconvert.\n",
+  "timestamp": "2026-06-29T08:38:16.605341+00:00"
 }
