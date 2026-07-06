@@ -71,6 +71,8 @@ _REALIZATION_META_KEYS = (
     "a_h_resolution",
     "timewindow_end",
     "testwindow_end",
+    "thinning_magnitude_generator",
+    "thinning_model_dir",
 )
 
 
@@ -139,14 +141,17 @@ def expected_realization_meta(
     a_h_resolution: int,
     timewindow_end: str,
     testwindow_end: str,
+    **extra_meta,
 ) -> dict:
-    return {
+    meta = {
         "seed": seed,
         "inversion_id": inv_id,
         "a_h_resolution": a_h_resolution,
         "timewindow_end": timewindow_end,
         "testwindow_end": testwindow_end,
     }
+    meta.update(extra_meta)
+    return meta
 
 
 def realization_meta_matches(run_dir: pathlib.Path, expected: dict) -> bool:
@@ -586,6 +591,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--inversion-output-dir", type=pathlib.Path, default=None)
     parser.add_argument("--a-h-resolution", type=int, default=None)
+    parser.add_argument(
+        "--thinning-magnitude-generator",
+        default=None,
+        choices=["simulate_magnitudes", "MAGNET_magnitude"],
+        help="Magnitude generator for thinning continuation only.",
+    )
+    parser.add_argument(
+        "--thinning-model-dir",
+        type=pathlib.Path,
+        default=None,
+        help="Trained MAGNET model directory (required for thinning MAGNET_magnitude).",
+    )
     parser.add_argument("--force-inversion", action="store_true")
     parser.add_argument(
         "--force-rerun",
@@ -614,6 +631,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     cfg = apply_ensemble_cli_overrides(cat_cmp.load_config(config_path), args, repo_root)
+    print("=== Catalog California: ETAS vs thinning ensemble ===", flush=True)
+    print(f"Config: {config_path}", flush=True)
     n_runs = int(args.n_runs if args.n_runs is not None else cfg.get("n_runs", 5))
     if n_runs < 1:
         print("--n-runs must be >= 1", file=sys.stderr)
@@ -662,6 +681,7 @@ def main(argv: list[str] | None = None) -> int:
         store_distances=store_distances,
         gof_threshold=gof_threshold,
     )
+    print(f"Stage: loading inversion results (inv_{inv_id})...", flush=True)
     from etas.inversion import ETASParameterCalculation
 
     etas_inversion = ETASParameterCalculation.load_calculation(inversion_output)
@@ -708,12 +728,32 @@ def main(argv: list[str] | None = None) -> int:
     ensemble_dir.mkdir(parents=True, exist_ok=True)
     figures_dir.mkdir(parents=True, exist_ok=True)
 
+    thin_mag_meta = cat_cmp.thinning_magnitude_meta(cfg, repo_root)
+    thin_mag_settings = cat_cmp.thinning_magnitude_config_from_dict(cfg)
+    thinning_mag_gen = cat_cmp.resolve_thinning_magnitude_generator(
+        **thin_mag_settings,
+        repo_root=repo_root,
+    )
+    if thin_mag_settings["magnitude_generator"] == "MAGNET_magnitude":
+        import etas.magnet_inference as magnet_inference
+
+        print(
+            f"Stage: thinning magnitude generator = MAGNET ({thin_mag_settings['model_dir']})",
+            flush=True,
+        )
+        magnet_inference.warm_magnet_session(
+            thin_mag_settings["model_dir"],
+            feature_cache_dir=cfg.get("magnet_feature_cache_dir"),
+        )
+
     seeds = [seed_start + i for i in range(n_runs)]
     print(
-        f"Ensemble: {n_runs} realizations, seeds {seeds[0]}..{seeds[-1]}, "
-        f"forecast {forecast_days:.1f} days"
+        f"Stage: ensemble forecast realizations — ETAS vs thinning | "
+        f"{n_runs} runs, seeds {seeds[0]}..{seeds[-1]}, "
+        f"forecast {forecast_days:.1f} days",
+        flush=True,
     )
-    print(f"Output directory: {ensemble_dir}")
+    print(f"Output directory: {ensemble_dir}", flush=True)
 
     metric_rows: list[dict] = []
     realization_dirs: list[pathlib.Path] = []
@@ -729,6 +769,7 @@ def main(argv: list[str] | None = None) -> int:
             a_h_resolution=a_h_resolution,
             timewindow_end=cfg["timewindow_end"],
             testwindow_end=cfg["testwindow_end"],
+            **thin_mag_meta,
         )
         use_cache = (
             not args.force_rerun
@@ -767,6 +808,7 @@ def main(argv: list[str] | None = None) -> int:
                 forecast_end_t=forecast_end_t,
                 seed=seed,
                 a_h_resolution=a_h_resolution,
+                thinning_magnitude_generator=thinning_mag_gen,
             )
             save_realization_outputs(
                 run_dir,
@@ -786,6 +828,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"\nRealizations: {n_ran} newly simulated, {n_cached} loaded from cache")
 
+    print("Stage: writing ensemble summary, figures, and report...", flush=True)
     metrics_df = pd.DataFrame(metric_rows, columns=_METRIC_COLUMNS)
     agg_df = aggregate_summary(metrics_df)
 

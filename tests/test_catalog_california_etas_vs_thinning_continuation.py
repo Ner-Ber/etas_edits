@@ -35,3 +35,52 @@ def test_ensemble_module_imports_and_uses_rate_simulation() -> None:
     assert hasattr(cat_cmp, "run_forecasts")
     theta = rate_simulation.expand_theta_log10({"log10_mu": -6.0})
     assert theta["mu"] > 0
+
+
+def test_thinning_magnitude_config_defaults() -> None:
+    import catalog_california_etas_vs_thinning_continuation as cat_cmp
+
+    assert cat_cmp.thinning_magnitude_config_from_dict({}) == {
+        "magnitude_generator": "simulate_magnitudes",
+        "model_dir": None,
+    }
+
+
+def test_thinning_magnitude_meta_uses_resolved_model_dir(tmp_path) -> None:
+    import catalog_california_etas_vs_thinning_continuation as cat_cmp
+
+    repo_root = tmp_path
+    model_dir = repo_root / "models" / "my_magnet"
+    cfg = {
+        "thinning_magnitude_generator": "MAGNET_magnitude",
+        "thinning_model_dir": "models/my_magnet",
+    }
+    meta = cat_cmp.thinning_magnitude_meta(cfg, repo_root)
+    assert meta["thinning_magnitude_generator"] == "MAGNET_magnitude"
+    assert meta["thinning_model_dir"] == str(model_dir.resolve())
+
+
+def test_resolve_thinning_magnitude_generator_magnet_requires_model_dir() -> None:
+    import catalog_california_etas_vs_thinning_continuation as cat_cmp
+
+    with pytest.raises(ValueError, match="thinning_model_dir"):
+        cat_cmp.resolve_thinning_magnitude_generator(magnitude_generator="MAGNET_magnitude")
+
+
+def test_continuation_ensemble_module_imports() -> None:
+    import catalog_california_continuation_ensemble as single_ens
+
+    assert hasattr(single_ens, "main")
+    assert single_ens.normalize_continuation_method("etas") == "etas"
+    assert single_ens.forecast_methods_for("thinning") == ("thinning",)
+    assert single_ens.method_label("thinning_magnet") == "Ogata thinning + MAGNET"
+
+
+def test_pick_forecast_catalog() -> None:
+    import catalog_california_continuation_ensemble as single_ens
+    import pandas as pd
+
+    etas = pd.DataFrame({"m": [1.0]})
+    thinning = pd.DataFrame({"m": [2.0]})
+    assert len(single_ens.pick_forecast_catalog(etas, thinning, "etas")) == 1
+    assert single_ens.pick_forecast_catalog(etas, thinning, "thinning").iloc[0]["m"] == 2.0
