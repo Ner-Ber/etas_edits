@@ -467,7 +467,9 @@ def main(argv: list[str] | None = None) -> int:
         how="left",
     )
     auxiliary_catalog["time"] = pd.to_datetime(
-        auxiliary_catalog["time"], utc=True
+        auxiliary_catalog["time"],
+        utc=True,
+        format="mixed",
     ).dt.tz_convert(None)
 
     forecast_start_dt = pd.to_datetime(cfg["timewindow_end"], utc=True).tz_convert(None)
