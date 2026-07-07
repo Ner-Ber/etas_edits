@@ -815,7 +815,11 @@ def run_forecasts(
             filter_polygon=True,
             magnitude_generator=mc_b_est.simulate_magnitudes,
         )
-        etas_cont["time"] = pd.to_datetime(etas_cont["time"], utc=True).dt.tz_convert(None)
+        etas_cont["time"] = pd.to_datetime(
+            etas_cont["time"],
+            utc=True,
+            format="mixed",
+        ).dt.tz_convert(None)
         etas_catalog = (
             etas_cont.loc[etas_cont["time"] > forecast_start_dt]
             .sort_values("time")
@@ -860,7 +864,9 @@ def run_forecasts(
             a_h_resolution=a_h_resolution,
         )
         thinning_cont["time"] = pd.to_datetime(
-            thinning_cont["time"], utc=True
+            thinning_cont["time"],
+            utc=True,
+            format="mixed",
         ).dt.tz_convert(None)
         thinning_catalog = (
             thinning_cont.loc[thinning_cont["time"] > forecast_start_dt]
@@ -1061,7 +1067,9 @@ def main(argv: list[str] | None = None) -> int:
         how="left",
     )
     auxiliary_catalog["time"] = pd.to_datetime(
-        auxiliary_catalog["time"], utc=True
+        auxiliary_catalog["time"],
+        utc=True,
+        format="mixed",
     ).dt.tz_convert(None)
 
     forecast_start_dt = pd.to_datetime(cfg["timewindow_end"], utc=True).tz_convert(None)
