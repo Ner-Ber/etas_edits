@@ -1,0 +1,144 @@
+# MAGNET gin template for ETAS continuation (train / reproduce).
+#
+# Source: eq_mag_prediction/.../trained_models/Hauksson/config.gin
+#         (snapshot written after a successful Hauksson MAGNET train).
+#
+# Intended use with run_continuation_models.py when magnet.gin_config_path is
+# omitted or points here:
+#   - Keep encoder / head / trainer structure as-is.
+#   - When this gin is used for a run, ALL of the following MUST be set to match
+#     that run (catalog source, spatial projection, and domain time splits):
+#       catalog
+#       _project_utm.projection
+#       train_start_time
+#       validation_start_time
+#       test_start_time
+#       test_end_time
+#     Do not leave the Hauksson defaults below if the continuation catalog,
+#     region, or windows differ.
+#
+# Placeholders below still hold the original Hauksson values so the file is a
+# valid, complete gin out of the box. Do not replace this file with a stub of
+# only a few time lines — CatalogDomain needs the full binding set.
+#
+# ==============================================================================
+# Macros — REQUIRED overrides when used (not optional):
+# ==============================================================================
+# catalog: gin catalog constructor. Template default is Hauksson-native.
+#   For ETAS fn_catalog, the runner:
+#     - sets catalog/hauksson_dataframe.clean_columns = False
+#     - writes magnet_catalog_prepared.csv with depth (default 0 km) + sorted time
+#       because RecentEarthquakesEncoder.use_depth_as_feature = True below
+#     - preflight-validates catalog columns vs encoder flags before MAGNET train
+catalog = @hauksson_dataframe()
+# _project_utm.projection: UTM / region projection matching the catalog area.
+_project_utm.projection = @california_projection()
+# Domain times in epoch seconds (UTC). Typical map from continuation JSON:
+#   train_start_time      <- timewindow_start
+#   validation_start_time <- between timewindow_start and timewindow_end
+#   test_start_time       <- timewindow_end
+#   test_end_time         <- testwindow_end
+test_end_time = 1577832500
+test_start_time = 1464044746
+train_start_time = 347155200
+validation_start_time = 1233664779
+
+# Parameters for build_encoders:
+# ==============================================================================
+build_encoders.include_biggest_earthquakes = False
+build_encoders.include_catalog_columns = True
+build_encoders.include_recent_earthquakes = True
+build_encoders.include_seismicity_grid = False
+build_encoders.include_seismicity_rate = True
+build_encoders.include_times = False
+
+# Parameters for RecentEarthquakesEncoder.build_model:
+# ==============================================================================
+RecentEarthquakesEncoder.build_model:
+    kernel_regularization = @recent/tf.keras.regularizers.l1_l2()
+    units = [24]
+# Parameters for recent/l1_l2:
+# ==============================================================================
+recent/tf.keras.regularizers.l1_l2.l1 = 0
+recent/tf.keras.regularizers.l1_l2.l2 = 0.0004
+
+# Parameters for SeismicityRateEncoder.build_model:
+# ==============================================================================
+SeismicityRateEncoder.build_model:
+    kernel_regularization = @seismicity/tf.keras.regularizers.l1_l2()
+    units = [32, 32]
+# Parameters for seismicity/l1_l2:
+# ==============================================================================
+seismicity/tf.keras.regularizers.l1_l2.l1 = 0
+seismicity/tf.keras.regularizers.l1_l2.l2 = 0.0002
+
+# Parameters for CatalogDomain:
+# ==============================================================================
+CatalogDomain.earthquakes_catalog = None
+CatalogDomain.test_end_time = %test_end_time
+CatalogDomain.test_locations = None
+CatalogDomain.test_start_time = %test_start_time
+CatalogDomain.test_times = None
+CatalogDomain.train_start_time = %train_start_time
+CatalogDomain.user_magnitude_threshold = None
+CatalogDomain.validation_start_time = %validation_start_time
+
+# Parameters for estimate_completeness:
+# ==============================================================================
+estimate_completeness.method = 'MBS'
+
+# Parameters for catalog/hauksson_dataframe:
+# ==============================================================================
+catalog/hauksson_dataframe.clean_columns = True
+
+# Parameters for magnitude_prediction_model:
+# ==============================================================================
+magnitude_prediction_model:
+    hidden_activation = 'tanh'
+    hidden_layer_sizes = [256, 64, 16]
+    kernel_regularization = @mag_head/tf.keras.regularizers.l1_l2()
+    n_model_parameters = 6
+    output_activation = 'softplus'
+    output_shift = 0.0
+# Parameters for mag_head/l1_l2:
+# ==============================================================================
+mag_head/tf.keras.regularizers.l1_l2.l1 = 0
+mag_head/tf.keras.regularizers.l1_l2.l2 = 2e-4
+
+# Parameters for RecentEarthquakesEncoder:
+# ==============================================================================
+RecentEarthquakesEncoder.use_depth_as_feature = True
+
+# Parameters for rnn_model:
+# ==============================================================================
+rnn_model.rnn_layer_type = 'LSTM'
+
+# Parameters for target_catalog:
+# ==============================================================================
+target_catalog.catalog = %catalog
+target_catalog.earthquake_criterion = @return_entire_catalog_criterion
+target_catalog.separate_repeating_times_in_catalog = True
+target_catalog.smear_binned_magnitudes = False
+
+# Parameters for train_and_evaluate_magnitude_prediction_model:
+# ==============================================================================
+train_and_evaluate_magnitude_prediction_model.batch_size = 256
+train_and_evaluate_magnitude_prediction_model.epochs = 150
+train_and_evaluate_magnitude_prediction_model.learning_rate = 0.0001
+train_and_evaluate_magnitude_prediction_model.loss_function = None
+train_and_evaluate_magnitude_prediction_model.metric_functions = ()
+train_and_evaluate_magnitude_prediction_model.pdf_support_stretch = 7
+
+# Parameters for prepare_features methods in encoders:
+# ==============================================================================
+SeismicityRateEncoder.prepare_features:
+    grid_side_deg = 0.5
+    # lookback        = [1hr,12hr, 2d,    10d,   100d,   3yr,     10yr,     30yr]
+    lookback_seconds = [3600,43200,172800,864000,8640000,94610000,315400000,9461000008]
+    magnitudes = [2, 3, 4, 5, 6]
+RecentEarthquakesEncoder.prepare_features:
+    limit_lookback_seconds = 220752000  # 7 years
+    max_earthquakes = 80
+BiggestEarthquakesEncoder.prepare_features:
+    limit_lookback_seconds = 1000
+    max_earthquakes = 50

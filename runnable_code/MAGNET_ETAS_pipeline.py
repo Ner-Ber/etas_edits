@@ -206,6 +206,55 @@ def _resolve_magnet_results_dir(repo_root: pathlib.Path) -> pathlib.Path:
     return magnet_parent / "results"
 
 
+def _resolve_magnet_script(script_name: str) -> pathlib.Path:
+    """
+    Locate a MAGNET scripts/*.py file across common sibling layouts.
+
+    Prefers the importable ``eq_mag_prediction`` package, then
+    ``eq_mag_prediction_clean``, then the nested non-clean checkout.
+    """
+    candidates: list[pathlib.Path] = []
+    try:
+        import eq_mag_prediction as _emp
+
+        pkg_root = pathlib.Path(_emp.__file__).resolve().parent
+        candidates.append(pkg_root / "scripts" / script_name)
+    except ImportError:
+        pass
+
+    repo_root = _resolve_etas_repo_root()
+    magnet_parent = repo_root.parent / "eq_mag_prediction"
+    candidates.extend(
+        [
+            magnet_parent
+            / "eq_mag_prediction_clean"
+            / "eq_mag_prediction"
+            / "scripts"
+            / script_name,
+            magnet_parent
+            / "eq_mag_prediction"
+            / "eq_mag_prediction"
+            / "scripts"
+            / script_name,
+            magnet_parent / "eq_mag_prediction" / "scripts" / script_name,
+        ]
+    )
+
+    seen: set[pathlib.Path] = set()
+    for path in candidates:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if resolved.is_file():
+            return resolved
+
+    searched = "\n  ".join(str(p) for p in candidates)
+    raise FileNotFoundError(
+        f"MAGNET script not found: {script_name}\nSearched:\n  {searched}"
+    )
+
+
 def _build_temp_configs_from_single_source(
     *,
     pipeline_config_path: str,
@@ -1282,11 +1331,7 @@ def update_json_parameters(json_path: str, params_dict: dict):
 
 # 2b. Prepare features and labels.
 def run_feature_computation(gin_path, **flags):
-    # Resolve script path relative to this file's location
-    script_dir = pathlib.Path(__file__).resolve().parent
-    script_path = (script_dir / ".." / ".." / "eq_mag_prediction" / "eq_mag_prediction" / "scripts" / "magnitude_prediction_compute_features.py").resolve()
-    if not script_path.exists():
-        raise FileNotFoundError(f"MAGNET feature computation script not found: {script_path}")
+    script_path = _resolve_magnet_script("magnitude_prediction_compute_features.py")
     run_subprocess(
         str(script_path),
         gin_path,
@@ -1377,11 +1422,8 @@ def run_magnet_trainer(gin_path, output_dir=None, **flags):
     if output_dir is None:
         raise ValueError("output_dir is required for run_magnet_trainer")
 
-    # Resolve script path relative to this file's location
-    script_dir = pathlib.Path(__file__).resolve().parent
-    script_path = (script_dir / ".." / ".." / "eq_mag_prediction" / "eq_mag_prediction" / "scripts" / "magnitude_predictor_trainer.py").resolve()
-    if not script_path.exists():
-        raise FileNotFoundError(f"MAGNET trainer script not found: {script_path}")
+    # Resolve script path across sibling MAGNET checkouts / installed package.
+    script_path = _resolve_magnet_script("magnitude_predictor_trainer.py")
 
     # Ensure output_dir exists
     output_dir = pathlib.Path(output_dir)
@@ -1394,6 +1436,17 @@ def run_magnet_trainer(gin_path, output_dir=None, **flags):
         **flags
     )
 
+def _is_complete_magnet_experiment_dir(path: pathlib.Path) -> bool:
+    """True if dir looks like a MAGNET experiment usable by magnet_inference.warm."""
+    path = pathlib.Path(path)
+    return path.is_dir() and (path / "model").is_dir() and (path / "domain").exists()
+
+
+def _trainer_repetition_dir(model_dir: pathlib.Path, repetition: int = 0) -> pathlib.Path:
+    """Directory the MAGNET trainer writes for ``--num_reps`` (default ``_repetition_0``)."""
+    return pathlib.Path(model_dir) / f"_repetition_{repetition}"
+
+
 def run_magnet_trainer_or_load(
     gin_path,
     model_dir,
@@ -1401,31 +1454,44 @@ def run_magnet_trainer_or_load(
     **flags,
 ):
     """
-    Checks if a model for this gin config exists in the persistent library. 
-    If yes, returns path. If no, trains it there.
+    Train MAGNET into ``model_dir`` if needed; return the experiment directory
+    that contains ``model/`` + ``domain`` for ``magnet_inference.warm``.
+
+    The trainer nests each run under ``model_dir/_repetition_<n>/`` (see
+    ``magnitude_predictor_trainer``). Absolute ``--output_dir`` must be honored
+    by the trainer (not rewritten by ``get_resource_path``).
     """
-    # if trained_models_base_dir is None:
-    #     # TODO: Move this to a constant/config eventually
-    #     base_dir = pathlib.Path("/home/neriberman/REPOS/eq_mag_prediction/results/trained_models")
-    # else:
-    #     base_dir = pathlib.Path(trained_models_base_dir)
+    del model_name  # unused; kept for call-site compatibility
+    model_dir = pathlib.Path(model_dir).expanduser().resolve()
+    experiment_dir = _trainer_repetition_dir(model_dir, 0)
 
-    # model_id = _get_model_id_from_gin_config(gin_path)
-    # if not model_id:
-    #     raise ValueError(f"Could not generate model ID from {gin_path}. cannot proceed without explicit naming.")
+    if _is_complete_magnet_experiment_dir(experiment_dir):
+        print(f"Skipping training. Found existing MAGNET experiment at: {experiment_dir}")
+        return str(experiment_dir)
+    if _is_complete_magnet_experiment_dir(model_dir):
+        print(f"Skipping training. Found existing MAGNET experiment at: {model_dir}")
+        return str(model_dir)
 
-    # model_dir = base_dir / model_id
-    model_binary = model_dir / "model" # Assuming trainer saves to subdir 'model'
+    print(f"Training MAGNET model with output_dir={model_dir}")
+    model_dir.mkdir(parents=True, exist_ok=True)
+    run_magnet_trainer(gin_path, output_dir=str(model_dir), **flags)
 
-    if model_binary.exists() and model_binary.is_dir():
-        print(f"Skipping training. Found existing model at: {model_dir}")
-    else:
-        print(f"Model not found. Training new model at: {model_dir}")
-        model_dir.mkdir(parents=True, exist_ok=True)
-        # We pass the persistent dir as the output for the trainer
-        run_magnet_trainer(gin_path, output_dir=str(model_dir), **flags)
+    if _is_complete_magnet_experiment_dir(experiment_dir):
+        print(f"MAGNET experiment ready at: {experiment_dir}")
+        return str(experiment_dir)
+    if _is_complete_magnet_experiment_dir(model_dir):
+        print(f"MAGNET experiment ready at: {model_dir}")
+        return str(model_dir)
 
-    return str(model_dir)
+    raise FileNotFoundError(
+        "MAGNET trainer finished but did not write a complete experiment "
+        f"(need 'model/' + 'domain') under the requested output_dir.\n"
+        f"  requested output_dir: {model_dir}\n"
+        f"  expected experiment:  {experiment_dir}\n"
+        "The trainer must honor absolute --output_dir (see "
+        "magnitude_predictor_trainer / loading_utils.get_resource_path). "
+        "Do not look for the model in unrelated trees."
+    )
 
 
 def run_config_sync(

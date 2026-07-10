@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import sys
 import warnings
 
@@ -37,27 +38,119 @@ import continuation_ensemble as ens
 import continuation_compare as compare
 
 _DEFAULT_CONFIG = "config/continuation_models_config.json"
+_DEFAULT_MAGNET_GIN = "config/magnet_hauksson_template.gin"
+_DEFAULT_VAL_TO_TRAIN_RATIO = 0.75
+_DEFAULT_MAGNET_PROJECTION = "@california_projection()"
+_DEFAULT_MAGNET_DEPTH_KM = 0.0
 _CONTINUATION_METHODS = ens.CONTINUATION_METHODS
 _FORECAST_CATALOG_NAME = ens._FORECAST_CATALOG_NAME
 _REALIZATION_META_KEYS = ens._REALIZATION_META_KEYS
 
-_SYNTH_GIN_TEMPLATE = """\
-# Auto-generated MAGNET gin stub from continuation JSON.
-# Times / completeness aligned with ETAS windows in the parent config.
-# Replace or extend with a full magnitude_prediction gin before production training.
 
-feature_prep_start = '{auxiliary_start}'
-train_start_time = '{timewindow_start}'
-train_end_time = '{timewindow_end}'
-evaluation_end_time = '{testwindow_end}'
-forced_completeness = {mc}
+def _flat_gin_assignments(gin_path: pathlib.Path) -> dict[str, str]:
+    """Best-effort flat key→raw-value map from a gin file (assignment lines only)."""
+    assignment = re.compile(r"^(\s*)([^#=\s]+)\s*=\s*(.*)$")
+    flat: dict[str, str] = {}
+    for line in gin_path.read_text(encoding="utf-8").splitlines():
+        match = assignment.match(line)
+        if not match:
+            continue
+        key = match.group(2).strip()
+        raw = match.group(3).strip()
+        if "#" in raw:
+            raw = raw.split("#", 1)[0].rstrip()
+        flat[key] = raw
+    return flat
 
-# Minimal trainer hyperparams (override in a real gin for serious runs).
-train_and_evaluate_magnitude_prediction_model.learning_rate = 1e-3
-train_and_evaluate_magnitude_prediction_model.batch_size = 32
-train_and_evaluate_magnitude_prediction_model.epochs = 1
-train_and_evaluate_magnitude_prediction_model.pdf_support_stretch = 7
-"""
+
+def _gin_raw_truthy(raw: str | None, default: bool = False) -> bool:
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("true", "1", "yes")
+
+
+def prepare_magnet_catalog_for_hauksson_template(
+    source_magnet_csv: pathlib.Path,
+    dest_csv: pathlib.Path,
+    *,
+    default_depth_km: float = _DEFAULT_MAGNET_DEPTH_KM,
+) -> pathlib.Path:
+    """
+    Write a MAGNET catalog that satisfies the Hauksson-style encoder template.
+
+    ETAS→MAGNET conversion only emits time/lat/lon/magnitude and may be unsorted.
+    RecentEarthquakesEncoder (use_depth_as_feature=True) needs a depth column.
+    """
+    df = pd.read_csv(source_magnet_csv)
+    missing_core = [
+        c for c in ("time", "latitude", "longitude", "magnitude") if c not in df.columns
+    ]
+    if missing_core:
+        raise ValueError(
+            f"MAGNET catalog missing required columns {missing_core}: {source_magnet_csv}"
+        )
+    if "depth" not in df.columns:
+        df["depth"] = float(default_depth_km)
+    df = (
+        df.drop_duplicates()
+        .sort_values("time")
+        .reset_index(drop=True)
+    )
+    dest_csv.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(dest_csv, index=False)
+    return dest_csv.resolve()
+
+
+def validate_magnet_catalog_for_gin(
+    gin_path: pathlib.Path,
+    catalog_csv: pathlib.Path,
+) -> None:
+    """
+    Preflight: fail fast with all schema gaps vs gin encoder flags.
+
+    Catches Hauksson-template vs ETAS-catalog mismatches before the MAGNET
+    feature subprocess (which only reports the first AttributeError).
+    """
+    flat = _flat_gin_assignments(gin_path)
+    df = pd.read_csv(catalog_csv, nrows=5)
+    columns = set(df.columns)
+    problems: list[str] = []
+
+    for col in ("time", "latitude", "longitude", "magnitude"):
+        if col not in columns:
+            problems.append(f"missing column {col!r}")
+
+    use_depth = _gin_raw_truthy(
+        flat.get("RecentEarthquakesEncoder.use_depth_as_feature"),
+        default=True,
+    )
+    if use_depth and "depth" not in columns:
+        problems.append(
+            "missing column 'depth' but RecentEarthquakesEncoder.use_depth_as_feature "
+            "is True (Hauksson template). ETAS→MAGNET catalogs need depth filled in."
+        )
+
+    add_angles = _gin_raw_truthy(flat.get("_mock_earthquake.add_angles"), default=False)
+    if add_angles:
+        for col in ("strike", "rake", "dip"):
+            if col not in columns:
+                problems.append(
+                    f"missing column {col!r} but _mock_earthquake.add_angles is True"
+                )
+
+    if "time" in columns:
+        full = pd.read_csv(catalog_csv, usecols=["time"])
+        times = full["time"].to_numpy()
+        if len(times) >= 2 and not (times[1:] >= times[:-1]).all():
+            problems.append("catalog 'time' column is not sorted ascending")
+
+    if problems:
+        joined = "\n  - ".join(problems)
+        raise ValueError(
+            "MAGNET catalog is not compatible with the working gin "
+            f"({gin_path}):\n  - {joined}\n"
+            f"Catalog: {catalog_csv}"
+        )
 
 
 def normalize_methods(raw) -> tuple[str, ...]:
@@ -89,6 +182,11 @@ def magnet_section(cfg: dict) -> dict:
         "model_dir": section.get("model_dir"),
         "gin_config_path": section.get("gin_config_path"),
         "general_gin_config_path": section.get("general_gin_config_path"),
+        "projection": section.get("projection"),
+        "val_to_train_time_ratio": section.get("val_to_train_time_ratio"),
+        "catalog_format": section.get("catalog_format"),
+        "catalog_loader": section.get("catalog_loader"),
+        "default_depth_km": section.get("default_depth_km"),
     }
 
 
@@ -108,20 +206,6 @@ def validate_magnet_for_methods(methods: tuple[str, ...], magnet: dict) -> None:
         )
 
 
-def synthesize_magnet_gin(cfg: dict, dest: pathlib.Path) -> pathlib.Path:
-    """Write a warning-level stub gin from ETAS windows / mc; return path."""
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    text = _SYNTH_GIN_TEMPLATE.format(
-        auxiliary_start=cfg["auxiliary_start"],
-        timewindow_start=cfg["timewindow_start"],
-        timewindow_end=cfg["timewindow_end"],
-        testwindow_end=cfg["testwindow_end"],
-        mc=float(cfg["mc"]),
-    )
-    dest.write_text(text, encoding="utf-8")
-    return dest
-
-
 def resolve_gin_for_train(
     cfg: dict,
     magnet: dict,
@@ -132,8 +216,9 @@ def resolve_gin_for_train(
     Resolve gin path for MAGNET training.
 
     - Path set but missing → raise FileNotFoundError
-    - Path omitted → warn and synthesize under output_root/magnet_generated/
+    - Path omitted → use ``config/magnet_hauksson_template.gin``
     """
+    del cfg, output_root  # reserved for callers; path resolution is magnet/repo only
     raw = magnet.get("gin_config_path")
     if raw:
         path = compare._resolve_path(repo_root, raw)
@@ -143,28 +228,123 @@ def resolve_gin_for_train(
             )
         return path
 
+    default = compare._resolve_path(repo_root, _DEFAULT_MAGNET_GIN)
+    if not default.is_file():
+        raise FileNotFoundError(
+            "magnet.gin_config_path not set and default MAGNET template missing: "
+            f"{default}"
+        )
     warnings.warn(
-        "magnet.gin_config_path not set; synthesizing a stub gin from ETAS "
-        "windows/mc under output_root/magnet_generated/. Prefer a real MAGNET gin.",
+        "magnet.gin_config_path not set; using "
+        f"{_DEFAULT_MAGNET_GIN}. Required macros (catalog, projection, domain "
+        "times) are overwritten from the continuation JSON onto a working copy.",
         UserWarning,
         stacklevel=2,
     )
-    dest = output_root / "magnet_generated" / "synthesized_magnet.gin"
-    return synthesize_magnet_gin(cfg, dest)
+    return default
 
 
-def merge_etas_times_into_gin(gin_path: pathlib.Path, cfg: dict) -> None:
-    """Overlay ETAS time windows / completeness onto an existing gin (pipeline-style)."""
+def apply_continuation_overrides_to_magnet_gin(
+    gin_path: pathlib.Path,
+    cfg: dict,
+    *,
+    repo_root: pathlib.Path,
+    magnet: dict | None = None,
+    catalog_work_dir: pathlib.Path | None = None,
+) -> pathlib.Path:
+    """
+    Overlay the six required MAGNET macros from the continuation JSON.
+
+    Updates (pipeline-compatible):
+      catalog, _project_utm.projection,
+      train_start_time, validation_start_time, test_start_time, test_end_time
+
+    Also prepares a Hauksson-encoder-ready MAGNET CSV (adds depth if missing,
+    sorts by time) and preflight-validates it against gin encoder flags.
+
+    Returns the prepared catalog path bound into the gin.
+    """
     import MAGNET_ETAS_pipeline as pipeline
 
+    magnet = magnet or {}
+    val_ratio_raw = magnet.get("val_to_train_time_ratio")
+    val_ratio = (
+        float(val_ratio_raw)
+        if val_ratio_raw is not None
+        else _DEFAULT_VAL_TO_TRAIN_RATIO
+    )
+    projection = magnet.get("projection") or _DEFAULT_MAGNET_PROJECTION
+    catalog_format = str(
+        magnet.get("catalog_format") or cfg.get("catalog_format") or "etas"
+    ).strip().lower()
+    depth_raw = magnet.get("default_depth_km")
+    default_depth = (
+        float(depth_raw) if depth_raw is not None else _DEFAULT_MAGNET_DEPTH_KM
+    )
+
+    train_start = pipeline._dt_string_to_epoch_seconds_utc(cfg["timewindow_start"])
+    test_start = pipeline._dt_string_to_epoch_seconds_utc(cfg["timewindow_end"])
+    test_end = pipeline._dt_string_to_epoch_seconds_utc(cfg["testwindow_end"])
+    validation_start = int((1.0 - val_ratio) * train_start + val_ratio * test_start)
+
+    catalog_path = compare._resolve_path(repo_root, cfg["fn_catalog"])
+    if not catalog_path.is_file():
+        raise FileNotFoundError(f"fn_catalog not found: {catalog_path}")
+
+    magnet_catalog = pipeline._find_or_create_magnet_catalog(
+        source_catalog_path=catalog_path,
+        source_format=catalog_format,
+    )
+
+    work_dir = catalog_work_dir or gin_path.parent
+    prepared_catalog = prepare_magnet_catalog_for_hauksson_template(
+        magnet_catalog,
+        work_dir / "magnet_catalog_prepared.csv",
+        default_depth_km=default_depth,
+    )
+
+    loader_override = magnet.get("catalog_loader")
+    if loader_override:
+        func_name = str(loader_override).strip().lstrip("@").removesuffix("()")
+        file_param_name, _ = pipeline._default_filename_for_data_utils_function(
+            func_name
+        )
+    else:
+        local_gin_dict = pipeline.parse_gin_config(
+            pipeline._read_text_file(str(gin_path))
+        )
+        current_binding = local_gin_dict.get("bindings", {}).get(
+            "catalog", "@hauksson_dataframe()"
+        )
+        func_name, file_param_name, _ = pipeline._parse_gin_catalog_binding(
+            current_binding
+        )
+        if file_param_name is None:
+            file_param_name, _ = pipeline._default_filename_for_data_utils_function(
+                func_name
+            )
+
+    # Absolute path so look_for_file finds the prepared working copy.
     updates = {
-        "feature_prep_start": cfg["auxiliary_start"],
-        "train_start_time": cfg["timewindow_start"],
-        "train_end_time": cfg["timewindow_end"],
-        "evaluation_end_time": cfg["testwindow_end"],
-        "forced_completeness": float(cfg["mc"]),
+        "catalog": f"@{func_name}()",
+        f"{func_name}.{file_param_name}": str(prepared_catalog),
+        "_project_utm.projection": projection,
+        "train_start_time": train_start,
+        "validation_start_time": validation_start,
+        "test_start_time": test_start,
+        "test_end_time": test_end,
     }
+    # Native Hauksson CSVs have year/month/… columns; ETAS→MAGNET does not.
+    # Template uses the catalog/ scope (catalog = @hauksson_dataframe()).
+    if func_name == "hauksson_dataframe" and catalog_format == "etas":
+        updates["catalog/hauksson_dataframe.clean_columns"] = False
+        updates["hauksson_dataframe.clean_columns"] = False
+    if cfg.get("mc") is not None:
+        updates["CatalogDomain.user_magnitude_threshold"] = float(cfg["mc"])
+
     pipeline.update_gin_parameters(str(gin_path), updates)
+    validate_magnet_catalog_for_gin(gin_path, prepared_catalog)
+    return prepared_catalog
 
 
 def resolve_magnet_model_dir(
@@ -188,9 +368,10 @@ def resolve_magnet_model_dir(
         if not model_dir.is_dir():
             raise FileNotFoundError(f"magnet.model_dir not found: {model_dir}")
         model_marker = model_dir / "model"
-        if not model_marker.exists() and not any(model_dir.iterdir()):
+        if not model_marker.is_dir():
             raise FileNotFoundError(
-                f"magnet.model_dir looks empty (expected trained model): {model_dir}"
+                "magnet.model_dir has no trained Keras model subdirectory "
+                f"'model/' (feature caches alone are not enough): {model_dir}"
             )
         return model_dir
 
@@ -200,7 +381,13 @@ def resolve_magnet_model_dir(
     work_gin = output_root / "magnet_generated" / "working_magnet.gin"
     work_gin.parent.mkdir(parents=True, exist_ok=True)
     work_gin.write_text(gin_path.read_text(encoding="utf-8"), encoding="utf-8")
-    merge_etas_times_into_gin(work_gin, cfg)
+    apply_continuation_overrides_to_magnet_gin(
+        work_gin,
+        cfg,
+        repo_root=repo_root,
+        magnet=magnet,
+        catalog_work_dir=work_gin.parent,
+    )
 
     import MAGNET_ETAS_pipeline as pipeline
 
