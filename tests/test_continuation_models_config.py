@@ -72,8 +72,9 @@ def test_gin_path_missing_raises(tmp_path: Path) -> None:
         mod.resolve_gin_for_train(cfg, magnet, tmp_path, tmp_path / "out")
 
 
-def test_gin_path_omitted_warns_and_synthesizes(tmp_path: Path) -> None:
+def test_gin_path_omitted_uses_hauksson_template() -> None:
     mod = _load_runner()
+    repo = Path(__file__).resolve().parents[1]
     cfg = {
         "auxiliary_start": "1971-01-01 00:00:00",
         "timewindow_start": "1981-01-01 00:00:00",
@@ -82,15 +83,143 @@ def test_gin_path_omitted_warns_and_synthesizes(tmp_path: Path) -> None:
         "mc": 3.6,
     }
     magnet = {"mode": "train", "gin_config_path": None, "model_dir": None}
-    out = tmp_path / "out"
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        path = mod.resolve_gin_for_train(cfg, magnet, tmp_path, out)
-    assert path.is_file()
+        path = mod.resolve_gin_for_train(cfg, magnet, repo, repo / "out")
+    assert path == (repo / "config" / "magnet_hauksson_template.gin").resolve()
     text = path.read_text(encoding="utf-8")
-    assert "1971-01-01" in text
-    assert "forced_completeness = 3.6" in text
+    assert "CatalogDomain.train_start_time" in text
+    assert "catalog = @hauksson_dataframe()" in text
     assert any(issubclass(w.category, UserWarning) for w in caught)
+
+
+def test_apply_continuation_overrides_sets_required_macros(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mod = _load_runner()
+    repo = Path(__file__).resolve().parents[1]
+    template = (repo / "config" / "magnet_hauksson_template.gin").read_text(encoding="utf-8")
+    work = tmp_path / "working_magnet.gin"
+    work.write_text(template, encoding="utf-8")
+
+    catalog = tmp_path / "example_catalog.csv"
+    catalog.write_text(
+        "latitude,longitude,time,magnitude,depth\n"
+        "34.0,-118.0,2017-01-02 00:00:00,4.0,5.0\n",
+        encoding="utf-8",
+    )
+
+    class _FakePipeline:
+        @staticmethod
+        def _dt_string_to_epoch_seconds_utc(dt_str: str) -> int:
+            import datetime as _dt
+
+            return int(
+                _dt.datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+                .replace(tzinfo=_dt.timezone.utc)
+                .timestamp()
+            )
+
+        @staticmethod
+        def _find_or_create_magnet_catalog(*, source_catalog_path, source_format):
+            assert source_format == "etas"
+            return Path(source_catalog_path)
+
+        @staticmethod
+        def parse_gin_config(content: str) -> dict:
+            return {"bindings": {"catalog": "@hauksson_dataframe()"}}
+
+        @staticmethod
+        def _read_text_file(path: str) -> str:
+            return Path(path).read_text(encoding="utf-8")
+
+        @staticmethod
+        def _parse_gin_catalog_binding(binding: str):
+            return "hauksson_dataframe", None, None
+
+        @staticmethod
+        def _default_filename_for_data_utils_function(function_name: str):
+            return "csv_path", f"{function_name}.csv"
+
+        @staticmethod
+        def update_gin_parameters(gin_path: str, params_dict: dict):
+            text = Path(gin_path).read_text(encoding="utf-8")
+            for key, value in params_dict.items():
+                if isinstance(value, str) and value.startswith(("@", "%")):
+                    rendered = value
+                elif isinstance(value, str):
+                    rendered = f"'{value}'"
+                else:
+                    rendered = str(value)
+                needle = f"{key} = "
+                lines = []
+                found = False
+                for line in text.splitlines(keepends=True):
+                    if line.lstrip().startswith(needle) or (
+                        line.split("=", 1)[0].strip() == key
+                    ):
+                        indent = line[: len(line) - len(line.lstrip())]
+                        lines.append(f"{indent}{key} = {rendered}\n")
+                        found = True
+                    else:
+                        lines.append(line)
+                text = "".join(lines)
+                if not found:
+                    text += f"\n{key} = {rendered}\n"
+            Path(gin_path).write_text(text, encoding="utf-8")
+
+        @staticmethod
+        def _inline_gin_variable_references(gin_path: str) -> None:
+            return None
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "MAGNET_ETAS_pipeline", _FakePipeline)
+
+    cfg = {
+        "fn_catalog": str(catalog),
+        "timewindow_start": "2017-01-01 00:00:00",
+        "timewindow_end": "2018-10-01 00:00:00",
+        "testwindow_end": "2019-10-01 00:00:00",
+        "mc": 3.6,
+    }
+    mod.apply_continuation_overrides_to_magnet_gin(
+        work,
+        cfg,
+        repo_root=tmp_path,
+        magnet={"projection": "@california_projection()"},
+        catalog_work_dir=tmp_path,
+    )
+    text = work.read_text(encoding="utf-8")
+    assert "train_start_time = 1483228800" in text
+    assert "test_start_time = 1538352000" in text
+    assert "test_end_time = 1569888000" in text
+    assert "validation_start_time =" in text
+    assert "catalog = @hauksson_dataframe()" in text
+    assert "magnet_catalog_prepared.csv" in text
+    assert "catalog/hauksson_dataframe.clean_columns = False" in text
+    assert "_project_utm.projection = @california_projection()" in text
+    assert "CatalogDomain.user_magnitude_threshold = 3.6" in text
+    prepared = tmp_path / "magnet_catalog_prepared.csv"
+    assert prepared.is_file()
+    assert "depth" in prepared.read_text(encoding="utf-8").splitlines()[0]
+
+
+def test_validate_magnet_catalog_reports_missing_depth(tmp_path: Path) -> None:
+    mod = _load_runner()
+    repo = Path(__file__).resolve().parents[1]
+    gin = tmp_path / "cfg.gin"
+    gin.write_text(
+        (repo / "config" / "magnet_hauksson_template.gin").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    catalog = tmp_path / "no_depth.csv"
+    catalog.write_text(
+        "time,latitude,longitude,magnitude\n1,34,-118,4\n2,34,-118,4\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="depth"):
+        mod.validate_magnet_catalog_for_gin(gin, catalog)
 
 
 def test_cache_hit_requires_catalog_and_meta(tmp_path: Path) -> None:
