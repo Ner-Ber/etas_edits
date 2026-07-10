@@ -36,7 +36,7 @@ TIMEOUT_BY_TIER = {
 INTEGRATION_TEST_FILES = frozenset(
     {
         "tests/test_magnet_pipeline_json_merge.py",
-        "tests/test_catalog_california_continuation_ensemble_smoke.py",
+        "tests/test_continuation_ensemble_smoke.py",
         "tests/test_magnet_etas_integration_smoke.py",
     }
 )
@@ -45,7 +45,7 @@ INTEGRATION_TEST_FILES = frozenset(
 MODULE_TO_TESTS: dict[str, list[str]] = {
     "etas/simulation.py": ["tests/test_simulation_seed_and_kernels.py"],
     "etas/rate_simulation.py": [
-        "tests/test_catalog_california_etas_vs_thinning_continuation.py",
+        "tests/test_continuation_compare.py",
         "tests/test_magnet_inference.py",
         "tests/test_magnet_etas_integration_smoke.py",
     ],
@@ -58,15 +58,22 @@ MODULE_TO_TESTS: dict[str, list[str]] = {
         "tests/test_magnet_inference.py",
         "tests/test_magnet_etas_integration_smoke.py",
     ],
+    "runnable_code/continuation_compare.py": [
+        "tests/test_continuation_compare.py",
+    ],
     "runnable_code/catalog_california_etas_vs_thinning_continuation.py": [
-        "tests/test_catalog_california_etas_vs_thinning_continuation.py",
+        "tests/test_continuation_compare.py",
     ],
     "runnable_code/catalog_california_etas_vs_thinning_ensemble.py": [
-        "tests/test_catalog_california_etas_vs_thinning_continuation.py",
+        "tests/test_continuation_compare.py",
+    ],
+    "runnable_code/continuation_ensemble.py": [
+        "tests/test_continuation_compare.py",
+        "tests/test_continuation_ensemble_smoke.py",
     ],
     "runnable_code/catalog_california_continuation_ensemble.py": [
-        "tests/test_catalog_california_etas_vs_thinning_continuation.py",
-        "tests/test_catalog_california_continuation_ensemble_smoke.py",
+        "tests/test_continuation_compare.py",
+        "tests/test_continuation_ensemble_smoke.py",
     ],
     "runnable_code/continuation_config.py": [
         "tests/test_continuation_seed_and_grid_options.py",
@@ -74,6 +81,9 @@ MODULE_TO_TESTS: dict[str, list[str]] = {
     "runnable_code/MAGNET_ETAS_pipeline.py": [
         "tests/test_continuation_seed_and_grid_options.py",
         "tests/test_magnet_pipeline_json_merge.py",
+    ],
+    "runnable_code/run_continuation_models.py": [
+        "tests/test_continuation_models_config.py",
     ],
 }
 
@@ -314,38 +324,26 @@ def _state_fresh(state: dict) -> bool:
 
 
 def run_pipeline_dry_run(repo: Path) -> tuple[int, str]:
-    """Import-check MAGNET pipeline module (grid classic-then-grid driver removed)."""
+    """Lightweight smoke: pipeline script exists and defines continuation entrypoint.
+
+    Avoids importing MAGNET_ETAS_pipeline (heavy TF/CuPy stack). The classic-then-grid
+    driver was removed with the grid stack.
+    """
+    import ast
+
     pipeline = repo / "runnable_code" / "MAGNET_ETAS_pipeline.py"
-    cmd = [
-        sys.executable,
-        "-c",
-        (
-            "import importlib.util, sys; "
-            f"p={str(pipeline)!r}; "
-            "spec=importlib.util.spec_from_file_location('magnet_pipeline_smoke', p); "
-            "m=importlib.util.module_from_spec(spec); "
-            "sys.modules[spec.name]=m; "
-            "spec.loader.exec_module(m); "
-            "assert hasattr(m, 'run_etas_catalog_continuation')"
-        ),
-    ]
-    env = _subprocess_env(repo)
+    if not pipeline.is_file():
+        return 1, f"missing pipeline script: {pipeline}"
     try:
-        proc = subprocess.run(
-            cmd,
-            cwd=str(repo),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=TIMEOUT_BY_TIER["integration"],
-        )
-    except subprocess.TimeoutExpired as exc:
-        out = (exc.stdout or "") + (exc.stderr or "")
-        return 124, out
-    except OSError as exc:
-        return 127, str(exc)
-    output = (proc.stdout or "") + (proc.stderr or "")
-    return proc.returncode, output
+        tree = ast.parse(pipeline.read_text(encoding="utf-8"), filename=str(pipeline))
+    except SyntaxError as exc:
+        return 1, f"syntax error in {pipeline}: {exc}"
+    names = {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+    required = {"run_etas_catalog_continuation", "run_etas_inversion"}
+    missing = sorted(required - names)
+    if missing:
+        return 1, f"pipeline missing functions: {missing}"
+    return 0, f"ok: {pipeline.name} defines {', '.join(sorted(required))}"
 
 
 def on_edit(stdin_data: dict) -> None:
@@ -400,7 +398,7 @@ def on_edit(stdin_data: dict) -> None:
             {
                 "status": smoke_status,
                 "edited_file": rel or file_path,
-                "command": "import MAGNET_ETAS_pipeline.py",
+                "command": "ast-check MAGNET_ETAS_pipeline.py",
                 "exit_code": smoke_code,
                 "output_tail": _tail(smoke_output),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -413,7 +411,7 @@ def on_edit(stdin_data: dict) -> None:
             {
                 "status": "skip",
                 "edited_file": rel or file_path,
-                "command": "import MAGNET_ETAS_pipeline.py",
+                "command": "ast-check MAGNET_ETAS_pipeline.py",
                 "exit_code": 0,
                 "output_tail": "skipped because pytest failed first",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -465,7 +463,7 @@ def on_stop(stdin_data: dict) -> dict:
         smoke_tail = smoke.get("output_tail", "")
         smoke_cmd = smoke.get("command", "pipeline dry-run")
         messages.append(
-            "Pipeline dry-run failed after your last edit to a continuation driver file.\n\n"
+            "Pipeline smoke check failed after your last edit to MAGNET_ETAS_pipeline.py.\n\n"
             f"Command: {smoke_cmd}\n\n"
             f"```\n{smoke_tail}\n```"
         )

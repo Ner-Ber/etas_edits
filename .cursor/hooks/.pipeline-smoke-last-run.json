@@ -1,8 +1,8 @@
 {
-  "status": "fail",
+  "status": "pass",
   "edited_file": "runnable_code/MAGNET_ETAS_pipeline.py",
-  "command": "run_magnet_continuation_classic_then_grid.py --dry-run",
-  "exit_code": 2,
-  "output_tail": "/a/home/cc/students/csguests/neriberman/anaconda3/bin/python3: can't open file '/home/neriberman/Repos/etas/runnable_code/run_magnet_continuation_classic_then_grid.py': [Errno 2] No such file or directory\n",
-  "timestamp": "2026-07-10T09:57:21.990284+00:00"
+  "command": "ast-check MAGNET_ETAS_pipeline.py",
+  "exit_code": 0,
+  "output_tail": "ok: MAGNET_ETAS_pipeline.py defines run_etas_catalog_continuation, run_etas_inversion",
+  "timestamp": "2026-07-10T10:02:57.447988+00:00"
 }

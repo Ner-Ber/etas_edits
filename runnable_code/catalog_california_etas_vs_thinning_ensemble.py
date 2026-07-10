@@ -43,7 +43,7 @@ import numpy as np
 import pandas as pd
 from shapely.geometry import Polygon
 
-import catalog_california_etas_vs_thinning_continuation as cat_cmp
+import continuation_compare as cat_cmp
 
 _DEFAULT_CONFIG = cat_cmp._DEFAULT_CONFIG
 _REPORT_NAME = "catalog_etas_vs_thinning_ensemble_report.html"
