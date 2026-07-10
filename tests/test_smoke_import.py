@@ -7,13 +7,14 @@ import pytest
 pytestmark = pytest.mark.unit
 
 
-def test_import_etas_forecast_intensity() -> None:
-    import etas.forecast_intensity as fi
+def test_import_etas_rate_simulation() -> None:
+    import etas.rate_simulation as rate_simulation
 
-    assert hasattr(fi, "force_inversion_on_default_params")
+    assert hasattr(rate_simulation, "simulate_catalog_continuation_thinning")
 
 
-def test_import_run_magnet_driver() -> None:
-    import run_magnet_continuation_classic_then_grid as driver
+def test_import_etas_simulation() -> None:
+    import etas.simulation as simulation
 
-    assert hasattr(driver, "_deep_merge_simulate_continuation")
+    assert hasattr(simulation, "ETASSimulation")
+    assert not hasattr(simulation, "simulate_catalog_continuation_grid")

@@ -18,8 +18,8 @@ Apply bugfixes to upstream files only when necessary and **minimal** (smallest d
 
 ## Safe to edit (first added in Ner-Ber / Neri commits)
 
-- `etas/data_utils.py`, `etas/forecast_intensity.py`, `etas/grid_simulation.py`, `etas/rate_computation.py`, `etas/rate_simulation.py`, `etas/simulation_trace.py`, `etas/utility_functions.py`
-- `runnable_code/MAGNET_ETAS_pipeline.py`, `ingest_catalog_from_magnet_format.py`, `invert_etas_test.py`, `run_etas_simulation.py`, `run_magnet_continuation_classic_then_grid.py`, `test_gpu_cpu_performance.py`
+- `etas/data_utils.py`, `etas/rate_computation.py`, `etas/rate_simulation.py`, `etas/simulation_trace.py`, `etas/utility_functions.py`
+- `runnable_code/MAGNET_ETAS_pipeline.py`, `ingest_catalog_from_magnet_format.py`, `invert_etas_test.py`, `run_etas_simulation.py`, `test_gpu_cpu_performance.py`
 
 When editing **your** files, follow the global **python-imports** user rule (module-qualified imports; `typing` exception). When calling upstream APIs from your code, match **their** style (`from etas.data_utils import bin_to_precision`, etc.).
 

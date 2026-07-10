@@ -168,12 +168,6 @@ def log_etas_params(
     with _LOCK:
         with open(path, "a", encoding="utf-8") as f:
             f.write(line)
-    try:
-        import etas.kernel_trace as kernel_trace
-
-        kernel_trace.maybe_sample_kernels(site, parameters, extras)
-    except Exception:
-        pass
 
 
 def log_events_batch(site: str, df: pd.DataFrame) -> None:

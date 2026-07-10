@@ -28,24 +28,8 @@ import eq_mag_prediction.utilities.data_utils as data_utils
 import eq_mag_prediction.utilities.utility_functions as utility_functions
 
 import continuation_config as continuation_config
-import etas.forecast_intensity as etas_forecast_intensity
 import etas.inversion as etas_inversion
 import etas.simulation as etas_simulation
-
-
-def grid_params_from_inversion(etas_inversion: etas_inversion.ETASParameterCalculation):
-    """
-    Build ``grid_params`` for ``simulate_catalog_continuation_grid`` from a fitted inversion.
-
-    θ overrides ``forecast_intensity`` defaults via ``force_inversion_on_default_params``;
-    ``m0`` and ``beta`` are always taken from the inversion object (catalog scale).
-    """
-    theta = etas_inversion.theta or {}
-    params = etas_forecast_intensity.force_inversion_on_default_params(theta)
-    mc = etas_inversion.m_ref - etas_inversion.delta_m / 2
-    params["m0"] = mc
-    params["beta"] = etas_inversion.beta
-    return params
 
 
 def run_subprocess(process_path, gin_path, **flags):

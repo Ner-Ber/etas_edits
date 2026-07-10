@@ -51,8 +51,6 @@ Tab-only edits may not trigger hooks. If hooks did not run, run pytest yourself 
 | Edited file | Pytest target(s) | Mapping |
 |-------------|------------------|---------|
 | `tests/test_*.py` | that file | `test_file` |
-| `etas/forecast_intensity.py` | `tests/test_forecast_intensity_force_inversion.py` | `explicit` |
-| `etas/grid_simulation.py` | `tests/test_simulation_seed_and_kernels.py` | `explicit` |
 | `etas/simulation.py` | `tests/test_simulation_seed_and_kernels.py` | `explicit` |
 | `etas/rate_simulation.py` | `tests/test_catalog_california_etas_vs_thinning_continuation.py`, `tests/test_magnet_inference.py`, `tests/test_magnet_etas_integration_smoke.py` | `explicit` + `integration` |
 | `etas/utility_functions.py` | `tests/test_simulation_seed_and_kernels.py` | `explicit` |
@@ -63,7 +61,6 @@ Tab-only edits may not trigger hooks. If hooks did not run, run pytest yourself 
 | `runnable_code/catalog_california_continuation_ensemble.py` | `tests/test_catalog_california_etas_vs_thinning_continuation.py`, `tests/test_catalog_california_continuation_ensemble_smoke.py` | `explicit` + `integration` |
 | `runnable_code/continuation_config.py` | `tests/test_continuation_seed_and_grid_options.py` | `explicit` |
 | `runnable_code/MAGNET_ETAS_pipeline.py` | `tests/test_continuation_seed_and_grid_options.py`, `tests/test_magnet_pipeline_json_merge.py` | `explicit` |
-| `runnable_code/run_magnet_continuation_classic_then_grid.py` | `tests/test_run_magnet_continuation_driver.py` | `explicit` |
 | `etas/<name>.py` | `tests/test_<name>.py` if it exists | `stem_match` |
 | `runnable_code/<name>.py` | `tests/test_<name>.py` if it exists | `stem_match` |
 | other `.py` (not skipped paths) | `tests/test_smoke_import.py` with `-m unit` | `smoke_fallback` |
