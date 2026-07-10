@@ -65,5 +65,28 @@
                 "MPLBACKEND": "TkAgg"
             }
         }
+        {
+            "name": "Continuation models: etas + thinning_magnet (short)",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/bin/python",
+            "pythonArgs": [
+                "-u"
+            ],
+            "program": "${workspaceFolder}/runnable_code/run_continuation_models.py",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--config",
+                "${workspaceFolder}/config/continuation_models_config_short.json",
+                "--methods",
+                "etas,thinning_magnet"
+            ],
+            "console": "integratedTerminal",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/runnable_code:/a/home/cc/students/csguests/neriberman/Repos/eq_mag_prediction/eq_mag_prediction_clean",
+                "LD_LIBRARY_PATH": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/lib",
+                "MPLBACKEND": "TkAgg"
+            }
+        }
     ]
 }
