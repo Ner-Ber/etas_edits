@@ -158,7 +158,7 @@ def latlon_rectangular_grid_in_polygon(
     Fill a polygon with a regular lat/lon grid at a target density.
 
     Spacing is chosen in km using the same haversine km-per-degree scaling as
-    classic ETAS aftershock placement (see ``forecast_intensity.km_per_degree_at_latitude``).
+    classic ETAS aftershock placement (see ``utility_functions.km_per_degree_at_latitude``).
 
     Args:
         polygon: Study region in ETAS convention: Shapely ``(x, y) = (lat, lon)`` WGS84.

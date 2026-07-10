@@ -15,7 +15,6 @@ import logging
 import os
 import pprint
 import types
-from dataclasses import dataclass
 from typing import Literal, Optional
 
 import geopandas as gpd
@@ -32,18 +31,10 @@ from etas.inversion import (ETASParameterCalculation, branching_integral,
                             parameter_dict2array, to_days,
                             upper_gamma_ext)
 from etas.mc_b_est import simulate_magnitudes, simulate_magnitudes_from_zone, MAGNET_magnitude
-from etas import grid_simulation
 from etas import utility_functions
 
 aftershock_radius_from_uniform = utility_functions.aftershock_radius_from_uniform
-from etas.data_utils import (
-    bin_to_precision,
-    get_fallback_projection,
-    latlon_rectangular_grid_in_polygon,
-    to_seconds,
-)
-from etas.forecast_intensity import DEFAULT_PARAMS as GRID_DEFAULT_PARAMS
-from etas.forecast_intensity import KERNEL_VARIANT_DEFAULT
+from etas.data_utils import bin_to_precision
 import etas.rate_simulation as rate_simulation
 
 try:
@@ -58,19 +49,6 @@ logger = logging.getLogger(__name__)
 
 # Fixed RNG seed when continuation JSON omits ``seed`` (classic and thinning).
 DEFAULT_CONTINUATION_SEED = 1905
-
-
-@dataclass
-class GridContinuationOptions:
-    """Options for `simulate_catalog_continuation_grid` only (not used for classic ETAS)."""
-
-    grid_n_xy: tuple = (4, 4)
-    grid_point_density_km2: Optional[float] = None
-    grid_params: Optional[dict] = None
-    projection: object = None
-    seed: Optional[int] = None
-    progress_bar: bool = True
-    kernel_variant: str = KERNEL_VARIANT_DEFAULT
 
 
 def resolve_magnitude_generator(magnitude_generator, **kwargs):
@@ -1109,246 +1087,6 @@ def simulate_catalog_continuation(
         return catalog
 
 
-def simulate_catalog_continuation_grid(
-    auxiliary_catalog,
-    auxiliary_end,
-    simulation_end,
-    polygon,
-    parameters,
-    mc,
-    beta_main,
-    *,
-    grid_n_xy=(4, 4),
-    grid_point_density_km2=None,
-    grid_params=None,
-    projection=None,
-    seed=None,
-    filter_polygon=True,
-    progress_bar=True,
-    kernel_variant=KERNEL_VARIANT_DEFAULT,
-    max_forecast_events=None,
-):
-    """
-    Forecast-period catalog continuation using grid-based ETAS (thinning).
-
-    This is not API-compatible with `simulate_catalog_continuation`: it only
-    takes inputs required for the grid simulator. Use `continuation_mode` on
-    `ETASSimulation.simulate` to choose classic vs grid continuation.
-
-    parameters : dict
-        ETAS parameters (used when defaulting ``grid_params`` from ``log10_mu``).
-    grid_n_xy : tuple of int
-        Number of grid nodes in x and y on the history/polygon bounding box
-        (used when ``grid_point_density_km2`` is None).
-    grid_point_density_km2 : float, optional
-        If set, build a rectangular lat/lon grid clipped to ``polygon`` with this
-        many nodes per km² inside the region (see ``latlon_rectangular_grid_in_polygon``).
-        When provided, ``grid_n_xy`` is ignored.
-    grid_params : dict, optional
-        Passed to ``run_grid_etas_simulation``; if None, built from ``parameters``
-        and ``mc`` / ``beta_main``. When provided, keys are copied and ``m0`` is
-        always overwritten by ``mc`` so magnitudes align with the inversion catalog
-        completeness used in ``ETASSimulation.simulate``.
-    projection : callable, optional
-        ``(lon, lat) -> (x, y)`` forward transform; if None, a fallback is used
-        when pyproj is available.
-    seed : int, optional
-        RNG seed for the grid simulation run.
-    filter_polygon : bool
-        If True, clip output to ``polygon``.
-    progress_bar : bool
-        If True, show a tqdm bar for simulated time in the grid inversion loop.
-    kernel_variant : str
-        Passed to ``forecast_intensity.make_kernels(..., variant=...)`` for grid
-        inversion (e.g. ``KERNEL_VARIANT_DEFAULT`` or ``KERNEL_VARIANT_ALTERNATE``).
-    """
-    if grid_params is None:
-        grid_params = GRID_DEFAULT_PARAMS.copy()
-        grid_params["beta"] = (
-            beta_main if np.isscalar(beta_main) else np.log(10)
-        )
-        if parameters and "log10_mu" in parameters:
-            grid_params["mu"] = np.power(10, parameters["log10_mu"])
-    else:
-        grid_params = dict(grid_params)
-    # Inversion JSON / ``force_inversion_on_default_params`` often leaves ``m0``
-    # at the forecast_intensity default (1) because theta uses ``m_ref``, not
-    # ``m0``. ``mc`` here matches ``ETASSimulation.simulate``'s magnitude cutoff
-    # (m_ref - delta_m/2), so pin ``m0`` for G-R sampling in the grid simulator.
-    if mc is not None:
-        grid_params["m0"] = float(mc)
-
-    utility_functions.log_etas_params(
-        "simulate_catalog_continuation_grid",
-        parameters,
-        grid_params=grid_params,
-        grid_n_xy=grid_n_xy,
-        grid_point_density_km2=grid_point_density_km2,
-        max_forecast_events=max_forecast_events,
-        mc=float(mc) if mc is not None else None,
-    )
-
-    start_sec = to_seconds(auxiliary_end)
-    end_sec = to_seconds(simulation_end)
-
-    # populate history with relevant auxiliary catalog events
-    mask = auxiliary_catalog["time"] < auxiliary_end
-    history = auxiliary_catalog.loc[mask].copy()
-    if len(history) == 0:
-        history = pd.DataFrame(
-            columns=["time", "magnitude", "latitude", "longitude", "x_utm", "y_utm"]
-        )
-
-    if projection is None and pyproj is not None:
-        centroid = polygon.centroid
-        projection = get_fallback_projection(lon=centroid.y, lat=centroid.x)
-
-    if "latitude" not in history.columns or "longitude" not in history.columns:
-        if len(history) > 0 and "x_utm" in history.columns and projection is not None:
-            lonlat = np.array([
-                projection(
-                    history["x_utm"].values[i],
-                    history["y_utm"].values[i],
-                    inverse=True,
-                )
-                for i in range(len(history))
-            ])
-            history["longitude"] = lonlat[:, 0]
-            history["latitude"] = lonlat[:, 1]
-        elif len(history) > 0:
-            raise ValueError(
-                "auxiliary_catalog has no latitude/longitude and no projection "
-                "to derive them for grid ETAS."
-            )
-
-    if "x_utm" not in history.columns and "latitude" in history.columns and len(history) > 0:
-        if projection is not None:
-            xy = np.array([
-                projection(history["longitude"].values[i], history["latitude"].values[i], inverse=False)
-                for i in range(len(history))
-            ])
-            history["x_utm"] = xy[:, 0]
-            history["y_utm"] = xy[:, 1]
-
-    if "time" in history.columns:
-        history = history.copy()
-        history["time"] = history["time"].apply(to_seconds)
-
-    min_lat, min_lon, max_lat, max_lon = polygon.bounds
-    if len(history) > 0 and "latitude" in history.columns:
-        lat_min = min(min_lat, history["latitude"].min())
-        lat_max = max(max_lat, history["latitude"].max())
-        lon_min = min(min_lon, history["longitude"].min())
-        lon_max = max(max_lon, history["longitude"].max())
-    else:
-        lat_min, lon_min, lat_max, lon_max = min_lat, min_lon, max_lat, max_lon
-
-    if grid_point_density_km2 is not None:
-        lat_flat, lon_flat, grid_info = latlon_rectangular_grid_in_polygon(
-            polygon,
-            grid_point_density_km2,
-        )
-        logger.info(
-            "Grid from density %.4g pts/km²: %s nodes inside polygon "
-            "(target %s, spacing %.3f km, rectangle %s)",
-            grid_point_density_km2,
-            grid_info["n_points"],
-            grid_info["target_n"],
-            grid_info["spacing_km"],
-            grid_info["grid_n_xy"],
-        )
-    else:
-        n_x, n_y = grid_n_xy
-        lat_1d = np.linspace(lat_min, lat_max, n_x)
-        lon_1d = np.linspace(lon_min, lon_max, n_y)
-        Lat, Lon = np.meshgrid(lat_1d, lon_1d)
-        lat_flat = Lat.flatten()
-        lon_flat = Lon.flatten()
-
-    for col in ["time", "magnitude", "latitude", "longitude"]:
-        if col not in history.columns and len(history) > 0:
-            history[col] = np.nan
-    if len(history) == 0:
-        history = pd.DataFrame({
-            "time": [], "magnitude": [], "latitude": [], "longitude": [],
-        })
-
-    # history = grid_simulation.run_etas_on_grid_thinning(
-    # history = grid_simulation.run_etas_on_grid_poisson_sampling(
-    #     history,
-    #     start_sec,
-    #     end_sec,
-    #     x_flat,
-    #     y_flat,
-    #     params=grid_params,
-    #     in_place=False,
-    #     projection=projection,
-    #     progress_bar=False,
-    #     log_interval=0,
-    #     seed=seed,
-    # )
-    from etas.inversion import polygon_surface
-
-    area_km2 = polygon_surface(polygon)
-
-    # history = grid_simulation.run_etas_on_grid_inversion_sampling(
-    history = grid_simulation.run_etas_per_grid_point_inversion(
-        history,
-        start_sec,
-        end_sec,
-        lat_flat,
-        lon_flat,
-        params=grid_params,
-        in_place=False,
-        projection=projection,
-        progress_bar=progress_bar,
-        log_interval=0,
-        seed=seed,
-        kernel_variant=kernel_variant,
-        max_forecast_events=max_forecast_events,
-        area_km2=area_km2,
-    )
-
-    new_mask = history["time"] >= start_sec
-    new_ev = history.loc[new_mask].copy()
-    new_ev["time"] = pd.to_datetime(new_ev["time"], unit="s")
-    if projection is not None and len(new_ev) > 0 and "x_utm" not in new_ev.columns:
-        xy = np.array([
-            projection(new_ev["longitude"].values[i], new_ev["latitude"].values[i], inverse=False)
-            for i in range(len(new_ev))
-        ])
-        new_ev["x_utm"] = xy[:, 0]
-        new_ev["y_utm"] = xy[:, 1]
-
-    new_ev["generation"] = 0
-    new_ev["parent"] = 0
-    new_ev["is_background"] = True
-    base_idx = auxiliary_catalog.index.max()
-    if pd.isna(base_idx):
-        base_idx = 0
-    new_ev["evt_id"] = np.arange(len(new_ev)) + base_idx + 1
-    keep_cols = ["latitude", "longitude", "time", "magnitude", "generation", "parent", "is_background", "evt_id"]
-    for c in keep_cols:
-        if c not in new_ev.columns:
-            new_ev[c] = np.nan
-    new_ev = new_ev[keep_cols]
-
-    catalog = pd.concat(
-        [auxiliary_catalog, new_ev],
-        sort=True,
-        ignore_index=True,
-    )
-    catalog = catalog.sort_values(by="time").reset_index(drop=True)
-
-    if filter_polygon:
-        catalog = gpd.GeoDataFrame(
-            catalog,
-            geometry=gpd.points_from_xy(catalog.latitude, catalog.longitude),
-        )
-        catalog = catalog[catalog.intersects(polygon)]
-        return catalog.drop("geometry", axis=1)
-    return catalog
-
 
 class ETASSimulation:
     def __init__(
@@ -1752,8 +1490,8 @@ class ETASSimulation:
         info_cols: list = [],
         magnitude_generator=simulate_magnitudes,
         magnitude_generator_kwargs=None,
-        continuation_mode: Literal["classic", "grid"] = "classic",
-        grid_continuation_options: Optional[GridContinuationOptions] = None,
+        continuation_mode: Literal["classic", "thinning"] = "classic",
+        thinning_continuation_options=None,
         max_forecast_events: int | None = None,
         seed: Optional[int] = None,
     ) -> ForecastCatalog:
@@ -1770,7 +1508,7 @@ class ETASSimulation:
             magnitude_generator=magnitude_generator,
             magnitude_generator_kwargs=magnitude_generator_kwargs,
             continuation_mode=continuation_mode,
-            grid_continuation_options=grid_continuation_options,
+            thinning_continuation_options=thinning_continuation_options,
             max_forecast_events=max_forecast_events,
             seed=seed,
         ):

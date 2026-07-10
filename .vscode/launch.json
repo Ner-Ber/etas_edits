@@ -1,7 +1,4 @@
 {
-    // Use IntelliSense to learn about possible attributes.
-    // Hover to view descriptions of existing attributes.
-    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
         {
@@ -30,7 +27,9 @@
             "type": "debugpy",
             "request": "launch",
             "python": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/bin/python",
-            "pythonArgs": ["-u"],
+            "pythonArgs": [
+                "-u"
+            ],
             "program": "${workspaceFolder}/runnable_code/MAGNET_ETAS_pipeline.py",
             "cwd": "${workspaceFolder}",
             "args": [
@@ -42,71 +41,13 @@
             }
         },
         {
-            "name": "Continuation driver: classic+grid (5k, density 0.05)",
-            "type": "debugpy",
-            "request": "launch",
-            "python": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/bin/python",
-            "pythonArgs": ["-u"],
-            "program": "${workspaceFolder}/runnable_code/run_magnet_continuation_classic_then_grid.py",
-            "cwd": "${workspaceFolder}",
-            "args": [
-                "--max-forecast-events=5000",
-                "--grid-point-density-km2",
-                "0.05"
-            ],
-            "console": "integratedTerminal",
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/runnable_code:/a/home/cc/students/csguests/neriberman/Repos/eq_mag_prediction/eq_mag_prediction",
-                "MPLBACKEND": "TkAgg"
-            }
-        },
-        {
-            "name": "Continuation driver: classic+grid (no HTML report)",
-            "type": "debugpy",
-            "request": "launch",
-            "python": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/bin/python",
-            "pythonArgs": ["-u"],
-            "program": "${workspaceFolder}/runnable_code/run_magnet_continuation_classic_then_grid.py",
-            "cwd": "${workspaceFolder}",
-            "args": [
-                "--max-forecast-events=5000",
-                "--grid-point-density-km2",
-                "0.05",
-                "--no-report"
-            ],
-            "console": "integratedTerminal",
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/runnable_code:/a/home/cc/students/csguests/neriberman/Repos/eq_mag_prediction/eq_mag_prediction",
-                "MPLBACKEND": "TkAgg"
-            }
-        },
-        {
-            "name": "MAGNET pipeline: grid only (20260521T105949Z trace)",
-            "type": "debugpy",
-            "request": "launch",
-            "python": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/bin/python",
-            "pythonArgs": ["-u"],
-            "program": "${workspaceFolder}/runnable_code/MAGNET_ETAS_pipeline.py",
-            "cwd": "${workspaceFolder}",
-            "args": [
-                "--pipeline_config_json=${workspaceFolder}/outputs/pipeline_continuation_trace_logs/20260521T105949Z/pipeline_run_grid.json"
-            ],
-            "console": "integratedTerminal",
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/runnable_code:/a/home/cc/students/csguests/neriberman/Repos/eq_mag_prediction/eq_mag_prediction",
-                "ETAS_SIM_TRACE_PARAMS_LOG": "${workspaceFolder}/outputs/pipeline_continuation_trace_logs/20260521T105949Z/run_grid_etas_params.jsonl",
-                "ETAS_SIM_TRACE_EVENTS_LOG": "${workspaceFolder}/outputs/pipeline_continuation_trace_logs/20260521T105949Z/run_grid_events.csv",
-                "ETAS_SAMPLE_KERNELS": "1",
-                "ETAS_KERNEL_SAMPLES_LOG": "${workspaceFolder}/outputs/pipeline_continuation_trace_logs/20260521T105949Z/run_grid_kernel_samples.json",
-                "MPLBACKEND": "TkAgg"
-            }
-        },
-        {
             "name": "MAGNET pipeline: classic only (vanilla)",
             "type": "debugpy",
             "request": "launch",
             "python": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/bin/python",
-            "pythonArgs": ["-u"],
+            "pythonArgs": [
+                "-u"
+            ],
             "program": "${workspaceFolder}/runnable_code/MAGNET_ETAS_pipeline.py",
             "cwd": "${workspaceFolder}",
             "preLaunchTask": "prepare-vscode-classic-debug-trace-dir",
@@ -121,29 +62,6 @@
                 "ETAS_SIM_TRACE_EVENTS_LOG": "${workspaceFolder}/outputs/pipeline_continuation_trace_logs/vscode_classic_debug/run_classic_events.csv",
                 "ETAS_SAMPLE_KERNELS": "1",
                 "ETAS_KERNEL_SAMPLES_LOG": "${workspaceFolder}/outputs/pipeline_continuation_trace_logs/vscode_classic_debug/run_classic_kernel_samples.json",
-                "MPLBACKEND": "TkAgg"
-            }
-        },
-        {
-            "name": "MAGNET pipeline: grid only (500 events, density 1e-5)",
-            "type": "debugpy",
-            "request": "launch",
-            "python": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/bin/python",
-            "pythonArgs": ["-u"],
-            "program": "${workspaceFolder}/runnable_code/MAGNET_ETAS_pipeline.py",
-            "cwd": "${workspaceFolder}",
-            "preLaunchTask": "prepare-vscode-grid-debug-trace-dir",
-            "args": [
-                "--pipeline_config_json=${workspaceFolder}/config/pipeline_single_source_repo_grid_default.json"
-            ],
-            "console": "integratedTerminal",
-            "env": {
-                "PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/runnable_code:/a/home/cc/students/csguests/neriberman/Repos/eq_mag_prediction/eq_mag_prediction_clean",
-                "LD_LIBRARY_PATH": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/lib",
-                "ETAS_SIM_TRACE_PARAMS_LOG": "${workspaceFolder}/outputs/pipeline_continuation_trace_logs/vscode_grid_debug/run_grid_etas_params.jsonl",
-                "ETAS_SIM_TRACE_EVENTS_LOG": "${workspaceFolder}/outputs/pipeline_continuation_trace_logs/vscode_grid_debug/run_grid_events.csv",
-                "ETAS_SAMPLE_KERNELS": "1",
-                "ETAS_KERNEL_SAMPLES_LOG": "${workspaceFolder}/outputs/pipeline_continuation_trace_logs/vscode_grid_debug/run_grid_kernel_samples.json",
                 "MPLBACKEND": "TkAgg"
             }
         }

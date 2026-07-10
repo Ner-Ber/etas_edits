@@ -23,7 +23,6 @@ OUTPUT_TAIL_LINES = 80
 PIPELINE_SMOKE_MODULES = frozenset(
     {
         "runnable_code/MAGNET_ETAS_pipeline.py",
-        "runnable_code/run_magnet_continuation_classic_then_grid.py",
     }
 )
 
@@ -37,7 +36,6 @@ TIMEOUT_BY_TIER = {
 INTEGRATION_TEST_FILES = frozenset(
     {
         "tests/test_magnet_pipeline_json_merge.py",
-        "tests/test_run_magnet_continuation_driver.py",
         "tests/test_catalog_california_continuation_ensemble_smoke.py",
         "tests/test_magnet_etas_integration_smoke.py",
     }
@@ -45,8 +43,6 @@ INTEGRATION_TEST_FILES = frozenset(
 
 # Repo-specific: source path (posix, relative to repo root) -> test files
 MODULE_TO_TESTS: dict[str, list[str]] = {
-    "etas/forecast_intensity.py": ["tests/test_forecast_intensity_force_inversion.py"],
-    "etas/grid_simulation.py": ["tests/test_simulation_seed_and_kernels.py"],
     "etas/simulation.py": ["tests/test_simulation_seed_and_kernels.py"],
     "etas/rate_simulation.py": [
         "tests/test_catalog_california_etas_vs_thinning_continuation.py",
@@ -78,9 +74,6 @@ MODULE_TO_TESTS: dict[str, list[str]] = {
     "runnable_code/MAGNET_ETAS_pipeline.py": [
         "tests/test_continuation_seed_and_grid_options.py",
         "tests/test_magnet_pipeline_json_merge.py",
-    ],
-    "runnable_code/run_magnet_continuation_classic_then_grid.py": [
-        "tests/test_run_magnet_continuation_driver.py",
     ],
 }
 
@@ -321,8 +314,21 @@ def _state_fresh(state: dict) -> bool:
 
 
 def run_pipeline_dry_run(repo: Path) -> tuple[int, str]:
-    driver = repo / "runnable_code" / "run_magnet_continuation_classic_then_grid.py"
-    cmd = [sys.executable, str(driver), "--dry-run", "--no-report"]
+    """Import-check MAGNET pipeline module (grid classic-then-grid driver removed)."""
+    pipeline = repo / "runnable_code" / "MAGNET_ETAS_pipeline.py"
+    cmd = [
+        sys.executable,
+        "-c",
+        (
+            "import importlib.util, sys; "
+            f"p={str(pipeline)!r}; "
+            "spec=importlib.util.spec_from_file_location('magnet_pipeline_smoke', p); "
+            "m=importlib.util.module_from_spec(spec); "
+            "sys.modules[spec.name]=m; "
+            "spec.loader.exec_module(m); "
+            "assert hasattr(m, 'run_etas_catalog_continuation')"
+        ),
+    ]
     env = _subprocess_env(repo)
     try:
         proc = subprocess.run(
@@ -394,7 +400,7 @@ def on_edit(stdin_data: dict) -> None:
             {
                 "status": smoke_status,
                 "edited_file": rel or file_path,
-                "command": "run_magnet_continuation_classic_then_grid.py --dry-run",
+                "command": "import MAGNET_ETAS_pipeline.py",
                 "exit_code": smoke_code,
                 "output_tail": _tail(smoke_output),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -407,7 +413,7 @@ def on_edit(stdin_data: dict) -> None:
             {
                 "status": "skip",
                 "edited_file": rel or file_path,
-                "command": "run_magnet_continuation_classic_then_grid.py --dry-run",
+                "command": "import MAGNET_ETAS_pipeline.py",
                 "exit_code": 0,
                 "output_tail": "skipped because pytest failed first",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
