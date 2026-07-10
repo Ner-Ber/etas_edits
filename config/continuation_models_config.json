@@ -1,0 +1,38 @@
+{
+    "methods": ["etas", "thinning"],
+    "fn_catalog": "input_data/example_catalog.csv",
+    "shape_coords": "input_data/california_shape.npy",
+    "output_root": "outputs/continuation_models",
+    "auxiliary_start": "1971-01-01 00:00:00",
+    "timewindow_start": "1981-01-01 00:00:00",
+    "timewindow_end": "2007-01-01 00:00:00",
+    "testwindow_end": "2021-01-01 00:00:00",
+    "theta_0": {
+        "log10_mu": -5.8,
+        "log10_k0": -2.6,
+        "a": 1.8,
+        "log10_c": -2.5,
+        "omega": -0.02,
+        "log10_tau": 3.5,
+        "log10_d": -0.85,
+        "gamma": 1.3,
+        "rho": 0.66
+    },
+    "mc": 3.6,
+    "delta_m": 0.1,
+    "coppersmith_multiplier": 100,
+    "seed": 0,
+    "n_runs": 1,
+    "a_h_resolution": 500,
+    "force_inversion": false,
+    "force_rerun": false,
+    "store_pij": true,
+    "store_distances": true,
+    "gof_threshold": 1.0,
+    "magnet": {
+        "mode": "skip",
+        "model_dir": null,
+        "gin_config_path": null,
+        "general_gin_config_path": null
+    }
+}
