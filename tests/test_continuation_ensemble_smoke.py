@@ -102,7 +102,7 @@ def _run_main_smoke(
     method: str,
     extra_argv: list[str] | None = None,
 ) -> int:
-    import catalog_california_continuation_ensemble as ens
+    import continuation_ensemble as ens
 
     output_root = tmp_path / "ensembles"
     inversion_dir = tmp_path / "inversions"
@@ -159,7 +159,7 @@ def test_continuation_ensemble_main_smoke(
     short_config_path: Path,
     method: str,
 ) -> None:
-    import catalog_california_continuation_ensemble as ens
+    import continuation_ensemble as ens
 
     extra = []
     if method == "thinning_magnet":

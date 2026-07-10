@@ -342,7 +342,7 @@ def test_resolve_thinning_magnitude_generator_returns_magnet_generator(
     fake_magnet.get_magnet_generator = lambda model_dir: sentinel
     monkeypatch.setitem(sys.modules, "etas.magnet_inference", fake_magnet)
 
-    import catalog_california_etas_vs_thinning_continuation as cat_cmp
+    import continuation_compare as cat_cmp
 
     generator = cat_cmp.resolve_thinning_magnitude_generator(
         magnitude_generator="MAGNET_magnitude",
@@ -363,7 +363,7 @@ def test_resolve_thinning_magnitude_generator_simulate_magnitudes(monkeypatch) -
     fake_simulation = types.SimpleNamespace(resolve_magnitude_generator=fake_resolve)
     monkeypatch.setitem(sys.modules, "etas.simulation", fake_simulation)
 
-    import catalog_california_etas_vs_thinning_continuation as cat_cmp
+    import continuation_compare as cat_cmp
 
     generator = cat_cmp.resolve_thinning_magnitude_generator()
     assert generator is sentinel

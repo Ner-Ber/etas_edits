@@ -308,7 +308,7 @@ def simulate_catalog_continuation_thinning(
     Branching Ogata thinning catalog continuation over (auxiliary_end, simulation_end].
 
     Space-integrated Hawkes intensity with parent-centered A_h quadrature
-    (see catalog_california_etas_vs_thinning_continuation notebook).
+    (see continuation_compare notebook).
     magnitude_generator is resolved by the caller (``ETASSimulation.simulate``).
     """
     if magnitude_generator is _UNSET_MAGNITUDE_GENERATOR:

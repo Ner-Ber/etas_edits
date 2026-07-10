@@ -8,7 +8,7 @@ pytestmark = pytest.mark.unit
 
 
 def test_continuation_reexports_rate_simulation_helpers() -> None:
-    import catalog_california_etas_vs_thinning_continuation as cat_cmp
+    import continuation_compare as cat_cmp
     import etas.rate_simulation as rate_simulation
 
     assert cat_cmp.expand_theta_log10 is rate_simulation.expand_theta_log10
@@ -27,7 +27,7 @@ def test_expand_theta_log10_linearizes_log10_keys() -> None:
 
 
 def test_ensemble_module_imports_and_uses_rate_simulation() -> None:
-    import catalog_california_etas_vs_thinning_continuation as cat_cmp
+    import continuation_compare as cat_cmp
     import catalog_california_etas_vs_thinning_ensemble as ensemble_mod
     import etas.rate_simulation as rate_simulation
 
@@ -38,7 +38,7 @@ def test_ensemble_module_imports_and_uses_rate_simulation() -> None:
 
 
 def test_thinning_magnitude_config_defaults() -> None:
-    import catalog_california_etas_vs_thinning_continuation as cat_cmp
+    import continuation_compare as cat_cmp
 
     assert cat_cmp.thinning_magnitude_config_from_dict({}) == {
         "magnitude_generator": "simulate_magnitudes",
@@ -47,7 +47,7 @@ def test_thinning_magnitude_config_defaults() -> None:
 
 
 def test_thinning_magnitude_meta_uses_resolved_model_dir(tmp_path) -> None:
-    import catalog_california_etas_vs_thinning_continuation as cat_cmp
+    import continuation_compare as cat_cmp
 
     repo_root = tmp_path
     model_dir = repo_root / "models" / "my_magnet"
@@ -61,14 +61,14 @@ def test_thinning_magnitude_meta_uses_resolved_model_dir(tmp_path) -> None:
 
 
 def test_resolve_thinning_magnitude_generator_magnet_requires_model_dir() -> None:
-    import catalog_california_etas_vs_thinning_continuation as cat_cmp
+    import continuation_compare as cat_cmp
 
     with pytest.raises(ValueError, match="thinning_model_dir"):
         cat_cmp.resolve_thinning_magnitude_generator(magnitude_generator="MAGNET_magnitude")
 
 
 def test_continuation_ensemble_module_imports() -> None:
-    import catalog_california_continuation_ensemble as single_ens
+    import continuation_ensemble as single_ens
 
     assert hasattr(single_ens, "main")
     assert single_ens.normalize_continuation_method("etas") == "etas"
@@ -77,7 +77,7 @@ def test_continuation_ensemble_module_imports() -> None:
 
 
 def test_pick_forecast_catalog() -> None:
-    import catalog_california_continuation_ensemble as single_ens
+    import continuation_ensemble as single_ens
     import pandas as pd
 
     etas = pd.DataFrame({"m": [1.0]})
