@@ -1,0 +1,32 @@
+---
+description: Maintain docs/CODE_TODO.md; never delete completed todos without user approval
+alwaysApply: true
+---
+
+# Code TODO file
+
+Canonical task list: **`docs/CODE_TODO.md`**.
+
+This is the project’s durable code backlog for any agent/session. It is **not** the Cursor session todo tool (`TodoWrite`). Prefer updating `docs/CODE_TODO.md` for cross-session work.
+
+## When writing or editing `docs/CODE_TODO.md`
+
+1. **Self-contained items** — A new agent with no chat history must understand each task. Include: stable `id`, status, **Added** / **Updated** timestamps, goal, context (why/current state), acceptance criteria, and key paths.
+2. **Timestamps** — On create, set **Added** and **Updated** to the current date (`YYYY-MM-DD` or `YYYY-MM-DD HH:MM` local). On every material edit (status, goal, acceptance, paths), bump **Updated**. Do not leave new items without timestamps.
+3. **Do not rely on conversation** — No “as we discussed”; link files/commands instead.
+4. **Status** — Use `open` | `in_progress` | `blocked` | `done`. Put active work under **Open**; after user-approved close, move to **Done** (do not invent parallel lists in chat). When moving to Done, set **Updated** and add a one-line closed note with date.
+5. **Additive edits** — Prefer updating an existing `id` over duplicating. Add new ids for new work. Keep the “How to use” header intact.
+6. **Scope** — Code/docs/tests in this repo (and clearly marked sibling-repo notes). Not personal reminders.
+
+## Completing / deleting todos
+
+When the user asks to **complete**, **finish**, **close**, or **clear** all todos or specific ones:
+
+1. Implement or verify the work against each item’s **Acceptance** criteria.
+2. **Stop and ask the user to confirm** that the item(s) are actually complete.
+3. Only after explicit user approval:
+   - Move the item to **Done** (with a one-line “closed: …” note), **or**
+   - Delete/prune it if the user asked to remove it.
+4. **Never delete or empty todo items on your own** after claiming they are done. Unapproved removal is forbidden.
+
+If the user says only “mark done” without approving deletion/prune, move to **Done**; do not remove the text until they approve pruning.
