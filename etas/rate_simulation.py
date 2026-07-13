@@ -317,6 +317,7 @@ def _thinning_magnitude(
     return float(magnitude_generator(1, **mag_kwargs)[0])
 
 
+
 def simulate_catalog_continuation_thinning(
     auxiliary_catalog,
     auxiliary_end,
@@ -384,6 +385,11 @@ def simulate_catalog_continuation_thinning(
     ) as magnet_pbar:
         while True:
             if max_forecast_events is not None and len(forecast) >= max_forecast_events:
+                print(
+                    f"Stage: reached max_forecast_events={int(max_forecast_events)}; "
+                    "stopping thinning and returning partial catalog",
+                    flush=True,
+                )
                 break
             t_next = thinning_next_event_time(intensity, t, t_end)
             if t_next is None:

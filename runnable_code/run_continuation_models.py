@@ -583,6 +583,7 @@ def expected_meta_for_method(
     cfg: dict,
     a_h_resolution: int,
     magnet_model_dir: pathlib.Path | None,
+    max_forecast_events: int | None = None,
 ) -> dict:
     meta = ens.expected_realization_meta(
         seed=seed,
@@ -592,6 +593,8 @@ def expected_meta_for_method(
         timewindow_end=cfg["timewindow_end"],
         testwindow_end=cfg["testwindow_end"],
     )
+    if max_forecast_events is not None:
+        meta["max_forecast_events"] = int(max_forecast_events)
     if method == "thinning":
         meta["thinning_magnitude_generator"] = "simulate_magnitudes"
         meta["thinning_model_dir"] = None
@@ -669,6 +672,24 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "Sidecar file or directory (sets MAGNET_PREDICTIONS_PATH; "
             "also enables recording)."
+        ),
+    )
+    parser.add_argument(
+        "--max-forecast-events",
+        type=int,
+        default=None,
+        help=(
+            "Hard cap on thinning forecast events (overrides per-day default). "
+            "When reached, thinning stops and the partial catalog is saved."
+        ),
+    )
+    parser.add_argument(
+        "--max-forecast-events-per-day",
+        type=float,
+        default=None,
+        help=(
+            "Cap = ceil(forecast_days * rate). Default 3000/day when neither "
+            "this nor --max-forecast-events / config absolute is set."
         ),
     )
     parser.add_argument(
@@ -808,6 +829,18 @@ def main(argv: list[str] | None = None) -> int:
         (forecast_start_dt - pd.Timestamp("1970-01-01")) / pd.Timedelta("1D")
     )
     forecast_end_t = (forecast_end_dt - pd.Timestamp("1970-01-01")) / pd.Timedelta("1D")
+    forecast_days = float(forecast_end_t - forecast_start_t)
+    max_forecast_events = compare.resolve_max_forecast_events(
+        cfg,
+        forecast_days=forecast_days,
+        cli_max_events=args.max_forecast_events,
+        cli_per_day=args.max_forecast_events_per_day,
+    )
+    print(
+        f"max_forecast_events={max_forecast_events} "
+        f"(forecast_days={forecast_days:.3f})",
+        flush=True,
+    )
 
     seeds = [seed_start + i for i in range(n_runs)]
     n_cached = 0
@@ -848,6 +881,7 @@ def main(argv: list[str] | None = None) -> int:
                 cfg=cfg,
                 a_h_resolution=a_h_resolution,
                 magnet_model_dir=magnet_model_dir,
+                max_forecast_events=max_forecast_events,
             )
             if cache_hit(run_dir, expected, force_rerun):
                 print(f"  seed={seed}: cache hit → {run_dir}", flush=True)
@@ -872,6 +906,7 @@ def main(argv: list[str] | None = None) -> int:
                 a_h_resolution=a_h_resolution,
                 thinning_magnitude_generator=thinning_mag_gen,
                 methods=forecast_methods,
+                max_forecast_events=max_forecast_events,
             )
             forecast_catalog = ens.pick_forecast_catalog(
                 etas_catalog, thinning_catalog, method
