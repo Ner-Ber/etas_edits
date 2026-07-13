@@ -1,16 +1,30 @@
-"""Lightweight MAGNET cache helpers (no TensorFlow import at module load)."""
+"""Lightweight MAGNET cache helpers (no TensorFlow import at module load).
+
+Import policy (``.cursor/rules/python-imports.mdc``):
+- ``os``, ``numpy``, ``pandas``, ``gin``, ``pickle``, ``pathlib``, ``importlib``,
+  ``joblib.numpy_pickle`` — module top (normal / light etas deps).
+- ``eq_mag_prediction.forecasting.training_examples`` — deferred inside
+  ``_catalog_domain_class`` / ``catalog_domain_for_inference`` so importing this
+  module (and unit tests) does not pull the MAGNET/TF stack.
+"""
 
 from __future__ import annotations
 
 import importlib
+import os
 import pickle
 from pathlib import Path
-from typing import TYPE_CHECKING
 
+import gin
+import numpy as np
+import pandas as pd
 from joblib.numpy_pickle import NumpyUnpickler
 
-if TYPE_CHECKING:
-    import pandas as pd
+# Matches magnitude_predictor_trainer default / Hauksson gin.
+_DEFAULT_PDF_SUPPORT_STRETCH = 7.0
+_PDF_SUPPORT_STRETCH_GIN_KEY = (
+    "train_and_evaluate_magnitude_prediction_model.pdf_support_stretch"
+)
 
 # MAGNET checkpoints pickled from notebooks store classes as ``__main__.<Name>``.
 _LEGACY_MAIN_MODULE_SOURCES = (
@@ -21,8 +35,38 @@ _LEGACY_MAIN_MODULE_SOURCES = (
 )
 
 
+def magnitude_from_normalized(
+    normalized: float,
+    *,
+    shift: float,
+    stretch: float,
+) -> float:
+    """Map Kumaraswamy support [0, 1] back to magnitude space.
+
+    Training uses ``MinusLoglikelihoodConstShiftStretchLoss`` with
+    ``(m - shift) / stretch``; invert with ``m = u * stretch + shift``.
+    """
+    return float(normalized) * float(stretch) + float(shift)
+
+
+def pdf_support_stretch_from_gin(
+    default: float = _DEFAULT_PDF_SUPPORT_STRETCH,
+) -> float:
+    """Read training PDF stretch from gin after model ``config.gin`` is parsed."""
+    try:
+        value = gin.query_parameter(_PDF_SUPPORT_STRETCH_GIN_KEY)
+    except ValueError:
+        return float(default)
+    if value is None:
+        return float(default)
+    return float(value)
+
+
 def _catalog_domain_class():
-    """Return the real MAGNET ``CatalogDomain`` class."""
+    """Return the real MAGNET ``CatalogDomain`` class.
+
+    Deferred: ``training_examples`` pulls heavy MAGNET deps (often TF).
+    """
     from eq_mag_prediction.forecasting import training_examples
 
     return training_examples.CatalogDomain
@@ -65,9 +109,6 @@ def aftershock_times_and_locations(aftershock_df: pd.DataFrame):
     Thinning calls MAGNET one event at a time; a single row must stay 2-D
     because ``CatalogDomain`` uses ``np.squeeze`` on ``test_locations``.
     """
-    import numpy as np
-    import pandas as pd
-
     times = catalog_times_to_unix_seconds(aftershock_df["time"]).reshape(-1)
     locations = np.asarray(
         aftershock_df[["longitude", "latitude"]].values,
@@ -83,9 +124,6 @@ def catalog_times_to_unix_seconds(times) -> np.ndarray:
     10**9`` (that assumes nanoseconds and breaks on microsecond dtypes). Integer
     columns already in epoch seconds are returned unchanged.
     """
-    import numpy as np
-    import pandas as pd
-
     series = pd.Series(times)
     if pd.api.types.is_numeric_dtype(series):
         values = series.astype(np.float64).to_numpy()
@@ -111,8 +149,6 @@ def build_available_history(
     aftershock_df: pd.DataFrame,
 ) -> pd.DataFrame:
     """Merge train/generated history with event rows awaiting MAGNET magnitudes."""
-    import pandas as pd
-
     if catalog is None or len(catalog) == 0:
         history = aftershock_df.copy()
     else:
@@ -133,8 +169,9 @@ def catalog_domain_for_inference(
     which collapses a single (lon, lat) row from shape ``(1, 2)`` to ``(2,)``.
     Thinning calls MAGNET one event at a time, so we pad to two rows for
     ``__init__`` and then restore the true arrays on the instance.
+
+    ``training_examples`` is imported here (deferred) to avoid TF at module load.
     """
-    import numpy as np
     from eq_mag_prediction.forecasting import training_examples
 
     times = np.asarray(test_times, dtype=np.int64).reshape(-1)
@@ -196,3 +233,57 @@ def load_original_domain(domain_path: Path):
             raise ValueError(
                 f"MAGNET domain file could not be unpickled: {domain_path}"
             ) from exc
+
+
+_MAGNET_PREDICTIONS_ENV = "MAGNET_PREDICTIONS_PATH"
+_DEFAULT_SIDECAR_NAME = "magnet_predictions.npz"
+
+
+def prediction_recording_enabled(magnet: dict | None = None) -> bool:
+    """True when config ``magnet.save_predictions`` or env path is set."""
+    if os.environ.get(_MAGNET_PREDICTIONS_ENV):
+        return True
+    if magnet and bool(magnet.get("save_predictions")):
+        return True
+    return False
+
+
+def prediction_sidecar_path(run_dir: str | Path) -> Path:
+    """Destination for the realization sidecar (env path overrides when set)."""
+    env = os.environ.get(_MAGNET_PREDICTIONS_ENV)
+    if env:
+        path = Path(env).expanduser()
+        if path.suffix:
+            return path
+        return path / _DEFAULT_SIDECAR_NAME
+    return Path(run_dir).expanduser().resolve() / _DEFAULT_SIDECAR_NAME
+
+
+def write_prediction_sidecar(dest: str | Path, rows: list[dict]) -> Path | None:
+    """Write buffered MAGNET prediction rows to a compressed ``.npz`` file."""
+    if not rows:
+        return None
+    dest_path = Path(dest).expanduser().resolve()
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    event_index = np.asarray([row["event_index"] for row in rows], dtype=np.int64)
+    times = np.asarray([row["time"] for row in rows], dtype=np.int64)
+    longitude = np.asarray([row["longitude"] for row in rows], dtype=float)
+    latitude = np.asarray([row["latitude"] for row in rows], dtype=float)
+    magnitude = np.asarray([row["magnitude"] for row in rows], dtype=float)
+    preds = [np.asarray(row["model_prediction"], dtype=float) for row in rows]
+    try:
+        model_prediction = np.stack(preds, axis=0)
+    except ValueError:
+        model_prediction = np.empty(len(preds), dtype=object)
+        for i, pred in enumerate(preds):
+            model_prediction[i] = pred
+    np.savez_compressed(
+        dest_path,
+        event_index=event_index,
+        time=times,
+        longitude=longitude,
+        latitude=latitude,
+        magnitude=magnitude,
+        model_prediction=model_prediction,
+    )
+    return dest_path

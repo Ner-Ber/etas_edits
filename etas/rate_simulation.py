@@ -2,6 +2,7 @@
 import datetime as dt
 import functools
 import logging
+import sys
 import types
 from dataclasses import dataclass
 
@@ -12,6 +13,7 @@ import pyproj
 from matplotlib.path import Path as MplPath
 from shapely import geometry
 from shapely.geometry import Point, Polygon
+from tqdm import tqdm
 
 import etas.rate_computation as rc
 import etas.utility_functions as utility_functions
@@ -342,48 +344,60 @@ def simulate_catalog_continuation_thinning(
     )
 
     t = t_start
-    while True:
-        if max_forecast_events is not None and len(forecast) >= max_forecast_events:
-            break
-        t_next = thinning_next_event_time(intensity, t, t_end)
-        if t_next is None:
-            break
+    use_magnet = (
+        getattr(magnitude_generator, "__class__", type(None)).__name__
+        == "MagnetMagnitudeGenerator"
+    )
+    with tqdm(
+        total=max_forecast_events,
+        desc="MAGNET thinning",
+        unit="event",
+        file=sys.stderr,
+        disable=not use_magnet,
+    ) as magnet_pbar:
+        while True:
+            if max_forecast_events is not None and len(forecast) >= max_forecast_events:
+                break
+            t_next = thinning_next_event_time(intensity, t, t_end)
+            if t_next is None:
+                break
 
-        w = parent_weights(
-            t_next, events, polygon, params, a_h_resolution, a_h_stretch
-        )
-        idx = int(np.random.choice(len(w), p=w))
-        if idx == len(w) - 1:
-            lat, lon = sample_background_location(polygon)
-            source = "background"
-            parent_H = None
-        else:
-            parent_H = events[idx]
-            lat, lon = sample_aftershock_location(parent_H, params)
-            source = "triggered"
+            w = parent_weights(
+                t_next, events, polygon, params, a_h_resolution, a_h_stretch
+            )
+            idx = int(np.random.choice(len(w), p=w))
+            if idx == len(w) - 1:
+                lat, lon = sample_background_location(polygon)
+                source = "background"
+                parent_H = None
+            else:
+                parent_H = events[idx]
+                lat, lon = sample_aftershock_location(parent_H, params)
+                source = "triggered"
 
-        m = _thinning_magnitude(
-            magnitude_generator,
-            beta_main,
-            mc,
-            available_catalog,
-            parent_H,
-            lat,
-            lon,
-            t_next,
-        )
-        event = {"m": m, "x": float(lon), "y": float(lat), "t": float(t_next)}
-        events.append(event)
-        forecast.append({**event, "event_source": source})
-        available_catalog = _append_event_to_available_catalog(
-            available_catalog,
-            lat=lat,
-            lon=lon,
-            t_days=t_next,
-            magnitude=m,
-            is_background=source == "background",
-        )
-        t = t_next
+            m = _thinning_magnitude(
+                magnitude_generator,
+                beta_main,
+                mc,
+                available_catalog,
+                parent_H,
+                lat,
+                lon,
+                t_next,
+            )
+            event = {"m": m, "x": float(lon), "y": float(lat), "t": float(t_next)}
+            events.append(event)
+            forecast.append({**event, "event_source": source})
+            available_catalog = _append_event_to_available_catalog(
+                available_catalog,
+                lat=lat,
+                lon=lon,
+                t_days=t_next,
+                magnitude=m,
+                is_background=source == "background",
+            )
+            t = t_next
+            magnet_pbar.update(1)
 
     if not forecast:
         return pd.DataFrame(
