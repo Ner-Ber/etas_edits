@@ -195,6 +195,22 @@ Maintenance rules: `.cursor/rules/code-todo.mdc`
   - `docs/script-usage-flows.md`
   - `tests/test_magnet_inference.py`
 
+### `thinning-progress-last-event-time`
+- **Status:** in_progress
+- **Added:** 2026-07-13 20:15
+- **Updated:** 2026-07-13 22:05
+- **Goal:** During Ogata thinning catalog continuation (MAGNET **and** non-MAGNET), show with the progress bar the timestamp of the last generated event and the remaining time window to the forecast/test end (`simulation_end`).
+- **Context:** Implemented 2026-07-13: `tqdm` enabled for both MAGNET and GR thinning; desc is `"MAGNET thinning"` vs `"thinning"`. Each accepted event refreshes postfix via `thinning_progress_postfix` with `last` (absolute timestamp), `end` (`simulation_end`), and `left` (remaining days/hours/seconds). Unit test: `tests/test_continuation_compare.py::test_thinning_progress_postfix_last_and_remaining`. Awaiting user approval to close.
+- **Acceptance:**
+  - Progress UI enabled for thinning with and without MAGNET (not MAGNET-only).
+  - Alongside event count / rate, display (1) absolute timestamp of the last accepted generated event and (2) remaining time to `simulation_end` (and/or last-event time vs end as a clear time frame).
+  - Updates as events are accepted; does not materially slow the hot path (postfix/`set_postfix` or equivalent is fine).
+  - Desc/label distinguishes MAGNET vs GR thinning if useful; behavior otherwise identical.
+- **Key paths:**
+  - `etas/rate_simulation.py` (`simulate_catalog_continuation_thinning`, `thinning_progress_postfix`, `tqdm` loop)
+  - `tests/test_continuation_compare.py`
+  - Callers: `runnable_code/continuation_compare.py` / `continuation_ensemble.py` / `run_continuation_models.py` (no API change expected)
+
 ---
 
 ## Done (keep until user asks to prune)

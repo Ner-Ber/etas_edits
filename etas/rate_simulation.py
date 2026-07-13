@@ -317,6 +317,30 @@ def _thinning_magnitude(
     return float(magnitude_generator(1, **mag_kwargs)[0])
 
 
+def _days_to_timestamp(t_days: float) -> pd.Timestamp:
+    return _EPOCH + pd.to_timedelta(float(t_days), unit="D")
+
+
+def _format_remaining_days(remaining_days: float) -> str:
+    remaining_days = max(0.0, float(remaining_days))
+    if remaining_days >= 1.0:
+        return f"{remaining_days:.2f}d"
+    if remaining_days * 24.0 >= 1.0:
+        return f"{remaining_days * 24.0:.2f}h"
+    return f"{remaining_days * 86400.0:.0f}s"
+
+
+def thinning_progress_postfix(t_days: float, t_end: float) -> dict:
+    """tqdm postfix for last accepted event time and remaining window to ``t_end``."""
+    last_ts = _days_to_timestamp(t_days)
+    end_ts = _days_to_timestamp(t_end)
+    remaining_days = float(t_end) - float(t_days)
+    return {
+        "last": last_ts.strftime("%Y-%m-%d %H:%M:%S"),
+        "end": end_ts.strftime("%Y-%m-%d %H:%M:%S"),
+        "left": _format_remaining_days(remaining_days),
+    }
+
 
 def simulate_catalog_continuation_thinning(
     auxiliary_catalog,
@@ -378,11 +402,11 @@ def simulate_catalog_continuation_thinning(
     )
     with tqdm(
         total=max_forecast_events,
-        desc="MAGNET thinning",
+        desc="MAGNET thinning" if use_magnet else "thinning",
         unit="event",
         file=sys.stderr,
-        disable=not use_magnet,
-    ) as magnet_pbar:
+    ) as pbar:
+        pbar.set_postfix(thinning_progress_postfix(t, t_end), refresh=False)
         while True:
             if max_forecast_events is not None and len(forecast) >= max_forecast_events:
                 print(
@@ -430,7 +454,8 @@ def simulate_catalog_continuation_thinning(
                 is_background=source == "background",
             )
             t = t_next
-            magnet_pbar.update(1)
+            pbar.update(1)
+            pbar.set_postfix(thinning_progress_postfix(t, t_end), refresh=False)
 
     if not forecast:
         return pd.DataFrame(
