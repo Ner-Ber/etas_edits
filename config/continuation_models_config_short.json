@@ -5,6 +5,7 @@
     ],
     "fn_catalog": "input_data/example_catalog.csv",
     "shape_coords": "input_data/california_shape.npy",
+    "region": "california",
     "output_root": "outputs/continuation_models",
     "auxiliary_start": "2016-01-01 00:00:00",
     "timewindow_start": "2017-01-01 00:00:00",
@@ -36,6 +37,9 @@
         "mode": "train",
         "model_dir": null,
         "gin_config_path": "config/magnet_hauksson_template.gin",
-        "general_gin_config_path": null
+        "general_gin_config_path": null,
+        "region": "california",
+        "epochs": 2,
+        "save_predictions": false
     }
 }
