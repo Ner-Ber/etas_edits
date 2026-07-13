@@ -37,6 +37,23 @@ def test_ensemble_module_imports_and_uses_rate_simulation() -> None:
     assert theta["mu"] > 0
 
 
+def test_thinning_progress_postfix_last_and_remaining() -> None:
+    import etas.rate_simulation as rate_simulation
+    import pandas as pd
+
+    epoch = rate_simulation._EPOCH
+    t_days = float((pd.Timestamp("2012-08-15 12:00:00") - epoch) / pd.Timedelta("1D"))
+    t_end = float((pd.Timestamp("2012-08-17 12:00:00") - epoch) / pd.Timedelta("1D"))
+    postfix = rate_simulation.thinning_progress_postfix(t_days, t_end)
+    assert postfix["last"] == "2012-08-15 12:00:00"
+    assert postfix["end"] == "2012-08-17 12:00:00"
+    assert postfix["left"] == "2.00d"
+
+    near_end = t_end - (30.0 / 86400.0)
+    postfix_s = rate_simulation.thinning_progress_postfix(near_end, t_end)
+    assert postfix_s["left"].endswith("s")
+
+
 def test_thinning_magnitude_config_defaults() -> None:
     import continuation_compare as cat_cmp
 
