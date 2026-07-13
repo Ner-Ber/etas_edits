@@ -247,9 +247,11 @@ class MagnetInferenceSession:
             disable=n_events < 2,
         )
         for orig_i, time_value, location in event_iter:
+            lng = float(location[0])
+            lat = float(location[1])
             model_prediction = forecasts.create_altered_prediction_single_loc(
                 evaluation_time=time_value,
-                loc=geometry.Point(lng=location[0], lat=location[1]),
+                loc=geometry.Point(lng=lng, lat=lat),
                 catalog_domain=domain,
                 loaded_model=self.loaded_model,
                 scalers=self.scalers,
