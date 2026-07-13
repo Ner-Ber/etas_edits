@@ -23,6 +23,40 @@ def _load_runner():
     return mod
 
 
+def test_resolve_max_forecast_events_defaults_and_overrides() -> None:
+    import importlib.util
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[1]
+    path = repo / "runnable_code" / "continuation_compare.py"
+    spec = importlib.util.spec_from_file_location("continuation_compare_cap", path)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    resolve = mod.resolve_max_forecast_events
+
+    assert resolve({}, forecast_days=30) == 90_000
+    assert resolve({}, forecast_days=30.1) == 90_300
+    assert resolve({"max_forecast_events_per_day": 100}, forecast_days=10) == 1000
+    assert resolve({"max_forecast_events": 500}, forecast_days=30) == 500
+    assert (
+        resolve(
+            {"max_forecast_events": 500},
+            forecast_days=30,
+            cli_max_events=123,
+        )
+        == 123
+    )
+    assert (
+        resolve(
+            {"max_forecast_events_per_day": 100},
+            forecast_days=10,
+            cli_per_day=50,
+        )
+        == 500
+    )
+
+
 def test_normalize_methods_list_and_csv() -> None:
     mod = _load_runner()
     assert mod.normalize_methods(["etas", "thinning"]) == ("etas", "thinning")

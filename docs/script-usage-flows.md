@@ -114,13 +114,15 @@ python runnable_code/run_continuation_models.py \
 - **Catalog prepare:** `prepare_magnet_catalog_for_magnet_template` ensures `depth` + sorted `time`. Upstream `convert_etas_to_magnet` (eq_mag_prediction_clean) always writes a `depth` column (ETAS values when present, else `default_depth_km`) and sorts; the runner still prepares/validates.
 - **Trainer output:** absolute `--output_dir` is honored; experiment is `…/magnet/<id>/_repetition_0/` (`model/` + `domain`). No search under `trained_models` or cwd-relative `home/…`.
 - **Prediction sidecar (opt-in):** `magnet.save_predictions: true`, env `MAGNET_PREDICTIONS_PATH`, and/or CLI `--save-magnet-predictions` / `--magnet-predictions-path`. Writes `magnet_predictions.npz` next to `forecast_catalog.csv` (time, lon, lat, magnitude, `model_prediction`). Off by default; magnitude API unchanged.
+- **Thinning event cap:** default `ceil(forecast_days × 3000)`. Override with config `max_forecast_events` / `max_forecast_events_per_day`, or CLI `--max-forecast-events` / `--max-forecast-events-per-day`. When the cap is hit, thinning stops and the partial catalog is saved.
 
 **Short train smoke:**
 
 ```bash
 python runnable_code/run_continuation_models.py \
   --config config/continuation_models_config_short.json \
-  --methods etas,thinning_magnet
+  --methods etas,thinning_magnet \
+  --max-forecast-events 5000
 ```
 
 ---

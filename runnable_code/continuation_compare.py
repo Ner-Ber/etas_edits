@@ -27,6 +27,7 @@ import hashlib
 import html
 import json
 import logging
+import math
 import os
 import pathlib
 import sys
@@ -47,6 +48,37 @@ import etas.utility_functions as utility_functions
 ETAS_COLOR = "seagreen"
 THINNING_COLOR = "indianred"
 _DEFAULT_CONFIG = "config/catalog_california_etas_vs_thinning_config.json"
+_DEFAULT_MAX_FORECAST_EVENTS_PER_DAY = 3000.0
+
+
+def resolve_max_forecast_events(
+    cfg: dict,
+    *,
+    forecast_days: float,
+    cli_max_events: int | None = None,
+    cli_per_day: float | None = None,
+) -> int:
+    """Absolute forecast-event cap for thinning continuations.
+
+    Priority:
+      1. ``cli_max_events`` / config ``max_forecast_events`` (absolute)
+      2. ``cli_per_day`` / config ``max_forecast_events_per_day`` / default 3000
+         times ``forecast_days`` (ceiled)
+    """
+    days = max(0.0, float(forecast_days))
+    if cli_max_events is not None:
+        return max(1, int(cli_max_events))
+    if cfg.get("max_forecast_events") is not None:
+        return max(1, int(cfg["max_forecast_events"]))
+    if cli_per_day is not None:
+        per_day = float(cli_per_day)
+    elif cfg.get("max_forecast_events_per_day") is not None:
+        per_day = float(cfg["max_forecast_events_per_day"])
+    else:
+        per_day = float(_DEFAULT_MAX_FORECAST_EVENTS_PER_DAY)
+    if per_day <= 0:
+        raise ValueError("max_forecast_events_per_day must be positive")
+    return max(1, int(math.ceil(days * per_day)))
 _REPORT_NAME = "catalog_etas_vs_thinning_report.html"
 
 # Re-export thinning helpers (implemented in rate_simulation) for notebooks / ensemble.
@@ -765,6 +797,7 @@ def run_forecasts(
     a_h_resolution: int,
     thinning_magnitude_generator=None,
     methods: tuple[str, ...] = ("etas", "thinning"),
+    max_forecast_events: int | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     import etas.mc_b_est as mc_b_est
     import etas.simulation as simulation
@@ -845,8 +878,14 @@ def run_forecasts(
             if thinning_uses_magnet
             else "Ogata thinning"
         )
+        cap_note = (
+            f", max_forecast_events={int(max_forecast_events)}"
+            if max_forecast_events is not None
+            else ""
+        )
         print(
-            f"Stage: running {thinning_label} catalog continuation (seed={seed})...",
+            f"Stage: running {thinning_label} catalog continuation "
+            f"(seed={seed}{cap_note})...",
             flush=True,
         )
         np.random.seed(seed)
@@ -861,6 +900,7 @@ def run_forecasts(
             filter_polygon=True,
             magnitude_generator=thinning_magnitude_generator,
             a_h_resolution=a_h_resolution,
+            max_forecast_events=max_forecast_events,
         )
         thinning_cont["time"] = pd.to_datetime(
             thinning_cont["time"],
@@ -884,7 +924,16 @@ def run_forecasts(
                 thinning_catalog["is_background"].astype(bool), "background", "triggered"
             )
         print(
-            f"Stage: thinning continuation finished ({len(thinning_catalog)} forecast events)",
+            f"Stage: thinning continuation finished ({len(thinning_catalog)} forecast events"
+            + (
+                f"; capped at max_forecast_events={int(max_forecast_events)}"
+                if (
+                    max_forecast_events is not None
+                    and len(thinning_cont) >= int(max_forecast_events)
+                )
+                else ""
+            )
+            + ")",
             flush=True,
         )
     return etas_catalog, thinning_catalog
