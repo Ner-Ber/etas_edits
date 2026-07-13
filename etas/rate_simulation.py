@@ -209,15 +209,42 @@ def sample_background_location(poly: Polygon):
             return lat, lon
 
 
-def sample_aftershock_location(H: dict, params: dict):
-    r = _simulation_module().simulate_aftershock_radius(
-        params["log10_d"], params["gamma"], params["rho"], [H["m"]], params["m_c"]
-    )[0]
-    angle = np.random.uniform(0, 2 * np.pi)
-    km_per_lat, km_per_lon = utility_functions.km_per_degree_at_latitude(H["y"])
-    lat = H["y"] + (r * np.cos(angle)) / km_per_lat
-    lon = H["x"] + (r * np.sin(angle)) / km_per_lon
-    return float(lat), float(lon)
+def sample_aftershock_location(
+    H: dict,
+    params: dict,
+    *,
+    max_tries: int = 1000,
+):
+    """Sample an offspring location from the parent spatial kernel.
+
+    Retries when the planar km→degree map yields non-finite or non-geographic
+    coordinates (``|lat|>90`` / ``|lon|>180``). That can happen after extreme
+    parent magnitudes produce huge radii; without a guard, MAGNET/UTM then
+    returns NaNs and Kumaraswamy sampling crashes.
+    """
+    for _attempt in range(int(max_tries)):
+        r = _simulation_module().simulate_aftershock_radius(
+            params["log10_d"], params["gamma"], params["rho"], [H["m"]], params["m_c"]
+        )[0]
+        angle = np.random.uniform(0, 2 * np.pi)
+        km_per_lat, km_per_lon = utility_functions.km_per_degree_at_latitude(H["y"])
+        if (
+            (not np.isfinite(km_per_lat))
+            or (not np.isfinite(km_per_lon))
+            or km_per_lat <= 0
+            or abs(km_per_lon) < 1e-6
+        ):
+            continue
+        lat = H["y"] + (r * np.cos(angle)) / km_per_lat
+        lon = H["x"] + (r * np.sin(angle)) / km_per_lon
+        if (
+            np.isfinite(lat)
+            and np.isfinite(lon)
+            and abs(lat) <= 90.0
+            and abs(lon) <= 180.0
+        ):
+            return float(lat), float(lon)
+    return float(H["y"]), float(H["x"])
 
 
 def thinning_next_event_time(intensity_fn, t0, t_end):
