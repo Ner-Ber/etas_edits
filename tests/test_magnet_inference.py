@@ -318,6 +318,29 @@ def test_catalog_domain_unpickler_redirect(monkeypatch) -> None:
     assert cls is sentinel
 
 
+def test_magnitude_from_normalized_inverse_of_training_map() -> None:
+    shift, stretch = 2.5, 7.0
+    for mag in (2.5, 3.0, 5.5, 9.5):
+        normalized = (mag - shift) / stretch
+        assert magnet_inference_cache.magnitude_from_normalized(
+            normalized, shift=shift, stretch=stretch
+        ) == pytest.approx(mag)
+
+
+def test_pdf_support_stretch_from_gin_default_and_bound(monkeypatch) -> None:
+    gin = pytest.importorskip("gin")
+
+    monkeypatch.setattr(
+        gin,
+        "query_parameter",
+        lambda key: (_ for _ in ()).throw(ValueError("unbound")),
+    )
+    assert magnet_inference_cache.pdf_support_stretch_from_gin() == 7.0
+
+    monkeypatch.setattr(gin, "query_parameter", lambda key: 9)
+    assert magnet_inference_cache.pdf_support_stretch_from_gin() == 9.0
+
+
 def test_get_magnet_generator_session_singleton(tmp_path) -> None:
     pytest.importorskip("tf_keras")
     import etas.magnet_inference as magnet_inference
@@ -367,3 +390,49 @@ def test_resolve_thinning_magnitude_generator_simulate_magnitudes(monkeypatch) -
 
     generator = cat_cmp.resolve_thinning_magnitude_generator()
     assert generator is sentinel
+
+
+def test_prediction_sidecar_flush_row_aligns(tmp_path) -> None:
+    """Opt-in buffer flush writes npz aligned by event_index (TF-free)."""
+    import numpy as np
+
+    rows = [
+        {
+            "event_index": 0,
+            "time": 100,
+            "longitude": -118.0,
+            "latitude": 34.0,
+            "magnitude": 3.5,
+            "model_prediction": np.array([0.1, 0.2, 0.3]),
+        },
+        {
+            "event_index": 1,
+            "time": 200,
+            "longitude": -117.0,
+            "latitude": 35.0,
+            "magnitude": 4.1,
+            "model_prediction": np.array([0.4, 0.5, 0.6]),
+        },
+    ]
+    run_dir = tmp_path / "seed_0"
+    dest = magnet_inference_cache.prediction_sidecar_path(run_dir)
+    path = magnet_inference_cache.write_prediction_sidecar(dest, rows)
+    assert path is not None
+    assert path.is_file()
+    data = np.load(path, allow_pickle=False)
+    assert list(data["event_index"]) == [0, 1]
+    assert list(data["magnitude"]) == pytest.approx([3.5, 4.1])
+    assert data["model_prediction"].shape == (2, 3)
+
+
+def test_prediction_recording_env_enables(monkeypatch) -> None:
+    monkeypatch.delenv("MAGNET_PREDICTIONS_PATH", raising=False)
+    assert not magnet_inference_cache.prediction_recording_enabled({})
+    assert magnet_inference_cache.prediction_recording_enabled(
+        {"save_predictions": True}
+    )
+    monkeypatch.setenv("MAGNET_PREDICTIONS_PATH", "/tmp/magnet_preds.npz")
+    assert magnet_inference_cache.prediction_recording_enabled({})
+    path = magnet_inference_cache.prediction_sidecar_path("/unused")
+    assert path.name == "magnet_preds.npz"
+

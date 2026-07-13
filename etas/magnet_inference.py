@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from pathlib import Path
 
 os.environ.setdefault("TF_USE_LEGACY_KERAS", "1")
@@ -17,15 +18,31 @@ from eq_mag_prediction.forecasting import forecasts
 from eq_mag_prediction.forecasting import metrics
 from eq_mag_prediction.forecasting import one_region_model
 from eq_mag_prediction.utilities import geometry
+from tqdm import tqdm
 
 import etas.magnet_inference_cache as magnet_inference_cache
 
 logger = logging.getLogger(__name__)
 
 _SESSIONS: dict[str, MagnetInferenceSession] = {}
+# Opt-in sidecar for mixture params (config magnet.save_predictions / MAGNET_PREDICTIONS_PATH).
+_RECORD_PREDICTIONS = False
 
 feature_cache_dir = magnet_inference_cache.feature_cache_dir
 load_original_domain = magnet_inference_cache.load_original_domain
+magnitude_from_normalized = magnet_inference_cache.magnitude_from_normalized
+pdf_support_stretch_from_gin = magnet_inference_cache.pdf_support_stretch_from_gin
+prediction_recording_enabled = magnet_inference_cache.prediction_recording_enabled
+prediction_sidecar_path = magnet_inference_cache.prediction_sidecar_path
+
+
+def configure_prediction_recording(*, enabled: bool) -> None:
+    """Enable/disable per-event ``model_prediction`` buffering on all sessions."""
+    global _RECORD_PREDICTIONS
+    _RECORD_PREDICTIONS = bool(enabled)
+    if not _RECORD_PREDICTIONS:
+        for session in _SESSIONS.values():
+            session.clear_prediction_buffer()
 
 
 def _prepare_earthquakes_catalog(history: pd.DataFrame) -> pd.DataFrame:
@@ -46,6 +63,9 @@ def _prepare_earthquakes_catalog(history: pd.DataFrame) -> pd.DataFrame:
 
 def _sample_from_model_prediction(
     model_prediction: np.ndarray,
+    *,
+    shift: float,
+    stretch: float,
     statistic: str = "sample",
 ) -> float:
     pdf_inst = metrics.kumaraswamy_mixture_instance(model_prediction)
@@ -56,10 +76,11 @@ def _sample_from_model_prediction(
     elif statistic == "mode":
         result = pdf_inst.mode()
     elif statistic == "median":
-        return float(pdf_inst.median())
+        result = pdf_inst.median()
     else:
         raise ValueError(f"Invalid statistic: {statistic}")
-    return float(result.numpy()[0].item())
+    normalized = float(result.numpy()[0].item())
+    return magnitude_from_normalized(normalized, shift=shift, stretch=stretch)
 
 
 class MagnetInferenceSession:
@@ -78,6 +99,20 @@ class MagnetInferenceSession:
         self.original_domain = None
         self.scalers = None
         self.location_scalers = None
+        self.magnitude_shift: float | None = None
+        self.pdf_support_stretch: float | None = None
+        self._prediction_buffer: list[dict] = []
+
+    def clear_prediction_buffer(self) -> None:
+        self._prediction_buffer.clear()
+
+    def flush_prediction_buffer(self, dest: str | Path) -> Path | None:
+        """Write buffered predictions to ``dest`` (``.npz``) and clear the buffer."""
+        path = magnet_inference_cache.write_prediction_sidecar(
+            dest, self._prediction_buffer
+        )
+        self.clear_prediction_buffer()
+        return path
 
     def warm(self, *, force_recalculate: bool = False) -> None:
         if self._warmed and not force_recalculate:
@@ -99,6 +134,14 @@ class MagnetInferenceSession:
         if gin_config_path.is_file():
             print(f"  Loading gin config from {gin_config_path}", flush=True)
             gin.parse_config_file(str(gin_config_path), skip_unknown=True)
+
+        self.magnitude_shift = float(self.original_domain.magnitude_threshold)
+        self.pdf_support_stretch = pdf_support_stretch_from_gin()
+        print(
+            "  MAGNET magnitude support: "
+            f"shift={self.magnitude_shift}, stretch={self.pdf_support_stretch}",
+            flush=True,
+        )
 
         print("  Building MAGNET encoders", flush=True)
         all_encoders = one_region_model.build_encoders(self.original_domain)
@@ -153,6 +196,10 @@ class MagnetInferenceSession:
         """
         if not self._warmed:
             self.warm()
+        if self.magnitude_shift is None or self.pdf_support_stretch is None:
+            raise RuntimeError(
+                "MAGNET session missing magnitude shift/stretch; call warm() first"
+            )
 
         available_history = magnet_inference_cache.build_available_history(
             catalog,
@@ -188,8 +235,18 @@ class MagnetInferenceSession:
         sorted_indices = np.argsort(times)
         sorted_times = times[sorted_indices]
         sorted_locations = locations[sorted_indices]
-        sampled_magnitudes: list[float] = []
-        for time_value, location in zip(sorted_times, sorted_locations):
+        sampled_magnitudes: list[float] = [0.0] * len(sorted_indices)
+        record = _RECORD_PREDICTIONS
+        n_events = len(sorted_indices)
+        event_iter = tqdm(
+            zip(sorted_indices, sorted_times, sorted_locations),
+            total=n_events,
+            desc="MAGNET predictions",
+            unit="event",
+            file=sys.stderr,
+            disable=n_events < 2,
+        )
+        for orig_i, time_value, location in event_iter:
             model_prediction = forecasts.create_altered_prediction_single_loc(
                 evaluation_time=time_value,
                 loc=geometry.Point(lng=location[0], lat=location[1]),
@@ -200,9 +257,25 @@ class MagnetInferenceSession:
             )
             sampled_magnitude = _sample_from_model_prediction(
                 model_prediction,
+                shift=self.magnitude_shift,
+                stretch=self.pdf_support_stretch,
                 statistic="sample",
             )
-            sampled_magnitudes.append(sampled_magnitude)
+            sampled_magnitudes[int(orig_i)] = sampled_magnitude
+            if record:
+                pred_arr = np.asarray(model_prediction)
+                if hasattr(pred_arr, "numpy"):
+                    pred_arr = pred_arr.numpy()
+                self._prediction_buffer.append(
+                    {
+                        "event_index": int(orig_i),
+                        "time": int(time_value),
+                        "longitude": float(location[0]),
+                        "latitude": float(location[1]),
+                        "magnitude": float(sampled_magnitude),
+                        "model_prediction": np.asarray(pred_arr, dtype=float).reshape(-1),
+                    }
+                )
             earthquakes_catalog = domain.earthquakes_catalog.copy()
             earthquakes_catalog.loc[
                 (earthquakes_catalog["time"] == time_value)
@@ -278,3 +351,17 @@ def warm_magnet_session(
 def clear_magnet_sessions() -> None:
     """Clear in-process session cache (mainly for tests)."""
     _SESSIONS.clear()
+
+
+def flush_magnet_predictions_for_model(
+    model_dir: str | Path | None,
+    run_dir: str | Path,
+) -> Path | None:
+    """Flush the session buffer for ``model_dir`` into the realization sidecar."""
+    if not _RECORD_PREDICTIONS or model_dir is None:
+        return None
+    key = str(Path(model_dir).expanduser().resolve())
+    session = _SESSIONS.get(key)
+    if session is None:
+        return None
+    return session.flush_prediction_buffer(prediction_sidecar_path(run_dir))
