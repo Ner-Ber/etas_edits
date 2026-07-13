@@ -259,3 +259,223 @@ def test_example_config_methods_valid() -> None:
     methods = mod.normalize_methods(cfg["methods"])
     magnet = mod.magnet_section(cfg)
     mod.validate_magnet_for_methods(methods, magnet)
+
+
+def test_apply_magnet_prediction_cli(monkeypatch, tmp_path: Path) -> None:
+    import os
+
+    mod = _load_runner()
+    monkeypatch.delenv("MAGNET_PREDICTIONS_PATH", raising=False)
+    cfg = {"magnet": {"mode": "load", "save_predictions": False}}
+    magnet = mod.magnet_section(cfg)
+    assert magnet["save_predictions"] is False
+
+    mod.apply_magnet_prediction_cli(magnet, cfg, save_predictions=True)
+    assert magnet["save_predictions"] is True
+    assert cfg["magnet"]["save_predictions"] is True
+
+    dest = tmp_path / "preds.npz"
+    mod.apply_magnet_prediction_cli(magnet, cfg, predictions_path=dest)
+    assert os.environ["MAGNET_PREDICTIONS_PATH"] == str(dest.resolve())
+
+
+def test_resolve_magnet_projection_from_region() -> None:
+    mod = _load_runner()
+    assert (
+        mod.resolve_magnet_projection({}, {"region": "california"})
+        == "@california_projection()"
+    )
+    assert (
+        mod.resolve_magnet_projection({"region": "japan"}, {})
+        == "@japan_projection()"
+    )
+    assert (
+        mod.resolve_magnet_projection(
+            {},
+            {"region": "california", "projection": "@italy_projection()"},
+        )
+        == "@italy_projection()"
+    )
+
+
+def test_resolve_magnet_projection_missing_raises() -> None:
+    mod = _load_runner()
+    with pytest.raises(ValueError, match="region"):
+        mod.resolve_magnet_projection({}, {})
+    with pytest.raises(ValueError, match="Unknown region"):
+        mod.resolve_magnet_projection({}, {"region": "atlantis"})
+
+
+def test_assert_magnet_mc_matches_etas_ok_and_mismatch() -> None:
+    mod = _load_runner()
+    mod.assert_magnet_mc_matches_etas(
+        etas_mc=3.6, magnet_mc=3.6, source="test"
+    )
+    mod.assert_magnet_mc_matches_etas(
+        etas_mc=3.6, magnet_mc=None, source="test"
+    )
+    with pytest.raises(ValueError, match="disagrees"):
+        mod.assert_magnet_mc_matches_etas(
+            etas_mc=3.6, magnet_mc=2.5, source="test"
+        )
+
+
+def test_prepare_magnet_catalog_for_magnet_template_preserves_depth(
+    tmp_path: Path,
+) -> None:
+    mod = _load_runner()
+    src = tmp_path / "src.csv"
+    src.write_text(
+        "time,latitude,longitude,magnitude,depth\n"
+        "2,34,-118,4.0,12.5\n"
+        "1,34,-118,3.5,8.0\n",
+        encoding="utf-8",
+    )
+    dest = tmp_path / "prepared.csv"
+    mod.prepare_magnet_catalog_for_magnet_template(src, dest)
+    text = dest.read_text(encoding="utf-8")
+    assert "12.5" in text
+    assert "8.0" in text
+    # Sorted by time: depth 8.0 then 12.5
+    lines = text.strip().splitlines()
+    assert "8.0" in lines[1]
+    assert "12.5" in lines[2]
+
+
+def test_apply_overrides_errors_without_region_or_projection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mod = _load_runner()
+    repo = Path(__file__).resolve().parents[1]
+    template = (repo / "config" / "magnet_hauksson_template.gin").read_text(
+        encoding="utf-8"
+    )
+    work = tmp_path / "working_magnet.gin"
+    work.write_text(template, encoding="utf-8")
+    catalog = tmp_path / "example_catalog.csv"
+    catalog.write_text(
+        "latitude,longitude,time,magnitude,depth\n"
+        "34.0,-118.0,2017-01-02 00:00:00,4.0,5.0\n",
+        encoding="utf-8",
+    )
+
+    class _FakePipeline:
+        @staticmethod
+        def _dt_string_to_epoch_seconds_utc(dt_str: str) -> int:
+            import datetime as _dt
+
+            return int(
+                _dt.datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+                .replace(tzinfo=_dt.timezone.utc)
+                .timestamp()
+            )
+
+        @staticmethod
+        def _find_or_create_magnet_catalog(*, source_catalog_path, source_format):
+            return Path(source_catalog_path)
+
+        @staticmethod
+        def parse_gin_config(content: str) -> dict:
+            return {"bindings": {"catalog": "@hauksson_dataframe()"}}
+
+        @staticmethod
+        def _read_text_file(path: str) -> str:
+            return Path(path).read_text(encoding="utf-8")
+
+        @staticmethod
+        def _parse_gin_catalog_binding(binding: str):
+            return "hauksson_dataframe", None, None
+
+        @staticmethod
+        def _default_filename_for_data_utils_function(function_name: str):
+            return "csv_path", f"{function_name}.csv"
+
+        @staticmethod
+        def update_gin_parameters(gin_path: str, params_dict: dict):
+            return None
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "MAGNET_ETAS_pipeline", _FakePipeline)
+    cfg = {
+        "fn_catalog": str(catalog),
+        "timewindow_start": "2017-01-01 00:00:00",
+        "timewindow_end": "2018-10-01 00:00:00",
+        "testwindow_end": "2019-10-01 00:00:00",
+        "mc": 3.6,
+    }
+    with pytest.raises(ValueError, match="region"):
+        mod.apply_continuation_overrides_to_magnet_gin(
+            work,
+            cfg,
+            repo_root=tmp_path,
+            magnet={},
+            catalog_work_dir=tmp_path,
+        )
+
+
+def test_apply_overrides_mc_mismatch_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mod = _load_runner()
+    work = tmp_path / "working_magnet.gin"
+    work.write_text(
+        "catalog = @hauksson_dataframe()\n"
+        "CatalogDomain.user_magnitude_threshold = 2.5\n"
+        "RecentEarthquakesEncoder.use_depth_as_feature = True\n",
+        encoding="utf-8",
+    )
+    catalog = tmp_path / "example_catalog.csv"
+    catalog.write_text(
+        "latitude,longitude,time,magnitude,depth\n"
+        "34.0,-118.0,2017-01-02 00:00:00,4.0,5.0\n",
+        encoding="utf-8",
+    )
+
+    class _FakePipeline:
+        @staticmethod
+        def _dt_string_to_epoch_seconds_utc(dt_str: str) -> int:
+            return 1
+
+        @staticmethod
+        def _find_or_create_magnet_catalog(*, source_catalog_path, source_format):
+            return Path(source_catalog_path)
+
+        @staticmethod
+        def parse_gin_config(content: str) -> dict:
+            return {"bindings": {"catalog": "@hauksson_dataframe()"}}
+
+        @staticmethod
+        def _read_text_file(path: str) -> str:
+            return Path(path).read_text(encoding="utf-8")
+
+        @staticmethod
+        def _parse_gin_catalog_binding(binding: str):
+            return "hauksson_dataframe", None, None
+
+        @staticmethod
+        def _default_filename_for_data_utils_function(function_name: str):
+            return "csv_path", f"{function_name}.csv"
+
+        @staticmethod
+        def update_gin_parameters(gin_path: str, params_dict: dict):
+            raise AssertionError("should not update when mc mismatches")
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "MAGNET_ETAS_pipeline", _FakePipeline)
+    cfg = {
+        "fn_catalog": str(catalog),
+        "timewindow_start": "2017-01-01 00:00:00",
+        "timewindow_end": "2018-10-01 00:00:00",
+        "testwindow_end": "2019-10-01 00:00:00",
+        "mc": 3.6,
+    }
+    with pytest.raises(ValueError, match="disagrees"):
+        mod.apply_continuation_overrides_to_magnet_gin(
+            work,
+            cfg,
+            repo_root=tmp_path,
+            magnet={"region": "california"},
+            catalog_work_dir=tmp_path,
+        )

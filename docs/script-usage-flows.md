@@ -97,6 +97,32 @@ python runnable_code/run_continuation_models.py \
   --methods thinning,thinning_magnet --force-rerun
 ```
 
+### MAGNET train / load notes (continuation runner)
+
+- **Template:** default `config/magnet_hauksson_template.gin` (Hauksson-sourced file name; MAGNET-style overlays apply to any region). Short smoke: `config/continuation_models_config_short.json` (sets `magnet.epochs`, `region`).
+- **Region → projection** (required when `magnet.projection` omitted; no silent California default):
+
+  | `region` | gin binding |
+  |----------|-------------|
+  | `california` | `@california_projection()` |
+  | `japan` | `@japan_projection()` |
+  | `nz` / `new_zealand` | `@nz_projection()` |
+  | `italy` | `@italy_projection()` |
+
+  Explicit `magnet.projection` overrides. Missing both → `ValueError`.
+- **`mc` policy:** continuation JSON `mc` and MAGNET `CatalogDomain.user_magnitude_threshold` must match. Mismatch → `ValueError` unless `magnet.allow_mc_mismatch=true` (escape hatch; emits a warning). Unset gin threshold is OK; JSON `mc` is written on train.
+- **Catalog prepare:** `prepare_magnet_catalog_for_magnet_template` ensures `depth` + sorted `time`. Upstream `convert_etas_to_magnet` (eq_mag_prediction_clean) always writes a `depth` column (ETAS values when present, else `default_depth_km`) and sorts; the runner still prepares/validates.
+- **Trainer output:** absolute `--output_dir` is honored; experiment is `…/magnet/<id>/_repetition_0/` (`model/` + `domain`). No search under `trained_models` or cwd-relative `home/…`.
+- **Prediction sidecar (opt-in):** `magnet.save_predictions: true`, env `MAGNET_PREDICTIONS_PATH`, and/or CLI `--save-magnet-predictions` / `--magnet-predictions-path`. Writes `magnet_predictions.npz` next to `forecast_catalog.csv` (time, lon, lat, magnitude, `model_prediction`). Off by default; magnitude API unchanged.
+
+**Short train smoke:**
+
+```bash
+python runnable_code/run_continuation_models.py \
+  --config config/continuation_models_config_short.json \
+  --methods etas,thinning_magnet
+```
+
 ---
 
 ## Compare / ensemble family

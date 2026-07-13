@@ -40,8 +40,15 @@ import continuation_compare as compare
 _DEFAULT_CONFIG = "config/continuation_models_config.json"
 _DEFAULT_MAGNET_GIN = "config/magnet_hauksson_template.gin"
 _DEFAULT_VAL_TO_TRAIN_RATIO = 0.75
-_DEFAULT_MAGNET_PROJECTION = "@california_projection()"
 _DEFAULT_MAGNET_DEPTH_KM = 0.0
+# region key (lowercased) → gin projection binding. Explicit magnet.projection wins.
+_REGION_TO_MAGNET_PROJECTION: dict[str, str] = {
+    "california": "@california_projection()",
+    "japan": "@japan_projection()",
+    "nz": "@nz_projection()",
+    "new_zealand": "@nz_projection()",
+    "italy": "@italy_projection()",
+}
 _CONTINUATION_METHODS = ens.CONTINUATION_METHODS
 _FORECAST_CATALOG_NAME = ens._FORECAST_CATALOG_NAME
 _REALIZATION_META_KEYS = ens._REALIZATION_META_KEYS
@@ -69,17 +76,20 @@ def _gin_raw_truthy(raw: str | None, default: bool = False) -> bool:
     return raw.strip().lower() in ("true", "1", "yes")
 
 
-def prepare_magnet_catalog_for_hauksson_template(
+def prepare_magnet_catalog_for_magnet_template(
     source_magnet_csv: pathlib.Path,
     dest_csv: pathlib.Path,
     *,
     default_depth_km: float = _DEFAULT_MAGNET_DEPTH_KM,
 ) -> pathlib.Path:
     """
-    Write a MAGNET catalog that satisfies the Hauksson-style encoder template.
+    Write a MAGNET catalog that satisfies MAGNET-style encoder requirements.
 
-    ETAS→MAGNET conversion only emits time/lat/lon/magnitude and may be unsorted.
-    RecentEarthquakesEncoder (use_depth_as_feature=True) needs a depth column.
+    Upstream ETAS→MAGNET conversion already writes time/lat/lon/magnitude/depth
+    (sorted); older conversions may omit depth or be unsorted. This helper
+    preserves existing ``depth`` values when present, else fills with
+    ``default_depth_km``. RecentEarthquakesEncoder (use_depth_as_feature=True)
+    needs a depth column.
     """
     df = pd.read_csv(source_magnet_csv)
     missing_core = [
@@ -101,6 +111,10 @@ def prepare_magnet_catalog_for_hauksson_template(
     return dest_csv.resolve()
 
 
+# Backward-compatible alias (pre-rename: Hauksson-style wording).
+prepare_magnet_catalog_for_hauksson_template = prepare_magnet_catalog_for_magnet_template
+
+
 def validate_magnet_catalog_for_gin(
     gin_path: pathlib.Path,
     catalog_csv: pathlib.Path,
@@ -108,7 +122,7 @@ def validate_magnet_catalog_for_gin(
     """
     Preflight: fail fast with all schema gaps vs gin encoder flags.
 
-    Catches Hauksson-template vs ETAS-catalog mismatches before the MAGNET
+    Catches MAGNET-template vs ETAS-catalog mismatches before the MAGNET
     feature subprocess (which only reports the first AttributeError).
     """
     flat = _flat_gin_assignments(gin_path)
@@ -127,7 +141,7 @@ def validate_magnet_catalog_for_gin(
     if use_depth and "depth" not in columns:
         problems.append(
             "missing column 'depth' but RecentEarthquakesEncoder.use_depth_as_feature "
-            "is True (Hauksson template). ETAS→MAGNET catalogs need depth filled in."
+            "is True (MAGNET template). ETAS→MAGNET catalogs need depth filled in."
         )
 
     add_angles = _gin_raw_truthy(flat.get("_mock_earthquake.add_angles"), default=False)
@@ -151,6 +165,93 @@ def validate_magnet_catalog_for_gin(
             f"({gin_path}):\n  - {joined}\n"
             f"Catalog: {catalog_csv}"
         )
+
+
+def resolve_magnet_projection(cfg: dict, magnet: dict) -> str:
+    """
+    Resolve ``_project_utm.projection`` from explicit ``magnet.projection`` or region.
+
+    Mapping (region → gin binding)::
+
+      california → @california_projection()
+      japan      → @japan_projection()
+      nz / new_zealand → @nz_projection()
+      italy      → @italy_projection()
+
+    Raises ValueError if neither projection nor a known region is set (no silent
+    California default).
+    """
+    explicit = magnet.get("projection")
+    if explicit is not None and str(explicit).strip():
+        return str(explicit).strip()
+
+    region_raw = magnet.get("region")
+    if region_raw is None:
+        region_raw = cfg.get("region")
+    if region_raw is None or not str(region_raw).strip():
+        known = ", ".join(sorted(_REGION_TO_MAGNET_PROJECTION))
+        raise ValueError(
+            "MAGNET train requires magnet.projection or region "
+            f"(known regions: {known}). "
+            "Example: set \"region\": \"california\" or "
+            "\"magnet\": {\"projection\": \"@california_projection()\"}. "
+            "No silent California default."
+        )
+    key = str(region_raw).strip().lower()
+    if key not in _REGION_TO_MAGNET_PROJECTION:
+        known = ", ".join(sorted(_REGION_TO_MAGNET_PROJECTION))
+        raise ValueError(
+            f"Unknown region {region_raw!r} for MAGNET projection. "
+            f"Known regions: {known}. Or set magnet.projection explicitly."
+        )
+    return _REGION_TO_MAGNET_PROJECTION[key]
+
+
+def _parse_optional_gin_float(raw: str | None) -> float | None:
+    if raw is None:
+        return None
+    text = raw.strip()
+    if not text or text.lower() in ("none", "null"):
+        return None
+    return float(text)
+
+
+def assert_magnet_mc_matches_etas(
+    *,
+    etas_mc: float,
+    magnet_mc: float | None,
+    source: str,
+    allow_mismatch: bool = False,
+) -> None:
+    """
+    Policy: continuation JSON ``mc`` and MAGNET completeness must be identical.
+
+    A MAGNET-side value of None/unset is OK (JSON ``mc`` will be written). A
+    numeric MAGNET value that disagrees with ``etas_mc`` raises ValueError unless
+    ``allow_mismatch`` / ``magnet.allow_mc_mismatch`` is True (escape hatch only).
+    """
+    if magnet_mc is None:
+        return
+    if abs(float(etas_mc) - float(magnet_mc)) <= 1e-9:
+        return
+    msg = (
+        f"MAGNET magnitude completeness ({magnet_mc}) from {source} disagrees with "
+        f"continuation mc ({etas_mc}). Thinning+MAGNET and classic ETAS must share "
+        "the same cutoff. Fix the gin/model or the JSON mc; set "
+        "magnet.allow_mc_mismatch=true only if you intentionally accept a mismatch."
+    )
+    if allow_mismatch:
+        warnings.warn(msg, UserWarning, stacklevel=2)
+        return
+    raise ValueError(msg)
+
+
+def magnet_mc_from_gin(gin_path: pathlib.Path) -> float | None:
+    """Read ``CatalogDomain.user_magnitude_threshold`` from a gin file if set."""
+    flat = _flat_gin_assignments(gin_path)
+    return _parse_optional_gin_float(
+        flat.get("CatalogDomain.user_magnitude_threshold")
+    )
 
 
 def normalize_methods(raw) -> tuple[str, ...]:
@@ -183,11 +284,41 @@ def magnet_section(cfg: dict) -> dict:
         "gin_config_path": section.get("gin_config_path"),
         "general_gin_config_path": section.get("general_gin_config_path"),
         "projection": section.get("projection"),
+        "region": section.get("region"),
         "val_to_train_time_ratio": section.get("val_to_train_time_ratio"),
         "catalog_format": section.get("catalog_format"),
         "catalog_loader": section.get("catalog_loader"),
         "default_depth_km": section.get("default_depth_km"),
+        "allow_mc_mismatch": bool(section.get("allow_mc_mismatch", False)),
+        "save_predictions": bool(section.get("save_predictions", False)),
+        "epochs": section.get("epochs"),
+        "batch_size": section.get("batch_size"),
     }
+
+
+def apply_magnet_prediction_cli(
+    magnet: dict,
+    cfg: dict,
+    *,
+    save_predictions: bool = False,
+    predictions_path: pathlib.Path | None = None,
+) -> None:
+    """Apply ``--save-magnet-predictions`` / ``--magnet-predictions-path`` overrides.
+
+    Mutates ``magnet`` and ``cfg['magnet']`` in place. A path sets
+    ``MAGNET_PREDICTIONS_PATH`` (also enables recording).
+    """
+    if save_predictions:
+        magnet["save_predictions"] = True
+        section = cfg.get("magnet")
+        if isinstance(section, dict):
+            section["save_predictions"] = True
+        else:
+            cfg["magnet"] = {"save_predictions": True}
+    if predictions_path is not None:
+        os.environ["MAGNET_PREDICTIONS_PATH"] = str(
+            predictions_path.expanduser().resolve()
+        )
 
 
 def validate_magnet_for_methods(methods: tuple[str, ...], magnet: dict) -> None:
@@ -259,8 +390,9 @@ def apply_continuation_overrides_to_magnet_gin(
       catalog, _project_utm.projection,
       train_start_time, validation_start_time, test_start_time, test_end_time
 
-    Also prepares a Hauksson-encoder-ready MAGNET CSV (adds depth if missing,
-    sorts by time) and preflight-validates it against gin encoder flags.
+    Also prepares a MAGNET-encoder-ready CSV (adds depth if missing, sorts by
+    time), checks ``mc`` vs any gin threshold, and preflight-validates the
+    catalog against gin encoder flags.
 
     Returns the prepared catalog path bound into the gin.
     """
@@ -273,7 +405,7 @@ def apply_continuation_overrides_to_magnet_gin(
         if val_ratio_raw is not None
         else _DEFAULT_VAL_TO_TRAIN_RATIO
     )
-    projection = magnet.get("projection") or _DEFAULT_MAGNET_PROJECTION
+    projection = resolve_magnet_projection(cfg, magnet)
     catalog_format = str(
         magnet.get("catalog_format") or cfg.get("catalog_format") or "etas"
     ).strip().lower()
@@ -297,7 +429,7 @@ def apply_continuation_overrides_to_magnet_gin(
     )
 
     work_dir = catalog_work_dir or gin_path.parent
-    prepared_catalog = prepare_magnet_catalog_for_hauksson_template(
+    prepared_catalog = prepare_magnet_catalog_for_magnet_template(
         magnet_catalog,
         work_dir / "magnet_catalog_prepared.csv",
         default_depth_km=default_depth,
@@ -324,6 +456,14 @@ def apply_continuation_overrides_to_magnet_gin(
                 func_name
             )
 
+    if cfg.get("mc") is not None:
+        assert_magnet_mc_matches_etas(
+            etas_mc=float(cfg["mc"]),
+            magnet_mc=magnet_mc_from_gin(gin_path),
+            source=f"gin {gin_path}",
+            allow_mismatch=bool(magnet.get("allow_mc_mismatch", False)),
+        )
+
     # Absolute path so look_for_file finds the prepared working copy.
     updates = {
         "catalog": f"@{func_name}()",
@@ -341,6 +481,14 @@ def apply_continuation_overrides_to_magnet_gin(
         updates["hauksson_dataframe.clean_columns"] = False
     if cfg.get("mc") is not None:
         updates["CatalogDomain.user_magnitude_threshold"] = float(cfg["mc"])
+    if magnet.get("epochs") is not None:
+        updates["train_and_evaluate_magnitude_prediction_model.epochs"] = int(
+            magnet["epochs"]
+        )
+    if magnet.get("batch_size") is not None:
+        updates["train_and_evaluate_magnitude_prediction_model.batch_size"] = int(
+            magnet["batch_size"]
+        )
 
     pipeline.update_gin_parameters(str(gin_path), updates)
     validate_magnet_catalog_for_gin(gin_path, prepared_catalog)
@@ -372,6 +520,23 @@ def resolve_magnet_model_dir(
             raise FileNotFoundError(
                 "magnet.model_dir has no trained Keras model subdirectory "
                 f"'model/' (feature caches alone are not enough): {model_dir}"
+            )
+        if cfg.get("mc") is not None:
+            gin_cfg = model_dir / "config.gin"
+            magnet_mc = magnet_mc_from_gin(gin_cfg) if gin_cfg.is_file() else None
+            if magnet_mc is None:
+                # Fall back to pickled domain threshold when config.gin omits it.
+                domain_path = model_dir / "domain"
+                if domain_path.exists():
+                    import etas.magnet_inference_cache as magnet_inference_cache
+
+                    domain = magnet_inference_cache.load_original_domain(domain_path)
+                    magnet_mc = float(domain.magnitude_threshold)
+            assert_magnet_mc_matches_etas(
+                etas_mc=float(cfg["mc"]),
+                magnet_mc=magnet_mc,
+                source=f"loaded model {model_dir}",
+                allow_mismatch=bool(magnet.get("allow_mc_mismatch", False)),
             )
         return model_dir
 
@@ -490,6 +655,23 @@ def main(argv: list[str] | None = None) -> int:
         help="Re-run ETAS inversion even if cached parameters exist.",
     )
     parser.add_argument(
+        "--save-magnet-predictions",
+        action="store_true",
+        help=(
+            "Write magnet_predictions.npz next to each forecast catalog "
+            "(sets magnet.save_predictions; off by default)."
+        ),
+    )
+    parser.add_argument(
+        "--magnet-predictions-path",
+        type=pathlib.Path,
+        default=None,
+        help=(
+            "Sidecar file or directory (sets MAGNET_PREDICTIONS_PATH; "
+            "also enables recording)."
+        ),
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -513,6 +695,12 @@ def main(argv: list[str] | None = None) -> int:
         cfg.get("methods", list(_CONTINUATION_METHODS))
     )
     magnet = magnet_section(cfg)
+    apply_magnet_prediction_cli(
+        magnet,
+        cfg,
+        save_predictions=bool(args.save_magnet_predictions),
+        predictions_path=args.magnet_predictions_path,
+    )
     validate_magnet_for_methods(methods, magnet)
 
     if args.seed is not None:
@@ -551,6 +739,13 @@ def main(argv: list[str] | None = None) -> int:
         repo_root=repo_root,
         output_root=output_root,
     )
+
+    if "thinning_magnet" in methods:
+        import etas.magnet_inference as magnet_inference
+
+        magnet_inference.configure_prediction_recording(
+            enabled=magnet_inference.prediction_recording_enabled(magnet),
+        )
 
     inversion_config = {
         "fn_catalog": str(catalog_path),
@@ -682,6 +877,15 @@ def main(argv: list[str] | None = None) -> int:
                 etas_catalog, thinning_catalog, method
             )
             ens.save_realization_outputs(run_dir, forecast_catalog, expected)
+            if method == "thinning_magnet" and magnet_model_dir is not None:
+                import etas.magnet_inference as magnet_inference
+
+                sidecar = magnet_inference.flush_magnet_predictions_for_model(
+                    magnet_model_dir,
+                    run_dir,
+                )
+                if sidecar is not None:
+                    print(f"  seed={seed}: MAGNET predictions → {sidecar}", flush=True)
             n_ran += 1
             print(f"  seed={seed}: {len(forecast_catalog)} events", flush=True)
 

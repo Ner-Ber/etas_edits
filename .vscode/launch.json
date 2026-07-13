@@ -79,7 +79,8 @@
                 "--config",
                 "${workspaceFolder}/config/continuation_models_config_short.json",
                 "--methods",
-                "etas,thinning_magnet"
+                "etas,thinning_magnet",
+                "--force-rerun"
             ],
             "console": "integratedTerminal",
             "env": {

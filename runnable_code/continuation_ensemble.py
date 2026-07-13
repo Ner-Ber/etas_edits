@@ -304,6 +304,17 @@ def apply_cli_overrides(
         out["ensemble_output_dir"] = str(_resolve_path(repo_root, args.output_dir))
     if args.thinning_model_dir is not None:
         out["thinning_model_dir"] = str(_resolve_path(repo_root, args.thinning_model_dir))
+    if getattr(args, "save_magnet_predictions", False):
+        magnet = out.get("magnet")
+        if not isinstance(magnet, dict):
+            magnet = {}
+            out["magnet"] = magnet
+        magnet["save_predictions"] = True
+    predictions_path = getattr(args, "magnet_predictions_path", None)
+    if predictions_path is not None:
+        os.environ["MAGNET_PREDICTIONS_PATH"] = str(
+            pathlib.Path(predictions_path).expanduser().resolve()
+        )
     return out
 
 
@@ -367,6 +378,23 @@ def main(argv: list[str] | None = None) -> int:
         "--force-rerun",
         action="store_true",
         help="Re-run all requested realizations even if cached catalogs exist.",
+    )
+    parser.add_argument(
+        "--save-magnet-predictions",
+        action="store_true",
+        help=(
+            "Write magnet_predictions.npz next to each forecast catalog "
+            "(sets magnet.save_predictions; off by default)."
+        ),
+    )
+    parser.add_argument(
+        "--magnet-predictions-path",
+        type=pathlib.Path,
+        default=None,
+        help=(
+            "Sidecar file or directory (sets MAGNET_PREDICTIONS_PATH; "
+            "also enables recording)."
+        ),
     )
     parser.add_argument(
         "--log-level",
@@ -507,6 +535,10 @@ def main(argv: list[str] | None = None) -> int:
             )
             import etas.magnet_inference as magnet_inference
 
+            magnet_section = cfg.get("magnet") if isinstance(cfg.get("magnet"), dict) else {}
+            magnet_inference.configure_prediction_recording(
+                enabled=magnet_inference.prediction_recording_enabled(magnet_section),
+            )
             magnet_inference.warm_magnet_session(
                 thin_cfg["model_dir"],
                 feature_cache_dir=cfg.get("magnet_feature_cache_dir"),
@@ -580,6 +612,13 @@ def main(argv: list[str] | None = None) -> int:
             )
             forecast_catalog = pick_forecast_catalog(etas_catalog, thinning_catalog, method)
             save_realization_outputs(run_dir, forecast_catalog, realization_meta)
+            if method == "thinning_magnet" and thin_cfg.get("model_dir"):
+                import etas.magnet_inference as magnet_inference
+
+                magnet_inference.flush_magnet_predictions_for_model(
+                    thin_cfg["model_dir"],
+                    run_dir,
+                )
             n_ran += 1
 
         print(f"  {method_label(method)}: {len(forecast_catalog)} events")
