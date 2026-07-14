@@ -12,29 +12,12 @@
 # inspired by method of Clauset et al., 2009
 ##############################################################################
 
-from eq_mag_prediction.utilities import data_utils
-from eq_mag_prediction.utilities import simulate_catalog
-from eq_mag_prediction.utilities import catalog_analysis
-from eq_mag_prediction.utilities import statistics_utils as statistics
-from eq_mag_prediction.utilities import geometry
-from eq_mag_prediction.forecasting import one_region_model
-from eq_mag_prediction.forecasting import encoders
-from eq_mag_prediction.forecasting import metrics, training_examples
-from eq_mag_prediction.forecasting import forecasts
-from eq_mag_prediction.scripts import magnitude_predictor_trainer
-# import tf_keras
-from pathlib import Path
-import tensorflow as tf
-import tensorflow_probability as tfp
+from __future__ import annotations
+
 import os
-import json
+
 import numpy as np
 import pandas as pd
-import joblib
-import gin
-import etas.magnet_inference as magnet_inference
-os.environ["TF_USE_LEGACY_KERAS"] = "1"
-# import unused for gin config
 
 # mc is the binned completeness magnitude,
 # so the 'true' completeness magnitude is mc - delta_m / 2
@@ -259,6 +242,9 @@ def estimate_mc(sample,
 
 def _sample_from_model_prediction(model_prediction: np.ndarray, statistic: str = 'sample') -> float:
     """Will use outputof prediction to construct a Kumaraswamy mixture, from which we will sample"""
+    # Heavy MAGNET/TF stack — only needed for this legacy helper path.
+    from eq_mag_prediction.forecasting import metrics
+
     pdf_inst = metrics.kumaraswamy_mixture_instance(model_prediction)
     if statistic == 'sample':
         result = pdf_inst.sample()
@@ -282,6 +268,9 @@ def MAGNET_magnitude(
         aftershock_df: pd.DataFrame | None = None,
         model_dir: str | None = None):
     """Alternative to simulate_magnitudes that uses MAGNET (delegates to magnet_inference)."""
+    # Heavy MAGNET/TF stack — import only when this generator is used.
+    import etas.magnet_inference as magnet_inference
+
     if model_dir is None:
         model_dir = os.path.join(
             '/home/neriberman/REPOS/eq_mag_pred_clean_test_20251104/results/trained_models/',
