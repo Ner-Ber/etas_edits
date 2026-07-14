@@ -40,18 +40,6 @@ Maintenance rules: `.cursor/rules/code-todo.mdc`
   - `config/continuation_models_config.json`
   - `config/continuation_models_config_short.json`
 
-### `etas-to-magnet-depth-upstream`
-- **Status:** in_progress
-- **Added:** 2026-07-10
-- **Updated:** 2026-07-13
-- **Goal:** Decide whether `convert_etas_to_magnet` (eq_mag_prediction) should write a `depth` column (and sort by time), vs keeping enrichment only in the etas runner.
-- **Context:** **Decision (2026-07-13):** implement upstream in `eq_mag_prediction_clean` — `convert_etas_to_magnet` always writes a `depth` column (copies ETAS `depth` when present; otherwise fills with `default_depth_km=0`) and sorts the full output by `time`. The etas runner still runs `prepare_magnet_catalog_for_magnet_template` as a safety net / validation prep. Mirror the same change in non-clean MAGNET checkouts if still used.
-- **Acceptance:** Written decision in this file or docs; if upstream change is chosen, implement in the owned MAGNET checkout the project uses (`eq_mag_prediction_clean`) and point the runner at it.
-- **Key paths:**
-  - `eq_mag_prediction_clean/.../ingestion/catalog_format_converter.py` (sibling repo) — updated
-  - `runnable_code/run_continuation_models.py` (`prepare_magnet_catalog_for_magnet_template`)
-  - `docs/script-usage-flows.md` (notes section)
-
 ### `decompose-magnet-etas-pipeline`
 - **Status:** open
 - **Added:** 2026-07-10
@@ -93,7 +81,7 @@ Maintenance rules: `.cursor/rules/code-todo.mdc`
 - **Added:** 2026-07-10 19:00
 - **Updated:** 2026-07-13
 - **Goal:** When training/loading MAGNET for a region that has a **native** MAGNET catalog (e.g. Hauksson), use that catalog — not an ETAS→MAGNET conversion of an ETAS export — so real columns like **depth** (and Hauksson extras) are preserved.
-- **Context:** `run_continuation_models` currently treats `fn_catalog` as ETAS by default (`catalog_format: etas`), converts via `_find_or_create_magnet_catalog`, then `prepare_magnet_catalog_for_magnet_template` may invent `depth=0` only when depth is missing (preserved when present). Native catalog mode still TODO. Related: `etas-to-magnet-depth-upstream`, `magnet-projection-from-region`.
+- **Context:** `run_continuation_models` currently treats `fn_catalog` as ETAS by default (`catalog_format: etas`), converts via `_find_or_create_magnet_catalog`, then `prepare_magnet_catalog_for_magnet_template` may invent `depth=0` only when depth is missing (preserved when present). Native catalog mode still TODO. Related: closed `etas-to-magnet-depth-upstream`, `magnet-projection-from-region`.
 - **Acceptance:**
   - Continuation JSON can point MAGNET train at a native MAGNET/Hauksson catalog path (or region default) without forcing ETAS conversion.
   - Native Hauksson path keeps real `depth` (no default-0 fill unless depth is actually missing).
@@ -104,23 +92,6 @@ Maintenance rules: `.cursor/rules/code-todo.mdc`
   - `config/continuation_models_config*.json`
   - MAGNET ingested catalogs (e.g. `.../results/catalogs/ingested/hauksson.csv`)
   - `docs/script-usage-flows.md`
-
-### `rename-hauksson-style-to-magnet-style`
-- **Status:** in_progress
-- **Added:** 2026-07-10 19:04
-- **Updated:** 2026-07-13
-- **Goal:** Rename “Hauksson-style” naming in the continuation/MAGNET train path to **“MAGNET-style”** (generic), so helpers/docs are not tied to one California catalog.
-- **Context:** Renamed `prepare_magnet_catalog_for_hauksson_template` → `prepare_magnet_catalog_for_magnet_template` (compat alias kept). Docs/CODE_TODO cross-refs updated. Template filename `magnet_hauksson_template.gin` and `hauksson_dataframe` loader names unchanged (region-specific).
-- **Acceptance:**
-  - Public helpers/docs use “magnet” / “MAGNET-style” wording; no “hauksson_style” in function names for generic prepare/validate.
-  - Call sites, tests, and `docs/CODE_TODO.md` / `docs/script-usage-flows.md` updated.
-  - Concrete Hauksson artifacts (loader name, optional template filename) remain clearly labeled as Hauksson where they are region-specific.
-- **Key paths:**
-  - `runnable_code/run_continuation_models.py`
-  - `tests/test_continuation_models_config.py`
-  - `config/magnet_hauksson_template.gin` (filename kept; MAGNET-style docs clarify)
-  - `docs/script-usage-flows.md`
-  - `docs/CODE_TODO.md` (cross-refs)
 
 ### `magnet-mc-matches-etas`
 - **Status:** in_progress
@@ -140,16 +111,39 @@ Maintenance rules: `.cursor/rules/code-todo.mdc`
   - `docs/script-usage-flows.md`
   - `tests/test_continuation_models_config.py`
 
+---
+
+## Done (keep until user asks to prune)
+
+### `etas-to-magnet-depth-upstream`
+- **Status:** done
+- **Added:** 2026-07-10
+- **Updated:** 2026-07-14
+- **Closed:** 2026-07-14 — user approved; upstream `convert_etas_to_magnet` writes `depth` + sorts by time; runner prepare remains safety net.
+- **Goal:** Decide whether `convert_etas_to_magnet` (eq_mag_prediction) should write a `depth` column (and sort by time), vs keeping enrichment only in the etas runner.
+- **Key paths:**
+  - `eq_mag_prediction_clean/.../ingestion/catalog_format_converter.py` (sibling repo)
+  - `runnable_code/run_continuation_models.py` (`prepare_magnet_catalog_for_magnet_template`)
+  - `docs/script-usage-flows.md`
+
+### `rename-hauksson-style-to-magnet-style`
+- **Status:** done
+- **Added:** 2026-07-10 19:04
+- **Updated:** 2026-07-14
+- **Closed:** 2026-07-14 — user approved; generic prepare/validate use MAGNET-style names; Hauksson-specific artifacts kept labeled.
+- **Goal:** Rename “Hauksson-style” naming in the continuation/MAGNET train path to **“MAGNET-style”** (generic), so helpers/docs are not tied to one California catalog.
+- **Key paths:**
+  - `runnable_code/run_continuation_models.py`
+  - `tests/test_continuation_models_config.py`
+  - `config/magnet_hauksson_template.gin`
+  - `docs/script-usage-flows.md`
+
 ### `magnet-trainer-output-path-resolution`
-- **Status:** in_progress
+- **Status:** done
 - **Added:** 2026-07-10 22:05
-- **Updated:** 2026-07-13
+- **Updated:** 2026-07-14
+- **Closed:** 2026-07-14 — user approved; absolute `--output_dir` preserved; no alternate-path search; clear `FileNotFoundError` on miss.
 - **Goal:** MAGNET trainer must save under the requested absolute `--output_dir` (then `_repetition_N/`); continuation code must not search alternate trees.
-- **Context:** Verified: `eq_mag_prediction_clean` `get_resource_path` + trainer preserve absolute `--output_dir`; `run_magnet_trainer_or_load` only accepts `model_dir` or `model_dir/_repetition_0` and raises a clear `FileNotFoundError` otherwise. Existing train under `outputs/continuation_models/magnet/<id>/_repetition_0/{model,domain}`. Removed orphan `runnable_code/home/...` tree (2026-07-13). Mirror fix in non-clean MAGNET checkouts if still used.
-- **Acceptance:**
-  - Fresh `magnet.mode=train` writes `model/` + `domain` under the requested `output_dir/_repetition_0/`.
-  - No reliance on `trained_models` library or `runnable_code/home/...` for continuation warm.
-  - Failure if missing under the requested path raises a clear error (no alternate-path search).
 - **Key paths:**
   - `eq_mag_prediction_clean/.../utilities/loading_utils.py` (`get_resource_path`)
   - `eq_mag_prediction_clean/.../scripts/magnitude_predictor_trainer.py`
@@ -157,63 +151,37 @@ Maintenance rules: `.cursor/rules/code-todo.mdc`
   - `runnable_code/run_continuation_models.py` (`resolve_magnet_model_dir`)
 
 ### `magnet-cache-top-level-imports`
-- **Status:** in_progress
+- **Status:** done
 - **Added:** 2026-07-13 13:31
-- **Updated:** 2026-07-13
+- **Updated:** 2026-07-14
+- **Closed:** 2026-07-14 — user approved; light deps at top-level; MAGNET/TF deferred; policy in module docstring.
 - **Goal:** Audit every import in `magnet_inference_cache.py` (top-level, `TYPE_CHECKING`, and function-local) and move/keep each per `.cursor/rules/python-imports.mdc`.
-- **Context:** Done 2026-07-13. **Import decision:**
-  - Top-level: `os`, `numpy`, `pandas`, `gin`, `pickle`, `pathlib`, `importlib`, `joblib.numpy_pickle` (normal / light deps).
-  - Deferred: `eq_mag_prediction.forecasting.training_examples` in `_catalog_domain_class` / `catalog_domain_for_inference` (heavy MAGNET/TF; rare relative to cache helpers / unit tests).
-  - Removed: `TYPE_CHECKING` pandas and function-local numpy/pandas imports.
-  - Also hosts TF-free prediction-sidecar helpers (`prediction_recording_enabled`, `write_prediction_sidecar`) used by `magnet_inference`.
-  Module docstring records the policy.
-- **Acceptance:**
-  - Written decision per import site: top-level vs deferred (and why), covering at least: `numpy`, `pandas`, `training_examples` / `_catalog_domain_class`, and any other inline imports in this file.
-  - Non-heavy deps (`numpy`, `pandas`, …) at module top; remove redundant function-local and unused `TYPE_CHECKING` imports.
-  - Heavy/optional MAGNET deps remain deferred only where the import rule’s three conditions still hold.
-  - Unit tests for this module still pass (`tests/test_magnet_inference.py`).
 - **Key paths:**
   - `etas/magnet_inference_cache.py`
   - `.cursor/rules/python-imports.mdc`
   - `tests/test_magnet_inference.py`
 
 ### `magnet-prediction-sidecar`
-- **Status:** in_progress
+- **Status:** done
 - **Added:** 2026-07-13 13:53
-- **Updated:** 2026-07-13
+- **Updated:** 2026-07-14
+- **Closed:** 2026-07-14 — user approved; opt-in sidecar via config/env; flush next to realization catalog.
 - **Goal:** Optionally save per-event MAGNET `model_prediction` vectors (from `create_altered_prediction_single_loc`) as a realization sidecar, without changing the magnitude-generator return API.
-- **Context:** Implemented opt-in via `magnet.save_predictions` and/or env `MAGNET_PREDICTIONS_PATH`. Session buffer + `flush_prediction_buffer` → `magnet_predictions.npz`. Wired in `run_continuation_models` and `continuation_ensemble` after realization save. Hot path skips buffering when disabled. Unit tests cover flush row-align and env enable.
-- **Acceptance:**
-  - Opt-in only (off by default): config key (e.g. `magnet.save_predictions`) and/or env override (e.g. `MAGNET_PREDICTIONS_PATH`).
-  - When enabled, each prediction appends to a buffer on `MagnetInferenceSession` / generator: at least time, lon, lat, sampled magnitude, `model_prediction` vector (and a stable event index if useful).
-  - Flush at realization end next to `forecast_catalog.csv` (e.g. `magnet_predictions.npz` or `.parquet`); do not dump the full vector into forecast catalog columns.
-  - Hot path unchanged when disabled (no extra I/O, no API change to `list[float]` magnitudes).
-  - Documented in `docs/script-usage-flows.md`; covered by a unit/integration test that enables the flag and asserts the sidecar exists and row-aligns with events.
 - **Key paths:**
   - `etas/magnet_inference.py` (`predict_magnitudes`, buffer/flush)
-  - `runnable_code/continuation_ensemble.py` / `run_continuation_models.py` (realization save / flush hook)
+  - `runnable_code/continuation_ensemble.py` / `run_continuation_models.py`
   - `docs/script-usage-flows.md`
   - `tests/test_magnet_inference.py`
 
 ### `thinning-progress-last-event-time`
-- **Status:** in_progress
+- **Status:** done
 - **Added:** 2026-07-13 20:15
-- **Updated:** 2026-07-13 22:05
+- **Updated:** 2026-07-14
+- **Closed:** 2026-07-14 — user approved; tqdm last/end/left for MAGNET and GR thinning.
 - **Goal:** During Ogata thinning catalog continuation (MAGNET **and** non-MAGNET), show with the progress bar the timestamp of the last generated event and the remaining time window to the forecast/test end (`simulation_end`).
-- **Context:** Implemented 2026-07-13: `tqdm` enabled for both MAGNET and GR thinning; desc is `"MAGNET thinning"` vs `"thinning"`. Each accepted event refreshes postfix via `thinning_progress_postfix` with `last` (absolute timestamp), `end` (`simulation_end`), and `left` (remaining days/hours/seconds). Unit test: `tests/test_continuation_compare.py::test_thinning_progress_postfix_last_and_remaining`. Awaiting user approval to close.
-- **Acceptance:**
-  - Progress UI enabled for thinning with and without MAGNET (not MAGNET-only).
-  - Alongside event count / rate, display (1) absolute timestamp of the last accepted generated event and (2) remaining time to `simulation_end` (and/or last-event time vs end as a clear time frame).
-  - Updates as events are accepted; does not materially slow the hot path (postfix/`set_postfix` or equivalent is fine).
-  - Desc/label distinguishes MAGNET vs GR thinning if useful; behavior otherwise identical.
 - **Key paths:**
-  - `etas/rate_simulation.py` (`simulate_catalog_continuation_thinning`, `thinning_progress_postfix`, `tqdm` loop)
+  - `etas/rate_simulation.py` (`simulate_catalog_continuation_thinning`, `thinning_progress_postfix`)
   - `tests/test_continuation_compare.py`
-  - Callers: `runnable_code/continuation_compare.py` / `continuation_ensemble.py` / `run_continuation_models.py` (no API change expected)
-
----
-
-## Done (keep until user asks to prune)
 
 ### `magnet-train-e2e`
 - **Status:** done
