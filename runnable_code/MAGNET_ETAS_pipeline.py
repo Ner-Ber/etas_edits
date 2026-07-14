@@ -21,6 +21,7 @@ import shapely
 import shapely.geometry
 
 import eq_mag_prediction.ingestion.catalog_format_converter as catalog_format_converter
+import gin_text_utils as gin_text_utils
 import eq_mag_prediction.forecasting.one_region_model as one_region_model
 import eq_mag_prediction.forecasting.training_examples as training_examples
 import eq_mag_prediction.utilities.catalog_processing as catalog_processing
@@ -1012,114 +1013,19 @@ def _ensure_etas_catalog_for_magnet_catalog(
     return os.path.relpath(etas_catalog_path, json_dir)
 
 def parse_gin_config(content: str) -> dict:
-    """
-    Parses a gin config string into a dictionary.
+    return gin_text_utils.parse_gin_config(content)
 
-    Handles:
-    - Global variables
-    - Scoped configurations (indented blocks)
-    - Function.parameter syntax
-    - Includes
-    - Python literals (tuples, lists, numbers, booleans)
-    - Gin references (@ and %)
-
-    Args:
-        content (str): The gin configuration file content.
-
-    Returns:
-        dict: A dictionary representation of the config.
-    """
-    config = {
-        'includes': [],
-        'bindings': {}
-    }
-
-    current_scope = None
-
-    # Regex to capture assignments (key = value)
-    # This handles cases where value might contain '=' (though rare in gin keys)
-    assignment_pattern = re.compile(r'^([^=]+)\s*=\s*(.*)$')
-
-    lines = content.split('\n')
-
-    for line in lines:
-        raw_line = line
-
-        # 1. Remove comments and strip whitespace
-        # We split by '#' but need to be careful not to split inside strings
-        # Simple split is usually sufficient for config files
-        if '#' in line:
-            line = line.split('#', 1)[0]
-
-        # Check for indentation to determine scope handling
-        indent_level = len(line) - len(line.lstrip())
-        stripped_line = line.strip()
-
-        if not stripped_line:
-            continue
-
-        # 2. Handle Includes
-        if stripped_line.startswith('include '):
-            # Extract filename, removing quotes
-            filename = stripped_line.split(' ', 1)[1].strip("'\"")
-            config['includes'].append(filename)
-            continue
-
-        # 3. Handle Scopes (e.g., "estimate_completeness:")
-        if stripped_line.endswith(':'):
-            current_scope = stripped_line[:-1]
-            if current_scope not in config['bindings']:
-                config['bindings'][current_scope] = {}
-            continue
-
-        # 4. Handle Resetting Scope (if indentation drops)
-        # In Gin, top-level definitions usually have 0 indentation. 
-        # Scoped definitions are indented.
-        if indent_level == 0 and not stripped_line.endswith(':'):
-            current_scope = None
-
-        # 5. Handle Assignments (key = value)
-        match = assignment_pattern.match(stripped_line)
-        if match:
-            key, value_str = match.groups()
-            key = key.strip()
-            value_str = value_str.strip()
-
-            # Attempt to parse the value into a Python type
-            parsed_value = _parse_gin_value(value_str)
-
-            if current_scope:
-                config['bindings'][current_scope][key] = parsed_value
-            else:
-                config['bindings'][key] = parsed_value
-
-    return config
 
 def _parse_gin_value(value_str: str):
-    """
-    Helper to parse string values into Python types (int, float, tuple, etc.)
-    Returns the string literal if it's a macro (%) or reference (@).
-    """
-    # Return immediately for Gin References/Macros
-    if value_str.startswith(('@', '%')):
-        return value_str
+    return gin_text_utils._parse_gin_value(value_str)
 
-    try:
-        # ast.literal_eval safely evaluates a string containing a Python literal
-        return ast.literal_eval(value_str)
-    except (ValueError, SyntaxError):
-        # Fallback: return as string if it can't be parsed (e.g., unquoted strings)
-        return value_str
 
 def _format_gin_value_for_output(val):
-    """Format a Python value for Gin config syntax."""
-    if isinstance(val, str):
-        if val.strip().startswith('%'):
-            return val
-        return f"'{val}'"
-    if isinstance(val, bool):
-        return str(val)
-    return str(val)
+    return gin_text_utils.format_gin_value_for_output(val)
+
+
+def _flatten_gin_bindings(bindings: dict) -> dict:
+    return gin_text_utils.flatten_gin_bindings(bindings)
 
 
 def _inline_gin_variable_references(gin_path: str) -> None:
@@ -1127,31 +1033,12 @@ def _inline_gin_variable_references(gin_path: str) -> None:
     Inline %variable references in a gin config file: replace each occurrence of
     'key = %var_name' with 'key = <actual_value>' and remove the redundant
     'var_name = value' definition line.
-
-    E.g. instead of:
-        _mock_earthquake.add_angles = %use_moment_angles
-        use_moment_angles = False
-    produce:
-        _mock_earthquake.add_angles = False
     """
     content = _read_text_file(gin_path)
     config = parse_gin_config(content)
-
-    def flatten_bindings(bindings):
-        """Flatten scoped bindings (scope: {key: val}) to scope.key -> val."""
-        result = {}
-        for k, v in bindings.items():
-            if isinstance(v, dict):
-                for sk, sv in v.items():
-                    result[f"{k}.{sk}"] = sv
-            else:
-                result[k] = v
-        return result
-
-    flat_bindings = flatten_bindings(config.get("bindings", {}))
+    flat_bindings = _flatten_gin_bindings(config.get("bindings", {}))
 
     def resolve_value(val, seen=None):
-        """Resolve %var references recursively."""
         if seen is None:
             seen = set()
         if isinstance(val, str) and val.strip().startswith('%'):
@@ -1163,7 +1050,6 @@ def _inline_gin_variable_references(gin_path: str) -> None:
                 return resolve_value(flat_bindings[var_name], seen)
         return val
 
-    # Find variables that are referenced via %var
     assignment_pattern = re.compile(r'^(\s*)([^#=\s]+)\s*=\s*(.*)$')
     ref_var_pattern = re.compile(r'^%([a-zA-Z_][a-zA-Z0-9_]*)\s*$')
 
@@ -1208,76 +1094,9 @@ def _inline_gin_variable_references(gin_path: str) -> None:
 
 
 def update_gin_parameters(gin_path: str, params_dict: dict):
-    """
-    Updates multiple parameters in a Gin config file based on a dictionary.
+    """Scope-aware gin text update; see gin_text_utils.update_gin_parameters."""
+    gin_text_utils.update_gin_parameters(gin_path, params_dict)
 
-    Args:
-        gin_path (str): Path to the .gin file.
-        params_dict (dict): A dictionary of {parameter_name: new_value}.
-                            e.g. {'learning_rate': 1e-3, 'target_catalog.earthquake_criterion': '@new_config'}
-    """
-
-    def format_value(val):
-        """Helper to format values for Gin syntax."""
-        if isinstance(val, str):
-            # Do not quote macros (@) or references (%)
-            if val.strip().startswith(('@', '%')):
-                return val
-            return f"'{val}'"
-        # Handle booleans - gin expects True/False without quotes
-        if isinstance(val, bool):
-            return str(val)
-        # Convert numbers/lists to string representation
-        return str(val)
-
-    # Track which keys we have successfully updated in the file
-    updated_keys = set()
-    new_lines = []
-
-    # Regex to capture: indentation, parameter name, and the rest (value + comment)
-    # Group 1: Indentation
-    # Group 2: The parameter key (matched non-greedily until the =)
-    # Group 3: The rest of the line (value and comments)
-    assignment_pattern = re.compile(r'^(\s*)([^#=\s]+)\s*=\s*(.*)$')
-
-    try:
-        with open(gin_path, 'r') as f:
-            lines = f.readlines()
-
-        for line in lines:
-            match = assignment_pattern.match(line)
-            if match:
-                indent, key_in_file, rest = match.groups()
-
-                # Check if this line's key is in our update dictionary
-                if key_in_file in params_dict:
-                    new_val_str = format_value(params_dict[key_in_file])
-
-                    # Construct new line, preserving indentation
-                    # We assume we overwrite the previous value entirely
-                    new_lines.append(f"{indent}{key_in_file} = {new_val_str}\n")
-                    updated_keys.add(key_in_file)
-                else:
-                    new_lines.append(line)
-            else:
-                new_lines.append(line)
-
-        # Append parameters that weren't found in the file
-        missing_keys = set(params_dict.keys()) - updated_keys
-        if missing_keys:
-            new_lines.append("\n# --- Parameters added by update script ---\n")
-            for key in missing_keys:
-                val_str = format_value(params_dict[key])
-                new_lines.append(f"{key} = {val_str}\n")
-                print(f"Appended new parameter: {key}")
-
-        with open(gin_path, 'w') as f:
-            f.writelines(new_lines)
-
-        print(f"Successfully updated {len(updated_keys)} parameters in {gin_path}")
-
-    except FileNotFoundError:
-        print(f"Error: File {gin_path} not found.")
 
 def update_json_parameters(json_path: str, params_dict: dict):
     """
@@ -1341,6 +1160,11 @@ def run_feature_computation(gin_path, **flags):
 
 # 2c. Train model and save it.
 
+def _trainer_hyperparams_from_gin_text(gin_path: str) -> dict:
+    """Read trainer hypers from gin text; see gin_text_utils.trainer_hyperparams_from_gin_text."""
+    return gin_text_utils.trainer_hyperparams_from_gin_text(gin_path)
+
+
 def _get_model_id_from_gin_config(gin_path: str) -> str | None:
     """
     Generate model ID from gin config without actually training.
@@ -1368,30 +1192,20 @@ def _get_model_id_from_gin_config(gin_path: str) -> str | None:
             encoder_ids.append(f'{name}_{encoder_identifier}_build_features_{build_features_identifier}')
         encoders_id = '_'.join(encoder_ids)
 
-        # Extract hyperparameters from gin config
-        try:
-            learning_rate = gin.query_parameter('train_and_evaluate_magnitude_prediction_model.learning_rate')
-        except ValueError:
-            learning_rate = None
+        # Text-level hyperparam read — does not require trainer gin registration.
+        hypers = _trainer_hyperparams_from_gin_text(gin_path)
+        learning_rate = hypers["learning_rate"]
+        batch_size = hypers["batch_size"]
+        epochs = hypers["epochs"]
+        pdf_support_stretch = hypers["pdf_support_stretch"]
+        if pdf_support_stretch is None:
+            pdf_support_stretch = 7
 
-        try:
-            batch_size = gin.query_parameter('train_and_evaluate_magnitude_prediction_model.batch_size')
-        except ValueError:
-            batch_size = None
-
-        try:
-            epochs = gin.query_parameter('train_and_evaluate_magnitude_prediction_model.epochs')
-        except ValueError:
-            epochs = None
-
-        try:
-            pdf_support_stretch = gin.query_parameter('train_and_evaluate_magnitude_prediction_model.pdf_support_stretch')
-        except ValueError:
-            pdf_support_stretch = 7  # default
-
-        # Check if we have all required parameters
         if learning_rate is None or batch_size is None or epochs is None:
-            print("ERROR: Missing required hyperparameters!")
+            print(
+                "ERROR: Missing required hyperparameters "
+                "(learning_rate / batch_size / epochs) in gin text!"
+            )
             return None
         # Generate model ID
         model_id = one_region_model.model_training_id(
