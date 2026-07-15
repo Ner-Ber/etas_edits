@@ -23,7 +23,7 @@
         "rho": 0.66
     },
     "mc": 2.4,
-    "delta_m": 0.1,
+    "delta_m": 0,
     "coppersmith_multiplier": 100,
     "seed": 0,
     "n_runs": 5,
