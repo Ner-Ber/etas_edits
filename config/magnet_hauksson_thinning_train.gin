@@ -32,12 +32,20 @@ validation_start_time = 1233664779  # 65%, February 3, 2009
 test_start_time = 1464044746        # 85%, May 23, 2016
 test_end_time = 1577832500          # 100%, January 1, 2020
 
+
+minimum_magnitude = 2.4
+
 # ==============================================================================
 # From magnitude_prediction_general.gin
 # ==============================================================================
 target_catalog:
     catalog = %catalog
     separate_repeating_times_in_catalog = True
+    earthquake_criterion = @is_in_magnitude_range
+    minimum_magnitude = %minimum_magnitude
+
+is_in_magnitude_range:
+    min_magnitude = %minimum_magnitude
 
 CatalogDomain:
     train_start_time = %train_start_time
@@ -46,7 +54,7 @@ CatalogDomain:
     test_end_time = %test_end_time
     # Kumaraswamy PDF support shift (= magnitude completeness). Continuation
     # runner overwrites this from JSON mc when present.
-    user_magnitude_threshold = None
+    user_magnitude_threshold = %minimum_magnitude
 
 build_encoders:
     include_catalog_columns = True
@@ -106,8 +114,7 @@ mag_head/tf.keras.regularizers.l1_l2.l2 = 2e-4
 # ==============================================================================
 # From hauksson.gin (local overrides after general)
 # ==============================================================================
-target_catalog:
-    earthquake_criterion = @return_entire_catalog_criterion
+
 
 train_and_evaluate_magnitude_prediction_model:
     learning_rate = 1e-4
