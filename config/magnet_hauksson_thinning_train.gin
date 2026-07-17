@@ -26,11 +26,19 @@ _project_utm.projection = @california_projection()
 # Keep False for thinning+MAGNET continuation training (native Hauksson can use True).
 use_moment_angles = False
 
-# Domain times in epoch seconds (UTC) — Hauksson.gin defaults
-train_start_time = 347155200        # 0%, 1981
-validation_start_time = 1233664779  # 65%, February 3, 2009
-test_start_time = 1464044746        # 85%, May 23, 2016
-test_end_time = 1577832500          # 100%, January 1, 2020
+# Domain times in epoch seconds (UTC) — PLACEHOLDERS only.
+# By default run_continuation_models.py overwrites these on the working copy:
+#   train_start_time      ← JSON auxiliary_start
+#   validation_start_time ← train + r*(test_start-train)
+#                           r default = Hauksson template ratio ≈ 0.79373
+#                           (override with magnet.val_to_train_time_ratio)
+#   test_start_time       ← JSON timewindow_end
+#   test_end_time         ← JSON testwindow_end
+# Opt out with magnet.override_domain_times = false in the JSON.
+train_start_time = 347155200        # placeholder; JSON auxiliary_start wins by default
+validation_start_time = 1233664779  # placeholder; template-ratio interpolate unless override off
+test_start_time = 1464044746        # placeholder; JSON timewindow_end wins by default
+test_end_time = 1577832500          # placeholder; JSON testwindow_end wins by default
 
 
 minimum_magnitude = 2.4
@@ -42,7 +50,6 @@ target_catalog:
     catalog = %catalog
     separate_repeating_times_in_catalog = True
     earthquake_criterion = @is_in_magnitude_range
-    minimum_magnitude = %minimum_magnitude
 
 is_in_magnitude_range:
     min_magnitude = %minimum_magnitude
@@ -54,7 +61,7 @@ CatalogDomain:
     test_end_time = %test_end_time
     # Kumaraswamy PDF support shift (= magnitude completeness). Continuation
     # runner overwrites this from JSON mc when present.
-    user_magnitude_threshold = %minimum_magnitude
+    user_magnitude_threshold = 2.4
 
 build_encoders:
     include_catalog_columns = True

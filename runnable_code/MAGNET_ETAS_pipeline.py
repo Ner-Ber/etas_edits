@@ -22,11 +22,11 @@ import shapely.geometry
 
 import eq_mag_prediction.ingestion.catalog_format_converter as catalog_format_converter
 import gin_text_utils as gin_text_utils
-import eq_mag_prediction.forecasting.one_region_model as one_region_model
-import eq_mag_prediction.forecasting.training_examples as training_examples
-import eq_mag_prediction.utilities.catalog_processing as catalog_processing
 import eq_mag_prediction.utilities.data_utils as data_utils
 import eq_mag_prediction.utilities.utility_functions as utility_functions
+# one_region_model / training_examples / catalog_processing pull TensorFlow (and
+# related heavy deps). Import them only inside _get_model_id_from_gin_config so
+# unit tests can load this module without TF installed.
 
 import continuation_config as continuation_config
 import etas.inversion as etas_inversion
@@ -1176,6 +1176,11 @@ def _get_model_id_from_gin_config(gin_path: str) -> str | None:
         Model ID string if successful, None if generation fails
     """
     try:
+        # Heavy MAGNET stack (TensorFlow); only needed for model-id hashing.
+        import eq_mag_prediction.forecasting.one_region_model as one_region_model
+        import eq_mag_prediction.forecasting.training_examples as training_examples
+        import eq_mag_prediction.utilities.catalog_processing as catalog_processing
+
         gin.parse_config_file(gin_path, skip_unknown=True)
         # Create domain from gin config
         domain = training_examples.CatalogDomain()
@@ -1261,10 +1266,19 @@ def _trainer_repetition_dir(model_dir: pathlib.Path, repetition: int = 0) -> pat
     return pathlib.Path(model_dir) / f"_repetition_{repetition}"
 
 
+def _remove_magnet_experiment_dir(path: pathlib.Path) -> None:
+    """Delete a MAGNET experiment tree if it exists."""
+    path = pathlib.Path(path)
+    if path.exists():
+        shutil.rmtree(path)
+        print(f"Removed existing MAGNET experiment at: {path}")
+
+
 def run_magnet_trainer_or_load(
     gin_path,
     model_dir,
     model_name=None,
+    force_retrain: bool = False,
     **flags,
 ):
     """
@@ -1278,6 +1292,12 @@ def run_magnet_trainer_or_load(
     del model_name  # unused; kept for call-site compatibility
     model_dir = pathlib.Path(model_dir).expanduser().resolve()
     experiment_dir = _trainer_repetition_dir(model_dir, 0)
+
+    if force_retrain:
+        print("force_retrain=True: removing any cached MAGNET experiment before training")
+        for candidate in (experiment_dir, model_dir):
+            if _is_complete_magnet_experiment_dir(candidate):
+                _remove_magnet_experiment_dir(candidate)
 
     if _is_complete_magnet_experiment_dir(experiment_dir):
         print(f"Skipping training. Found existing MAGNET experiment at: {experiment_dir}")

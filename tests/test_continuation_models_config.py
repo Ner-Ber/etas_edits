@@ -212,6 +212,7 @@ def test_apply_continuation_overrides_sets_required_macros(
 
     cfg = {
         "fn_catalog": str(catalog),
+        "auxiliary_start": "2016-01-01 00:00:00",
         "timewindow_start": "2017-01-01 00:00:00",
         "timewindow_end": "2018-10-01 00:00:00",
         "testwindow_end": "2019-10-01 00:00:00",
@@ -225,10 +226,22 @@ def test_apply_continuation_overrides_sets_required_macros(
         catalog_work_dir=tmp_path,
     )
     text = work.read_text(encoding="utf-8")
-    assert "train_start_time = 1483228800" in text
+    # train ← auxiliary_start (2016-01-01)
+    assert "train_start_time = 1451606400" in text
+    # test_start ← timewindow_end (2018-10-01), test_end ← testwindow_end
     assert "test_start_time = 1538352000" in text
     assert "test_end_time = 1569888000" in text
     assert "validation_start_time =" in text
+    # validation uses Hauksson-template default ratio on [train, test_start]
+    flat = mod._flat_gin_assignments(work)
+    train_e = int(flat["train_start_time"])
+    test_e = int(flat["test_start_time"])
+    val_e = int(flat["validation_start_time"])
+    expected_val = int(
+        (1.0 - mod._DEFAULT_VAL_TO_TRAIN_RATIO) * train_e
+        + mod._DEFAULT_VAL_TO_TRAIN_RATIO * test_e
+    )
+    assert val_e == expected_val
     assert "catalog = @hauksson_dataframe()" in text
     assert "magnet_catalog_prepared.csv" in text
     assert "catalog/hauksson_dataframe.clean_columns = False" in text
@@ -237,6 +250,119 @@ def test_apply_continuation_overrides_sets_required_macros(
     prepared = tmp_path / "magnet_catalog_prepared.csv"
     assert prepared.is_file()
     assert "depth" in prepared.read_text(encoding="utf-8").splitlines()[0]
+
+
+def test_apply_continuation_overrides_can_keep_gin_domain_times(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """magnet.override_domain_times=false keeps template domain macros."""
+    mod = _load_runner()
+    repo = Path(__file__).resolve().parents[1]
+    template = (repo / "config" / "magnet_hauksson_thinning_train.gin").read_text(
+        encoding="utf-8"
+    )
+    work = tmp_path / "working_magnet.gin"
+    work.write_text(template, encoding="utf-8")
+    before = {
+        k: mod._flat_gin_assignments(work)[k]
+        for k in (
+            "train_start_time",
+            "validation_start_time",
+            "test_start_time",
+            "test_end_time",
+        )
+    }
+
+    catalog = tmp_path / "example_catalog.csv"
+    catalog.write_text(
+        "latitude,longitude,time,magnitude,depth\n"
+        "34.0,-118.0,2017-01-02 00:00:00,4.0,5.0\n",
+        encoding="utf-8",
+    )
+
+    class _FakePipeline:
+        @staticmethod
+        def _dt_string_to_epoch_seconds_utc(dt_str: str) -> int:
+            import datetime as _dt
+
+            return int(
+                _dt.datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+                .replace(tzinfo=_dt.timezone.utc)
+                .timestamp()
+            )
+
+        @staticmethod
+        def _find_or_create_magnet_catalog(*, source_catalog_path, source_format):
+            return Path(source_catalog_path)
+
+        @staticmethod
+        def parse_gin_config(content: str) -> dict:
+            return {"bindings": {"catalog": "@hauksson_dataframe()"}}
+
+        @staticmethod
+        def _read_text_file(path: str) -> str:
+            return Path(path).read_text(encoding="utf-8")
+
+        @staticmethod
+        def _parse_gin_catalog_binding(binding: str):
+            return "hauksson_dataframe", None, None
+
+        @staticmethod
+        def _default_filename_for_data_utils_function(function_name: str):
+            return "csv_path", f"{function_name}.csv"
+
+        @staticmethod
+        def update_gin_parameters(gin_path: str, params_dict: dict):
+            text = Path(gin_path).read_text(encoding="utf-8")
+            for key, value in params_dict.items():
+                if isinstance(value, str) and value.startswith(("@", "%")):
+                    rendered = value
+                elif isinstance(value, str):
+                    rendered = f"'{value}'"
+                else:
+                    rendered = str(value)
+                lines = []
+                found = False
+                for line in text.splitlines(keepends=True):
+                    if line.split("=", 1)[0].strip() == key:
+                        indent = line[: len(line) - len(line.lstrip())]
+                        lines.append(f"{indent}{key} = {rendered}\n")
+                        found = True
+                    else:
+                        lines.append(line)
+                text = "".join(lines)
+                if not found:
+                    text += f"\n{key} = {rendered}\n"
+            Path(gin_path).write_text(text, encoding="utf-8")
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "MAGNET_ETAS_pipeline", _FakePipeline)
+
+    cfg = {
+        "fn_catalog": str(catalog),
+        "auxiliary_start": "2016-01-01 00:00:00",
+        "timewindow_start": "2017-01-01 00:00:00",
+        "timewindow_end": "2018-10-01 00:00:00",
+        "testwindow_end": "2019-10-01 00:00:00",
+        "mc": 2.4,
+    }
+    mod.apply_continuation_overrides_to_magnet_gin(
+        work,
+        cfg,
+        repo_root=tmp_path,
+        magnet={
+            "projection": "@california_projection()",
+            "override_domain_times": False,
+            "allow_mc_mismatch": True,
+        },
+        catalog_work_dir=tmp_path,
+    )
+    after = mod._flat_gin_assignments(work)
+    for key, value in before.items():
+        assert after[key] == value, f"{key} should keep gin value {value}, got {after[key]}"
+    # Catalog / projection still updated
+    assert "magnet_catalog_prepared.csv" in work.read_text(encoding="utf-8")
 
 
 def test_validate_magnet_catalog_reports_missing_depth(tmp_path: Path) -> None:
@@ -433,6 +559,7 @@ def test_apply_overrides_errors_without_region_or_projection(
     monkeypatch.setitem(sys.modules, "MAGNET_ETAS_pipeline", _FakePipeline)
     cfg = {
         "fn_catalog": str(catalog),
+        "auxiliary_start": "2016-01-01 00:00:00",
         "timewindow_start": "2017-01-01 00:00:00",
         "timewindow_end": "2018-10-01 00:00:00",
         "testwindow_end": "2019-10-01 00:00:00",
@@ -500,6 +627,7 @@ def test_apply_overrides_mc_mismatch_raises(
     monkeypatch.setitem(sys.modules, "MAGNET_ETAS_pipeline", _FakePipeline)
     cfg = {
         "fn_catalog": str(catalog),
+        "auxiliary_start": "2016-01-01 00:00:00",
         "timewindow_start": "2017-01-01 00:00:00",
         "timewindow_end": "2018-10-01 00:00:00",
         "testwindow_end": "2019-10-01 00:00:00",
@@ -513,3 +641,176 @@ def test_apply_overrides_mc_mismatch_raises(
             magnet={"region": "california"},
             catalog_work_dir=tmp_path,
         )
+
+
+def test_magnet_section_force_retrain() -> None:
+    mod = _load_runner()
+    assert mod.magnet_section({"magnet": {"mode": "train"}})["force_retrain"] is False
+    assert (
+        mod.magnet_section({"magnet": {"mode": "train", "force_retrain": True}})[
+            "force_retrain"
+        ]
+        is True
+    )
+
+
+def _load_magnet_pipeline():
+    """Load MAGNET_ETAS_pipeline without requiring TensorFlow at import time."""
+    import importlib.util
+    import sys
+
+    repo = Path(__file__).resolve().parents[1]
+    runnable = repo / "runnable_code"
+    if str(runnable) not in sys.path:
+        sys.path.insert(0, str(runnable))
+    path = runnable / "MAGNET_ETAS_pipeline.py"
+    spec = importlib.util.spec_from_file_location("MAGNET_ETAS_pipeline_unit", path)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _complete_magnet_experiment(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "model").mkdir()
+    (path / "domain").write_text("domain", encoding="utf-8")
+    return path
+
+
+def test_run_magnet_trainer_or_load_skips_without_force(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pipeline = _load_magnet_pipeline()
+    model_dir = tmp_path / "magnet_model"
+    experiment_dir = _complete_magnet_experiment(model_dir / "_repetition_0")
+    called: list[object] = []
+
+    monkeypatch.setattr(
+        pipeline,
+        "run_magnet_trainer",
+        lambda *args, **kwargs: called.append((args, kwargs)),
+    )
+    result = pipeline.run_magnet_trainer_or_load(
+        gin_path=str(tmp_path / "unused.gin"),
+        model_dir=model_dir,
+        force_retrain=False,
+    )
+    assert Path(result) == experiment_dir
+    assert called == []
+
+
+def test_run_magnet_trainer_or_load_force_retrain_reruns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pipeline = _load_magnet_pipeline()
+    model_dir = tmp_path / "magnet_model"
+    experiment_dir = _complete_magnet_experiment(model_dir / "_repetition_0")
+    gin_path = tmp_path / "unused.gin"
+    gin_path.write_text("# unused\n", encoding="utf-8")
+    called: list[dict] = []
+
+    def _fake_train(gin, output_dir=None, **flags):
+        called.append({"gin": gin, "output_dir": output_dir, **flags})
+        # Trainer recreates the experiment after force-delete.
+        _complete_magnet_experiment(Path(output_dir) / "_repetition_0")
+
+    monkeypatch.setattr(pipeline, "run_magnet_trainer", _fake_train)
+    result = pipeline.run_magnet_trainer_or_load(
+        gin_path=str(gin_path),
+        model_dir=model_dir,
+        force_retrain=True,
+        cache_dir="features",
+    )
+    assert Path(result) == experiment_dir
+    assert experiment_dir.is_dir()
+    assert called == [
+        {"gin": str(gin_path), "output_dir": str(model_dir.resolve()), "cache_dir": "features"}
+    ]
+
+
+def test_resolve_magnet_model_dir_passes_force_retrain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mod = _load_runner()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    out = tmp_path / "out"
+    gin_src = repo / "template.gin"
+    gin_src.write_text(
+        "catalog = @hauksson_dataframe()\n"
+        "train_and_evaluate_magnitude_prediction_model.learning_rate = 0.001\n"
+        "train_and_evaluate_magnitude_prediction_model.batch_size = 32\n"
+        "train_and_evaluate_magnitude_prediction_model.epochs = 1\n",
+        encoding="utf-8",
+    )
+    catalog = repo / "catalog.csv"
+    catalog.write_text(
+        "latitude,longitude,time,magnitude,depth\n"
+        "34.0,-118.0,2017-01-02 00:00:00,4.0,5.0\n",
+        encoding="utf-8",
+    )
+
+    feature_calls: list[dict] = []
+    train_calls: list[dict] = []
+
+    class _FakePipeline:
+        @staticmethod
+        def _get_model_id_from_gin_config(gin_path: str) -> str:
+            return "test_model"
+
+        @staticmethod
+        def run_feature_computation(gin_path, **flags):
+            feature_calls.append(dict(flags))
+
+        @staticmethod
+        def run_magnet_trainer_or_load(gin_path, model_dir, **flags):
+            train_calls.append(dict(flags))
+            exp = Path(model_dir) / "_repetition_0"
+            exp.mkdir(parents=True, exist_ok=True)
+            (exp / "model").mkdir()
+            (exp / "domain").mkdir()
+            return str(exp)
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "MAGNET_ETAS_pipeline", _FakePipeline)
+    monkeypatch.setattr(
+        mod,
+        "apply_continuation_overrides_to_magnet_gin",
+        lambda *args, **kwargs: kwargs["catalog_work_dir"] / "magnet_catalog_prepared.csv",
+    )
+
+    cfg = {
+        "fn_catalog": str(catalog),
+        "timewindow_start": "2017-01-01 00:00:00",
+        "timewindow_end": "2018-10-01 00:00:00",
+        "testwindow_end": "2019-10-01 00:00:00",
+        "mc": 3.6,
+    }
+    magnet = {
+        "mode": "train",
+        "gin_config_path": str(gin_src),
+        "region": "california",
+        "force_retrain": True,
+    }
+    result = mod.resolve_magnet_model_dir(
+        cfg=cfg,
+        magnet=magnet,
+        methods=("thinning_magnet",),
+        repo_root=repo,
+        output_root=out,
+    )
+    assert result is not None
+    assert feature_calls == [
+        {
+            "cache_dir": out / "magnet" / "test_model" / "features_scalers_encoders",
+            "force_recompute": True,
+        }
+    ]
+    assert train_calls == [
+        {
+            "cache_dir": out / "magnet" / "test_model" / "features_scalers_encoders",
+            "force_retrain": True,
+        }
+    ]

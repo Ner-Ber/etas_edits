@@ -33,9 +33,12 @@
 catalog = @hauksson_dataframe()
 # _project_utm.projection: UTM / region projection matching the catalog area.
 _project_utm.projection = @california_projection()
-# Domain times in epoch seconds (UTC). Typical map from continuation JSON:
-#   train_start_time      <- timewindow_start
-#   validation_start_time <- between timewindow_start and timewindow_end
+# Domain times in epoch seconds (UTC). Typical map from continuation JSON
+# (magnet.override_domain_times=true, default):
+#   train_start_time      <- auxiliary_start
+#   validation_start_time <- train + r*(test_start-train)
+#                           r = magnet.val_to_train_time_ratio
+#                           (default = this file's template ratio ≈ 0.79373)
 #   test_start_time       <- timewindow_end
 #   test_end_time         <- testwindow_end
 test_end_time = 1577832500

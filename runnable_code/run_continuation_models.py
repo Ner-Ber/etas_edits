@@ -39,7 +39,17 @@ import continuation_compare as compare
 
 _DEFAULT_CONFIG = "config/continuation_models_config.json"
 _DEFAULT_MAGNET_GIN = "config/magnet_hauksson_template.gin"
-_DEFAULT_VAL_TO_TRAIN_RATIO = 0.75
+# Fraction of [train_start, test_start] at which validation begins, matching
+# magnet_hauksson_template.gin macros:
+#   train=347155200, validation=1233664779, test_start=1464044746
+# → (val - train) / (test_start - train) ≈ 0.79373
+_HAUKSSON_TEMPLATE_TRAIN_START = 347155200
+_HAUKSSON_TEMPLATE_VALIDATION_START = 1233664779
+_HAUKSSON_TEMPLATE_TEST_START = 1464044746
+_DEFAULT_VAL_TO_TRAIN_RATIO = (
+    (_HAUKSSON_TEMPLATE_VALIDATION_START - _HAUKSSON_TEMPLATE_TRAIN_START)
+    / (_HAUKSSON_TEMPLATE_TEST_START - _HAUKSSON_TEMPLATE_TRAIN_START)
+)
 _DEFAULT_MAGNET_DEPTH_KM = 0.0
 # region key (lowercased) → gin projection binding. Explicit magnet.projection wins.
 _REGION_TO_MAGNET_PROJECTION: dict[str, str] = {
@@ -290,7 +300,11 @@ def magnet_section(cfg: dict) -> dict:
         "catalog_loader": section.get("catalog_loader"),
         "default_depth_km": section.get("default_depth_km"),
         "allow_mc_mismatch": bool(section.get("allow_mc_mismatch", False)),
+        # Default True: JSON timewindow_* / testwindow_end overwrite gin domain macros
+        # on the working copy. Set false to keep times from gin_config_path as-is.
+        "override_domain_times": bool(section.get("override_domain_times", True)),
         "save_predictions": bool(section.get("save_predictions", False)),
+        "force_retrain": bool(section.get("force_retrain", False)),
         "epochs": section.get("epochs"),
         "batch_size": section.get("batch_size"),
     }
@@ -384,11 +398,23 @@ def apply_continuation_overrides_to_magnet_gin(
     catalog_work_dir: pathlib.Path | None = None,
 ) -> pathlib.Path:
     """
-    Overlay the six required MAGNET macros from the continuation JSON.
+    Overlay required MAGNET macros from the continuation JSON onto ``gin_path``
+    (the working copy under ``magnet_generated/``, never the user template).
 
-    Updates (pipeline-compatible):
-      catalog, _project_utm.projection,
-      train_start_time, validation_start_time, test_start_time, test_end_time
+    Always updates:
+      catalog, _project_utm.projection, CatalogDomain.user_magnitude_threshold (if mc),
+      optional magnet.epochs / magnet.batch_size
+
+    Domain times (default — ``magnet.override_domain_times`` is True unless set false)::
+      train_start_time      ← JSON auxiliary_start
+      validation_start_time ← interpolated on [train_start, test_start] with
+                              magnet.val_to_train_time_ratio
+                              (default = Hauksson template ratio ≈ 0.79373)
+      test_start_time       ← JSON timewindow_end
+      test_end_time         ← JSON testwindow_end
+
+    Set ``magnet.override_domain_times: false`` to keep the times already written
+    in ``gin_config_path`` (the values at the top of the template stay as-is).
 
     Also prepares a MAGNET-encoder-ready CSV (adds depth if missing, sorts by
     time), checks ``mc`` vs any gin threshold, and preflight-validates the
@@ -399,6 +425,7 @@ def apply_continuation_overrides_to_magnet_gin(
     import MAGNET_ETAS_pipeline as pipeline
 
     magnet = magnet or {}
+    override_domain_times = bool(magnet.get("override_domain_times", True))
     val_ratio_raw = magnet.get("val_to_train_time_ratio")
     val_ratio = (
         float(val_ratio_raw)
@@ -414,9 +441,16 @@ def apply_continuation_overrides_to_magnet_gin(
         float(depth_raw) if depth_raw is not None else _DEFAULT_MAGNET_DEPTH_KM
     )
 
-    train_start = pipeline._dt_string_to_epoch_seconds_utc(cfg["timewindow_start"])
+    if "auxiliary_start" not in cfg:
+        raise KeyError(
+            "continuation config missing 'auxiliary_start' (required for MAGNET "
+            "train_start_time when override_domain_times is true)"
+        )
+    train_start = pipeline._dt_string_to_epoch_seconds_utc(cfg["auxiliary_start"])
     test_start = pipeline._dt_string_to_epoch_seconds_utc(cfg["timewindow_end"])
     test_end = pipeline._dt_string_to_epoch_seconds_utc(cfg["testwindow_end"])
+    # validation_start = train + r * (test_start - train), same as
+    # (1-r)*train + r*test_start with r = val_to_train_time_ratio.
     validation_start = int((1.0 - val_ratio) * train_start + val_ratio * test_start)
 
     catalog_path = compare._resolve_path(repo_root, cfg["fn_catalog"])
@@ -469,11 +503,40 @@ def apply_continuation_overrides_to_magnet_gin(
         "catalog": f"@{func_name}()",
         f"{func_name}.{file_param_name}": str(prepared_catalog),
         "_project_utm.projection": projection,
-        "train_start_time": train_start,
-        "validation_start_time": validation_start,
-        "test_start_time": test_start,
-        "test_end_time": test_end,
     }
+    if override_domain_times:
+        updates.update(
+            {
+                "train_start_time": train_start,
+                "validation_start_time": validation_start,
+                "test_start_time": test_start,
+                "test_end_time": test_end,
+            }
+        )
+        print(
+            "MAGNET working gin: overriding domain times from continuation JSON "
+            f"(override_domain_times=true)\n"
+            f"  train_start_time      ← auxiliary_start={cfg['auxiliary_start']!r} "
+            f"→ {train_start}\n"
+            f"  validation_start_time ← val_to_train_time_ratio={val_ratio:.6f} "
+            f"on [train, test_start] → {validation_start}\n"
+            f"  test_start_time       ← timewindow_end={cfg['timewindow_end']!r} "
+            f"→ {test_start}\n"
+            f"  test_end_time         ← testwindow_end={cfg['testwindow_end']!r} "
+            f"→ {test_end}",
+            flush=True,
+        )
+    else:
+        gin_times = _flat_gin_assignments(gin_path)
+        print(
+            "MAGNET working gin: keeping domain times from gin template "
+            f"(override_domain_times=false)\n"
+            f"  train_start_time={gin_times.get('train_start_time')}, "
+            f"validation_start_time={gin_times.get('validation_start_time')}, "
+            f"test_start_time={gin_times.get('test_start_time')}, "
+            f"test_end_time={gin_times.get('test_end_time')}",
+            flush=True,
+        )
     # Native Hauksson CSVs have year/month/… columns; ETAS→MAGNET does not.
     # Template uses the catalog/ scope (catalog = @hauksson_dataframe()).
     if func_name == "hauksson_dataframe" and catalog_format == "etas":
@@ -564,13 +627,19 @@ def resolve_magnet_model_dir(
     features_dir = model_dir / "features_scalers_encoders"
     features_dir.mkdir(parents=True, exist_ok=True)
 
+    force_retrain = bool(magnet.get("force_retrain", False))
+    feature_flags = {"cache_dir": features_dir}
+    if force_retrain:
+        feature_flags["force_recompute"] = True
+
     print(f"Stage: MAGNET feature computation ({work_gin})", flush=True)
-    pipeline.run_feature_computation(str(work_gin), cache_dir=features_dir)
+    pipeline.run_feature_computation(str(work_gin), **feature_flags)
     print(f"Stage: MAGNET train or load → {model_dir}", flush=True)
     model_dir_str = pipeline.run_magnet_trainer_or_load(
         str(work_gin),
         model_dir,
         cache_dir=features_dir,
+        force_retrain=force_retrain,
     )
     return pathlib.Path(model_dir_str)
 
@@ -658,6 +727,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Re-run ETAS inversion even if cached parameters exist.",
     )
     parser.add_argument(
+        "--force-magnet-retrain",
+        action="store_true",
+        help=(
+            "Re-compute MAGNET features and re-train even if a complete model "
+            "exists under the output magnet directory."
+        ),
+    )
+    parser.add_argument(
         "--save-magnet-predictions",
         action="store_true",
         help=(
@@ -730,6 +807,13 @@ def main(argv: list[str] | None = None) -> int:
         cfg["n_runs"] = int(args.n_runs)
     if args.force_inversion:
         cfg["force_inversion"] = True
+    if args.force_magnet_retrain:
+        magnet["force_retrain"] = True
+        section = cfg.get("magnet")
+        if isinstance(section, dict):
+            section["force_retrain"] = True
+        else:
+            cfg["magnet"] = {"force_retrain": True}
     force_rerun = bool(args.force_rerun or cfg.get("force_rerun", False))
 
     output_root = compare._resolve_path(
