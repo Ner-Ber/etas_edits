@@ -436,3 +436,30 @@ def test_prediction_recording_env_enables(monkeypatch) -> None:
     path = magnet_inference_cache.prediction_sidecar_path("/unused")
     assert path.name == "magnet_preds.npz"
 
+
+
+def test_incremental_encoders_enabled_default(monkeypatch) -> None:
+    import etas.magnet_encoder_incremental as magnet_encoder_incremental
+
+    monkeypatch.delenv("MAGNET_INCREMENTAL_ENCODERS", raising=False)
+    assert magnet_encoder_incremental.incremental_encoders_enabled()
+    monkeypatch.setenv("MAGNET_INCREMENTAL_ENCODERS", "0")
+    assert not magnet_encoder_incremental.incremental_encoders_enabled()
+
+
+def test_prepare_encoder_catalog_sorts_and_adds_depth() -> None:
+    import pandas as pd
+
+    import etas.magnet_encoder_incremental as magnet_encoder_incremental
+
+    raw = pd.DataFrame(
+        {
+            "time": [pd.Timestamp("2001-01-01"), pd.Timestamp("2000-01-01")],
+            "latitude": [35.0, 34.0],
+            "longitude": [-120.0, -119.0],
+            "magnitude": [3.0, 2.5],
+        }
+    )
+    catalog = magnet_encoder_incremental.prepare_encoder_catalog(raw)
+    assert catalog.iloc[0]["magnitude"] == 2.5
+    assert "depth" in catalog.columns
