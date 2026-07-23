@@ -34,6 +34,8 @@ import warnings
 import pandas as pd
 from shapely.geometry import Polygon
 
+import etas.utility_functions as utility_functions
+
 import continuation_ensemble as ens
 import continuation_compare as compare
 
@@ -973,6 +975,7 @@ def main(argv: list[str] | None = None) -> int:
                 continue
 
             print(f"  seed={seed}: simulating → {run_dir}", flush=True)
+            utility_functions.seed_forecast_rng(seed)
             etas_catalog, thinning_catalog = compare.run_forecasts(
                 etas_inversion=etas_inversion,
                 history_df=history_df,

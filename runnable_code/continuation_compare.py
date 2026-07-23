@@ -834,7 +834,7 @@ def run_forecasts(
             f"Stage: running classic ETAS catalog continuation (seed={seed})...",
             flush=True,
         )
-        np.random.seed(seed)
+        utility_functions.seed_forecast_rng(seed)
         etas_cont = simulation.simulate_catalog_continuation(
             auxiliary_catalog=auxiliary_catalog,
             auxiliary_start=auxiliary_start_dt,
@@ -888,7 +888,7 @@ def run_forecasts(
             f"(seed={seed}{cap_note})...",
             flush=True,
         )
-        np.random.seed(seed)
+        utility_functions.seed_forecast_rng(seed)
         thinning_cont = rate_simulation.simulate_catalog_continuation_thinning(
             auxiliary_catalog=auxiliary_catalog,
             auxiliary_end=forecast_start_dt,

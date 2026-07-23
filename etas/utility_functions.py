@@ -209,3 +209,19 @@ def aftershock_radius_from_uniform(log10_d, gamma, rho, mi, mc, y_r):
     d = np.power(10, log10_d)
     d_g = d * np.exp(gamma * (mi - mc))
     return np.sqrt(np.power(1 - y_r, -1 / rho) * d_g - d_g)
+
+
+def seed_forecast_rng(seed: int, *, tensorflow: bool = True) -> None:
+    """Seed NumPy and (when available) TensorFlow RNGs for forecast continuation.
+
+    Ogata thinning uses ``np.random``; MAGNET Kumaraswamy magnitude sampling uses
+    TensorFlow. Both must be seeded for reproducible thinning+MAGNET realizations.
+    """
+    np.random.seed(int(seed))
+    if not tensorflow:
+        return
+    try:
+        import tensorflow as tf
+    except ImportError:
+        return
+    tf.random.set_seed(int(seed))
