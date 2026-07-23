@@ -1,0 +1,49 @@
+{
+    "catalogs": [
+        {
+            "id": "hauksson",
+            "base_config": "config/hauksson_continuation_models_config.json",
+            "magnet_gin_config_path": "config/magnet_hauksson_thinning_train.gin"
+        },
+        {
+            "id": "california",
+            "base_config": "config/continuation_models_config.json",
+            "magnet_gin_config_path": "config/magnet_hauksson_template.gin"
+        }
+    ],
+    "magnet_variants": [
+        {
+            "id": "all_depth",
+            "encoder_filter": "all_events",
+            "use_depth_as_feature": true
+        },
+        {
+            "id": "all_nodepth",
+            "encoder_filter": "all_events",
+            "use_depth_as_feature": false
+        },
+        {
+            "id": "mc_depth",
+            "encoder_filter": "above_mc",
+            "use_depth_as_feature": true
+        },
+        {
+            "id": "mc_nodepth",
+            "encoder_filter": "above_mc",
+            "use_depth_as_feature": false
+        }
+    ],
+    "shared_methods": ["etas", "thinning"],
+    "variant_methods": ["thinning_magnet"],
+    "matrix_output_root": "outputs/benchmark_matrix",
+    "parallel": {
+        "max_workers": 4,
+        "max_train_workers": 1
+    },
+    "smoke_overrides": {
+        "n_runs": 1,
+        "max_forecast_events": 200,
+        "magnet.epochs": 1,
+        "magnet.post_train_report": false
+    }
+}

@@ -19,6 +19,7 @@ ASCII diagrams render in Cursor/VS Code markdown preview (no Mermaid required).
 | Prepare Hauksson catalog/polygon/config | `prepare_hauksson_inputs.py` | writes `config/hauksson_catalog_config.json` |
 | Classic invert only | `invert_etas.py` | `config/invert_etas_config*.json` |
 | Classic continuation only | `simulate_catalog_continuation.py` | `config/simulate_catalog_continuation_config*.json` |
+| **MAGNET benchmark matrix** (multi-catalog × encoder variants) | **`benchmark_matrix.py`** | `config/benchmark_matrix.json` |
 
 Legacy wrappers (same as the generic scripts):
 
@@ -256,7 +257,57 @@ outputs/catalog_etas_vs_thinning/     # compare / ensemble defaults
 
 outputs/inversions/                   # MAGNET_ETAS_pipeline
 outputs/continuation/<model>_<inv>_<mode>/
+
+outputs/benchmark_matrix/<run_id>/    # benchmark_matrix.py
+  configs/                            # derived continuation JSON per job
+  logs/<job_id>.log
+  jobs.sh / jobs.jsonl / matrix_manifest.json
+  <catalog>/shared/                   # etas + thinning (once per catalog)
+  <catalog>/variants/<variant_id>/    # magnet train + thinning_magnet + reports/
 ```
+
+---
+
+## MAGNET benchmark matrix
+
+**Script:** `runnable_code/benchmark_matrix.py`  
+**Manifest:** `config/benchmark_matrix.json`
+
+Runs Hauksson + California with four MAGNET encoder variants each:
+
+- `encoder_filter`: `all_events` | `above_mc`
+- `use_depth_as_feature`: `true` | `false`
+
+Per catalog: one **shared** job (`etas`, `thinning`) then four **variant** jobs (`thinning_magnet` train + forecast + post-train report).
+
+**Launch modes:**
+
+```bash
+# Print commands + write jobs.sh
+python runnable_code/benchmark_matrix.py --dry-run --run-id 20260723
+
+# Run-and-forget (phased: shared → variants)
+python runnable_code/benchmark_matrix.py --execute --run-id 20260723 \
+  --max-workers 4 --max-train-workers 1
+
+# Detached tmux session (one pane per job)
+python runnable_code/benchmark_matrix.py --tmux-session benchmark_20260723 --run-id 20260723
+# or: ./scripts/launch_benchmark_matrix_tmux.sh 20260723
+
+# Smoke (magnet.epochs=2, n_runs=1 from manifest)
+python runnable_code/benchmark_matrix.py --execute --run-id smoke --smoke
+```
+
+**Continuation JSON keys** (via `magnet` block, applied in `run_continuation_models.py`):
+
+| Key | Purpose |
+|-----|---------|
+| `encoder_filter` | `all_events` or `above_mc` (uses JSON `mc` for min magnitude) |
+| `use_depth_as_feature` | `true` / `false` → gin `RecentEarthquakesEncoder.use_depth_as_feature` |
+| `post_train_report` | Default `true` when `mode=train`; runs `magnet_model_report.py` |
+| `inversion_output_dir` | Variant jobs reuse shared inversion cache (set by matrix runner) |
+
+Post-train reports land in `<variant_output_root>/reports/` (provenance JSON, executed notebook, HTML/PDF).
 
 ---
 
