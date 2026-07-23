@@ -6,7 +6,7 @@
     "fn_catalog": "input_data/etas_converted_hauksson.csv",
     "shape_coords": "input_data/hauksson_polygon_from_notebook.npy",
     "region": "california",
-    "output_root": "outputs/hauksson_continuation_models",
+    "output_root": "outputs/hauksson_magnet_sample_continuation_models",
     "auxiliary_start": "1981-01-01 00:00:00",
     "timewindow_start": "2009-02-03 00:00:00",
     "timewindow_end": "2016-05-23 23:05:46",
@@ -39,6 +39,8 @@
         "gin_config_path": "config/magnet_hauksson_thinning_train.gin",
         "general_gin_config_path": null,
         "region": "california",
-        "save_predictions": false
+        "save_predictions": false,
+        "prediction_statistics": "sample",
+        "override_domain_times": true
     }
 }
