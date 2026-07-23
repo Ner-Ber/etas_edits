@@ -64,11 +64,34 @@
                 "ETAS_KERNEL_SAMPLES_LOG": "${workspaceFolder}/outputs/pipeline_continuation_trace_logs/vscode_classic_debug/run_classic_kernel_samples.json",
                 "MPLBACKEND": "TkAgg"
             }
-        }
+        },
+        {
+            "name": "MAGNET trainer: continuation_models (captured)",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/bin/python",
+            "pythonArgs": [
+                "-u"
+            ],
+            "program": "/a/home/cc/students/csguests/neriberman/Repos/eq_mag_prediction/eq_mag_prediction_clean/eq_mag_prediction/scripts/magnitude_predictor_trainer.py",
+            "cwd": "${workspaceFolder}/runnable_code",
+            "args": [
+                "--gin_config=${workspaceFolder}/outputs/continuation_models/magnet_generated/working_magnet.gin",
+                "--output_dir=${workspaceFolder}/outputs/continuation_models/magnet/model_253f53506a8314624ad6e9f95e2f275e4b1f567e",
+                "--cache_dir=${workspaceFolder}/outputs/continuation_models/magnet/model_253f53506a8314624ad6e9f95e2f275e4b1f567e/features_scalers_encoders"
+            ],
+            "console": "integratedTerminal",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/runnable_code:/a/home/cc/students/csguests/neriberman/Repos/eq_mag_prediction/eq_mag_prediction_clean",
+                "LD_LIBRARY_PATH": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/lib",
+                "MPLBACKEND": "TkAgg"
+            }
+        },
         {
             "name": "Continuation models: etas + thinning_magnet (short)",
             "type": "debugpy",
             "request": "launch",
+            "subProcess": true,
             "python": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/bin/python",
             "pythonArgs": [
                 "-u"
@@ -77,10 +100,17 @@
             "cwd": "${workspaceFolder}",
             "args": [
                 "--config",
-                "${workspaceFolder}/config/continuation_models_config_short.json",
+                "${workspaceFolder}/config/hauksson_continuation_models_config.json",
                 "--methods",
-                "etas,thinning_magnet",
-                "--force-rerun"
+                // "etas,thinning_magnet",
+                "thinning_magnet",
+                "--force-rerun",
+                "--force-magnet-retrain",
+                "--max-forecast-events",
+                "2300",
+                "--save-magnet-predictions",
+                "--n-runs",
+                "1"
             ],
             "console": "integratedTerminal",
             "env": {
