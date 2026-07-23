@@ -814,3 +814,120 @@ def test_resolve_magnet_model_dir_passes_force_retrain(
             "force_retrain": True,
         }
     ]
+
+
+def test_normalize_encoder_filter_aliases() -> None:
+    mod = _load_runner()
+    assert mod.normalize_encoder_filter("all_events") == "all_events"
+    assert mod.normalize_encoder_filter("above_mc") == "above_mc"
+    assert mod.normalize_encoder_filter("mc") == "above_mc"
+    with pytest.raises(ValueError, match="encoder_filter"):
+        mod.normalize_encoder_filter("invalid")
+
+
+def test_magnet_section_post_train_report_defaults() -> None:
+    mod = _load_runner()
+    assert mod.magnet_section({"magnet": {"mode": "train"}})["post_train_report"] is True
+    assert mod.magnet_section({"magnet": {"mode": "load"}})["post_train_report"] is False
+    assert (
+        mod.magnet_section({"magnet": {"mode": "train", "post_train_report": False}})[
+            "post_train_report"
+        ]
+        is False
+    )
+
+
+def test_apply_encoder_filter_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mod = _load_runner()
+    repo = Path(__file__).resolve().parents[1]
+    template = (repo / "config" / "magnet_hauksson_template.gin").read_text(
+        encoding="utf-8"
+    )
+    work = tmp_path / "working_magnet.gin"
+    work.write_text(template, encoding="utf-8")
+    catalog = tmp_path / "example_catalog.csv"
+    catalog.write_text(
+        "latitude,longitude,time,magnitude,depth\n"
+        "34.0,-118.0,2017-01-02 00:00:00,4.0,5.0\n",
+        encoding="utf-8",
+    )
+
+    class _FakePipeline:
+        @staticmethod
+        def _dt_string_to_epoch_seconds_utc(dt_str: str) -> int:
+            import datetime as _dt
+
+            return int(
+                _dt.datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+                .replace(tzinfo=_dt.timezone.utc)
+                .timestamp()
+            )
+
+        @staticmethod
+        def _find_or_create_magnet_catalog(*, source_catalog_path, source_format):
+            return Path(source_catalog_path)
+
+        @staticmethod
+        def parse_gin_config(content: str) -> dict:
+            return {"bindings": {"catalog": "@hauksson_dataframe()"}}
+
+        @staticmethod
+        def _read_text_file(path: str) -> str:
+            return Path(path).read_text(encoding="utf-8")
+
+        @staticmethod
+        def _parse_gin_catalog_binding(binding: str):
+            return "hauksson_dataframe", None, None
+
+        @staticmethod
+        def _default_filename_for_data_utils_function(function_name: str):
+            return "csv_path", f"{function_name}.csv"
+
+        @staticmethod
+        def update_gin_parameters(gin_path: str, params_dict: dict):
+            text = Path(gin_path).read_text(encoding="utf-8")
+            for key, value in params_dict.items():
+                if isinstance(value, str) and value.startswith(("@", "%")):
+                    rendered = value
+                elif isinstance(value, str):
+                    rendered = f"'{value}'"
+                elif isinstance(value, bool):
+                    rendered = "True" if value else "False"
+                else:
+                    rendered = str(value)
+                text += f"\n{key} = {rendered}\n"
+            Path(gin_path).write_text(text, encoding="utf-8")
+
+        @staticmethod
+        def _inline_gin_variable_references(gin_path: str) -> None:
+            return None
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "MAGNET_ETAS_pipeline", _FakePipeline)
+    cfg = {
+        "fn_catalog": str(catalog),
+        "auxiliary_start": "2016-01-01 00:00:00",
+        "timewindow_start": "2017-01-01 00:00:00",
+        "timewindow_end": "2018-10-01 00:00:00",
+        "testwindow_end": "2019-10-01 00:00:00",
+        "mc": 3.6,
+    }
+    mod.apply_continuation_overrides_to_magnet_gin(
+        work,
+        cfg,
+        repo_root=tmp_path,
+        magnet={
+            "region": "california",
+            "encoder_filter": "above_mc",
+            "use_depth_as_feature": False,
+        },
+        catalog_work_dir=tmp_path,
+    )
+    text = work.read_text(encoding="utf-8")
+    assert "target_catalog.earthquake_criterion = @is_in_magnitude_range" in text
+    assert "is_in_magnitude_range.min_magnitude = 3.6" in text
+    assert "RecentEarthquakesEncoder.use_depth_as_feature = False" in text
+
