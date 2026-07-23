@@ -20,6 +20,7 @@ from eq_mag_prediction.forecasting import one_region_model
 from eq_mag_prediction.utilities import geometry
 from tqdm import tqdm
 
+import etas.magnet_encoder_incremental as magnet_encoder_incremental
 import etas.magnet_inference_cache as magnet_inference_cache
 
 logger = logging.getLogger(__name__)
@@ -102,6 +103,10 @@ class MagnetInferenceSession:
         self.magnitude_shift: float | None = None
         self.pdf_support_stretch: float | None = None
         self._prediction_buffer: list[dict] = []
+        self.all_encoders = None
+        self._incremental_state: magnet_encoder_incremental.IncrementalEncoderState | None = (
+            None
+        )
 
     def clear_prediction_buffer(self) -> None:
         self._prediction_buffer.clear()
@@ -145,6 +150,7 @@ class MagnetInferenceSession:
 
         print("  Building MAGNET encoders", flush=True)
         all_encoders = one_region_model.build_encoders(self.original_domain)
+        self.all_encoders = all_encoders
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         print(
             f"  Computing MAGNET feature/scaler cache at {self.cache_dir}"
@@ -220,10 +226,88 @@ class MagnetInferenceSession:
                     f"history_max={int(np.max(hist_times))})"
                 )
 
-        earthquakes_catalog = _prepare_earthquakes_catalog(available_history)
         times, locations = magnet_inference_cache.aftershock_times_and_locations(
             aftershock_df
         )
+        sorted_indices = np.argsort(times)
+        sorted_times = times[sorted_indices]
+        sorted_locations = locations[sorted_indices]
+        sampled_magnitudes: list[float] = [0.0] * len(sorted_indices)
+        record = _RECORD_PREDICTIONS
+        n_events = len(sorted_indices)
+        use_incremental = (
+            magnet_encoder_incremental.incremental_encoders_enabled()
+            and self.all_encoders is not None
+        )
+
+        if use_incremental:
+            if self._incremental_state is None:
+                self._incremental_state = (
+                    magnet_encoder_incremental.IncrementalEncoderState(
+                        self.all_encoders
+                    )
+                )
+            base_history = catalog if catalog is not None else pd.DataFrame()
+            self._incremental_state.reset(base_history)
+            event_iter = tqdm(
+                zip(sorted_indices, sorted_times, sorted_locations),
+                total=n_events,
+                desc="MAGNET predictions",
+                unit="event",
+                file=sys.stderr,
+                disable=n_events < 2,
+            )
+            for orig_i, time_value, location in event_iter:
+                lng = float(location[0])
+                lat = float(location[1])
+                loc = geometry.Point(lng=lng, lat=lat)
+                examples = {int(time_value): [[loc]]}
+                raw_features = self._incremental_state.features_for_example(
+                    int(time_value),
+                    loc,
+                )
+                model_inputs = magnet_encoder_incremental.flatten_and_scale_altered_features(
+                    raw_features,
+                    self.all_encoders,
+                    self.scalers,
+                    self.location_scalers,
+                    examples,
+                )
+                model_prediction = self.loaded_model.predict(model_inputs, verbose=0)
+                sampled_magnitude = _sample_from_model_prediction(
+                    model_prediction,
+                    shift=self.magnitude_shift,
+                    stretch=self.pdf_support_stretch,
+                    statistic="sample",
+                )
+                sampled_magnitudes[int(orig_i)] = sampled_magnitude
+                if record:
+                    pred_arr = np.asarray(model_prediction)
+                    if hasattr(pred_arr, "numpy"):
+                        pred_arr = pred_arr.numpy()
+                    self._prediction_buffer.append(
+                        {
+                            "event_index": int(orig_i),
+                            "time": int(time_value),
+                            "longitude": lng,
+                            "latitude": lat,
+                            "magnitude": float(sampled_magnitude),
+                            "model_prediction": np.asarray(
+                                pred_arr, dtype=float
+                            ).reshape(-1),
+                        }
+                    )
+                self._incremental_state.append_row(
+                    {
+                        "time": pd.to_datetime(int(time_value), unit="s"),
+                        "longitude": lng,
+                        "latitude": lat,
+                        "magnitude": sampled_magnitude,
+                    }
+                )
+            return sampled_magnitudes
+
+        earthquakes_catalog = _prepare_earthquakes_catalog(available_history)
         orig = self.original_domain
         domain = magnet_inference_cache.catalog_domain_for_inference(
             orig,
@@ -231,13 +315,6 @@ class MagnetInferenceSession:
             test_locations=locations,
             earthquakes_catalog=earthquakes_catalog,
         )
-
-        sorted_indices = np.argsort(times)
-        sorted_times = times[sorted_indices]
-        sorted_locations = locations[sorted_indices]
-        sampled_magnitudes: list[float] = [0.0] * len(sorted_indices)
-        record = _RECORD_PREDICTIONS
-        n_events = len(sorted_indices)
         event_iter = tqdm(
             zip(sorted_indices, sorted_times, sorted_locations),
             total=n_events,
