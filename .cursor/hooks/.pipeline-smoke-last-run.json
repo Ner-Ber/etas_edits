@@ -4,5 +4,5 @@
   "command": "ast-check MAGNET_ETAS_pipeline.py",
   "exit_code": 0,
   "output_tail": "ok: MAGNET_ETAS_pipeline.py defines run_etas_catalog_continuation, run_etas_inversion",
-  "timestamp": "2026-07-14T10:31:51.230931+00:00"
+  "timestamp": "2026-07-16T08:24:17.145779+00:00"
 }
