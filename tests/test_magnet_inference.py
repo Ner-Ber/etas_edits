@@ -342,8 +342,9 @@ def test_pdf_support_stretch_from_gin_default_and_bound(monkeypatch) -> None:
 
 
 def test_get_magnet_generator_session_singleton(tmp_path) -> None:
-    pytest.importorskip("tf_keras")
-    import etas.magnet_inference as magnet_inference
+    from tests._magnet_test_helpers import import_magnet_inference
+
+    magnet_inference = import_magnet_inference()
 
     magnet_inference.clear_magnet_sessions()
     model_dir = tmp_path / "model_a"
@@ -437,7 +438,6 @@ def test_prediction_recording_env_enables(monkeypatch) -> None:
     assert path.name == "magnet_preds.npz"
 
 
-
 def test_incremental_encoders_enabled_default(monkeypatch) -> None:
     import etas.magnet_encoder_incremental as magnet_encoder_incremental
 
@@ -463,3 +463,4 @@ def test_prepare_encoder_catalog_sorts_and_adds_depth() -> None:
     catalog = magnet_encoder_incremental.prepare_encoder_catalog(raw)
     assert catalog.iloc[0]["magnitude"] == 2.5
     assert "depth" in catalog.columns
+
