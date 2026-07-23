@@ -16,6 +16,7 @@ pytestmark = [pytest.mark.unit, pytest.mark.heavy]
 def hauksson_encoders(repo_root: Path):
     pytest.importorskip("tensorflow")
     from eq_mag_prediction.forecasting import encoders
+
     gin_path = repo_root / "config" / "magnet_hauksson_template.gin"
     gin.parse_config_file(str(gin_path), skip_unknown=True)
     catalog = pd.DataFrame(

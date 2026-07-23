@@ -24,6 +24,12 @@ def resolve_magnet_smoke_model_dir(repo_root: Path) -> Path:
     env = os.environ.get("MAGNET_TEST_MODEL_DIR")
     candidates = [
         Path(env).expanduser() if env else None,
+    ]
+    for rep in sorted(repo_root.glob("outputs/**/magnet/model_*/_repetition_0")):
+        if (rep / "model").is_dir():
+            candidates.append(rep)
+    candidates.extend(
+        [
         repo_root.parent
         / "eq_mag_prediction"
         / "eq_mag_prediction"
@@ -44,7 +50,8 @@ def resolve_magnet_smoke_model_dir(repo_root: Path) -> Path:
         / "results"
         / "trained_models"
         / "Hauksson",
-    ]
+        ]
+    )
     for candidate in candidates:
         if candidate is None:
             continue
@@ -83,12 +90,9 @@ def _days_since_epoch(ts: pd.Timestamp) -> float:
 
 @pytest.fixture
 def magnet_generator(repo_root: Path, tmp_path: Path):
-    pytest.importorskip("tensorflow")
-    pytest.importorskip("tf_keras")
-    try:
-        import etas.magnet_inference as magnet_inference
-    except ImportError as exc:
-        pytest.skip(f"MAGNET inference stack unavailable: {exc}")
+    from tests._magnet_test_helpers import import_magnet_inference
+
+    magnet_inference = import_magnet_inference()
 
     model_dir = resolve_magnet_smoke_model_dir(repo_root)
     magnet_inference.clear_magnet_sessions()

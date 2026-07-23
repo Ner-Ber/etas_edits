@@ -8,6 +8,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+from shapely.geometry import Polygon
+
+import etas.rate_simulation as rate_simulation
+import etas.utility_functions as utility_functions
 
 pytestmark = pytest.mark.integration
 
@@ -40,14 +44,77 @@ def _simulated_events(catalog: pd.DataFrame, k: int) -> list[dict]:
     return events
 
 
+def _thinning_kwargs(catalog: pd.DataFrame, *, max_forecast_events: int) -> dict:
+    auxiliary_end = catalog["time"].max()
+    return dict(
+        auxiliary_catalog=catalog,
+        auxiliary_end=auxiliary_end,
+        simulation_end=auxiliary_end + pd.Timedelta(days=60),
+        polygon=Polygon([(33, -122), (33, -117), (37, -117), (37, -122)]),
+        parameters={
+            "log10_mu": -5.0,
+            "log10_k0": -2.0,
+            "a": 1.0,
+            "log10_c": -2.2,
+            "omega": 0.0,
+            "log10_tau": 3.0,
+            "log10_d": -1.0,
+            "gamma": 1.0,
+            "rho": 0.5,
+        },
+        mc=3.0,
+        beta_main=1.0,
+        filter_polygon=False,
+        max_forecast_events=max_forecast_events,
+        a_h_resolution=200,
+    )
+
+
+def _assert_forecast_catalogs_equal(legacy: pd.DataFrame, incremental: pd.DataFrame) -> None:
+    assert len(legacy) == len(incremental)
+    for col in ("latitude", "longitude", "magnitude"):
+        assert np.array_equal(
+            legacy[col].to_numpy(),
+            incremental[col].to_numpy(),
+        ), col
+    legacy_time = pd.to_datetime(legacy["time"]).astype("int64").to_numpy()
+    incremental_time = pd.to_datetime(incremental["time"]).astype("int64").to_numpy()
+    assert np.array_equal(legacy_time, incremental_time), "time"
+
+
+def _run_thinning_with_encoder_mode(
+    *,
+    model_dir: Path,
+    cache_dir: Path,
+    catalog: pd.DataFrame,
+    incremental: bool,
+    seed: int,
+    max_forecast_events: int,
+):
+    from tests._magnet_test_helpers import import_magnet_inference
+
+    magnet_inference = import_magnet_inference()
+    os.environ["MAGNET_INCREMENTAL_ENCODERS"] = "1" if incremental else "0"
+    magnet_inference.clear_magnet_sessions()
+    generator = magnet_inference.warm_magnet_session(
+        model_dir,
+        feature_cache_dir=cache_dir,
+    )
+    utility_functions.seed_forecast_rng(seed)
+    result = rate_simulation.simulate_catalog_continuation_thinning(
+        **_thinning_kwargs(catalog, max_forecast_events=max_forecast_events),
+        magnitude_generator=generator,
+    )
+    magnet_inference.clear_magnet_sessions()
+    return result
+
+
 @pytest.fixture
 def warmed_session(repo_root: Path, tmp_path: Path):
-    pytest.importorskip("tensorflow")
-    pytest.importorskip("tf_keras")
+    from tests._magnet_test_helpers import import_magnet_inference
     from tests.test_magnet_etas_integration_smoke import resolve_magnet_smoke_model_dir
 
-    import etas.magnet_inference as magnet_inference
-
+    magnet_inference = import_magnet_inference()
     model_dir = resolve_magnet_smoke_model_dir(repo_root)
     magnet_inference.clear_magnet_sessions()
     session = magnet_inference.get_magnet_generator(
@@ -69,13 +136,9 @@ def test_incremental_raw_features_exact_match_upstream(warmed_session) -> None:
         warmed_session.all_encoders
     )
     state.reset(catalog)
-    events = _simulated_events(catalog, k=12)
-    for event in events:
-        eval_time = int(
-            magnet_encoder_incremental.prepare_encoder_catalog(
-                pd.DataFrame([event])
-            ).iloc[0]["time"]
-        )
+    for event in _simulated_events(catalog, k=12):
+        prep = magnet_encoder_incremental.prepare_encoder_catalog(pd.DataFrame([event]))
+        eval_time = int(prep.iloc[0]["time"])
         loc = geometry.Point(
             lng=float(event["longitude"]),
             lat=float(event["latitude"]),
@@ -104,11 +167,8 @@ def test_incremental_scaled_inputs_exact_match_upstream(warmed_session) -> None:
     )
     state.reset(catalog)
     for event in _simulated_events(catalog, k=8):
-        eval_time = int(
-            magnet_encoder_incremental.prepare_encoder_catalog(
-                pd.DataFrame([event])
-            ).iloc[0]["time"]
-        )
+        prep = magnet_encoder_incremental.prepare_encoder_catalog(pd.DataFrame([event]))
+        eval_time = int(prep.iloc[0]["time"])
         loc = geometry.Point(
             lng=float(event["longitude"]),
             lat=float(event["latitude"]),
@@ -152,11 +212,8 @@ def test_incremental_model_prediction_exact_match_legacy_path(warmed_session) ->
     )
     state.reset(catalog)
     for event in _simulated_events(catalog, k=10):
-        eval_time = int(
-            magnet_encoder_incremental.prepare_encoder_catalog(
-                pd.DataFrame([event])
-            ).iloc[0]["time"]
-        )
+        prep = magnet_encoder_incremental.prepare_encoder_catalog(pd.DataFrame([event]))
+        eval_time = int(prep.iloc[0]["time"])
         loc = geometry.Point(
             lng=float(event["longitude"]),
             lat=float(event["latitude"]),
@@ -182,3 +239,39 @@ def test_incremental_model_prediction_exact_match_legacy_path(warmed_session) ->
         ref_pred = warmed_session.loaded_model.predict(ref_inputs, verbose=0)
         assert np.array_equal(inc_pred, ref_pred)
         state.append_row(event)
+
+
+def test_incremental_thinning_matches_legacy_with_shared_seeds(
+    repo_root: Path,
+    tmp_path: Path,
+) -> None:
+    """Legacy vs incremental thinning catalogs match when NumPy and TF share a seed."""
+    from tests.test_magnet_etas_integration_smoke import (
+        resolve_magnet_smoke_model_dir,
+        short_history_catalog,
+    )
+
+    model_dir = resolve_magnet_smoke_model_dir(repo_root)
+    catalog = short_history_catalog(repo_root, n=80)
+    cache_dir = tmp_path / "magnet_feature_cache"
+    seed = 42
+    max_forecast_events = 12
+
+    legacy = _run_thinning_with_encoder_mode(
+        model_dir=model_dir,
+        cache_dir=cache_dir,
+        catalog=catalog,
+        incremental=False,
+        seed=seed,
+        max_forecast_events=max_forecast_events,
+    )
+    incremental = _run_thinning_with_encoder_mode(
+        model_dir=model_dir,
+        cache_dir=cache_dir,
+        catalog=catalog,
+        incremental=True,
+        seed=seed,
+        max_forecast_events=max_forecast_events,
+    )
+    assert len(legacy) > 0
+    _assert_forecast_catalogs_equal(legacy, incremental)
