@@ -93,6 +93,22 @@ Maintenance rules: `.cursor/rules/code-todo.mdc`
   - MAGNET ingested catalogs (e.g. `.../results/catalogs/ingested/hauksson.csv`)
   - `docs/script-usage-flows.md`
 
+### `magnet-incremental-encoders`
+- **Status:** in_progress
+- **Added:** 2026-07-23
+- **Updated:** 2026-07-23
+- **Goal:** Speed up thinning+MAGNET by reusing warmed encoders and an append-only incremental catalog state instead of rebuilding encoder features from scratch via ``create_altered_prediction_single_loc`` every thinning step.
+- **Context:** Branch ``magnet-incremental-encoders``. Default on (``MAGNET_INCREMENTAL_ENCODERS=1``); set ``0`` for legacy path. Exact parity required vs upstream ``encoder.build_features`` / ``forecasts._create_altered_features`` (``np.array_equal``).
+- **Acceptance:**
+  - ``etas/magnet_encoder_incremental.py`` + wired in ``etas/magnet_inference.py``.
+  - Exact-parity tests pass (``tests/test_magnet_encoder_incremental_parity_unit.py``; integration parity when checkpoint available).
+  - Measurable speedup on continuation thinning (follow-up: seismicity sliding-window optimization).
+- **Key paths:**
+  - ``etas/magnet_encoder_incremental.py``
+  - ``etas/magnet_inference.py``
+  - ``tests/test_magnet_encoder_incremental_parity.py``
+  - ``tests/test_magnet_encoder_incremental_parity_unit.py``
+
 ### `magnet-mc-matches-etas`
 - **Status:** in_progress
 - **Added:** 2026-07-10 20:09
