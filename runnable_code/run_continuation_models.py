@@ -282,14 +282,65 @@ def parse_methods_cli(value: str | None) -> tuple[str, ...] | None:
     return normalize_methods(value)
 
 
+_VALID_ENCODER_FILTERS = frozenset({"all_events", "above_mc"})
+
+
+def normalize_encoder_filter(raw) -> str | None:
+    """Map JSON ``magnet.encoder_filter`` to a canonical value."""
+    if raw is None:
+        return None
+    key = str(raw).strip().lower()
+    if key in _VALID_ENCODER_FILTERS:
+        return key
+    if key in ("all", "entire_catalog", "return_entire_catalog"):
+        return "all_events"
+    if key in ("mc", "min_mag", "above_threshold"):
+        return "above_mc"
+    known = ", ".join(sorted(_VALID_ENCODER_FILTERS))
+    raise ValueError(
+        f"magnet.encoder_filter must be one of {{{known}}}; got {raw!r}"
+    )
+
+
+def magnet_post_train_report_enabled(magnet: dict) -> bool:
+    """Default True when ``magnet.mode`` is ``train``."""
+    if "post_train_report" in magnet:
+        return bool(magnet["post_train_report"])
+    return magnet.get("mode") == "train"
+
+
 def magnet_section(cfg: dict) -> dict:
     section = cfg.get("magnet")
     if section is None:
-        return {"mode": "skip", "model_dir": None, "gin_config_path": None, "general_gin_config_path": None}
+        return {
+            "mode": "skip",
+            "model_dir": None,
+            "gin_config_path": None,
+            "general_gin_config_path": None,
+            "encoder_filter": None,
+            "use_depth_as_feature": None,
+            "post_train_report": False,
+            "report": {},
+        }
     if not isinstance(section, dict):
         raise ValueError("magnet must be a JSON object")
+    mode = str(section.get("mode", "skip")).strip().lower()
+    depth_raw = section.get("use_depth_as_feature")
+    use_depth = None if depth_raw is None else bool(depth_raw)
+    report_section = section.get("report")
+    if report_section is None:
+        report = {}
+    elif isinstance(report_section, dict):
+        report = dict(report_section)
+    else:
+        raise ValueError("magnet.report must be a JSON object when set")
+    post_train_raw = section.get("post_train_report")
+    if post_train_raw is None:
+        post_train_report = mode == "train"
+    else:
+        post_train_report = bool(post_train_raw)
     return {
-        "mode": str(section.get("mode", "skip")).strip().lower(),
+        "mode": mode,
         "model_dir": section.get("model_dir"),
         "gin_config_path": section.get("gin_config_path"),
         "general_gin_config_path": section.get("general_gin_config_path"),
@@ -307,6 +358,10 @@ def magnet_section(cfg: dict) -> dict:
         "force_retrain": bool(section.get("force_retrain", False)),
         "epochs": section.get("epochs"),
         "batch_size": section.get("batch_size"),
+        "encoder_filter": normalize_encoder_filter(section.get("encoder_filter")),
+        "use_depth_as_feature": use_depth,
+        "post_train_report": post_train_report,
+        "report": report,
     }
 
 
@@ -552,6 +607,25 @@ def apply_continuation_overrides_to_magnet_gin(
         updates["train_and_evaluate_magnitude_prediction_model.batch_size"] = int(
             magnet["batch_size"]
         )
+
+    encoder_filter = magnet.get("encoder_filter")
+    if encoder_filter == "all_events":
+        updates["target_catalog.earthquake_criterion"] = (
+            "@return_entire_catalog_criterion"
+        )
+    elif encoder_filter == "above_mc":
+        if cfg.get("mc") is None:
+            raise ValueError(
+                "magnet.encoder_filter='above_mc' requires continuation JSON 'mc'"
+            )
+        mc_val = float(cfg["mc"])
+        updates["target_catalog.earthquake_criterion"] = "@is_in_magnitude_range"
+        updates["is_in_magnitude_range.min_magnitude"] = mc_val
+        updates["minimum_magnitude"] = mc_val
+
+    use_depth = magnet.get("use_depth_as_feature")
+    if use_depth is not None:
+        updates["RecentEarthquakesEncoder.use_depth_as_feature"] = bool(use_depth)
 
     pipeline.update_gin_parameters(str(gin_path), updates)
     validate_magnet_catalog_for_gin(gin_path, prepared_catalog)
@@ -820,7 +894,11 @@ def main(argv: list[str] | None = None) -> int:
         repo_root,
         cfg.get("output_root", "outputs/continuation_models"),
     )
-    inversion_output_dir = output_root / "inversions"
+    inversion_output_raw = cfg.get("inversion_output_dir")
+    if inversion_output_raw:
+        inversion_output_dir = compare._resolve_path(repo_root, inversion_output_raw)
+    else:
+        inversion_output_dir = output_root / "inversions"
     catalog_path = compare._resolve_path(repo_root, cfg["fn_catalog"])
     shape_coords_path = compare._resolve_path(repo_root, cfg["shape_coords"])
 
@@ -1013,6 +1091,31 @@ def main(argv: list[str] | None = None) -> int:
         f"methods={list(methods)} output_root={output_root}",
         flush=True,
     )
+
+    if magnet_post_train_report_enabled(magnet) and magnet_model_dir is not None:
+        import magnet_model_report
+
+        work_gin = output_root / "magnet_generated" / "working_magnet.gin"
+        report_dir = output_root / "reports"
+        try:
+            report_paths = magnet_model_report.run(
+                repo_root=repo_root,
+                experiment_dir=magnet_model_dir,
+                continuation_cfg=cfg,
+                continuation_config_path=config_path,
+                working_gin_path=work_gin if work_gin.is_file() else None,
+                report_dir=report_dir,
+                report_options=magnet.get("report") or {},
+            )
+            print(
+                "MAGNET post-train report:",
+                report_paths.get("html") or report_paths.get("provenance"),
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"MAGNET post-train report failed: {exc}", file=sys.stderr, flush=True)
+            return 1
+
     return 0
 
 
