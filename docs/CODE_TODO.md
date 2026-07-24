@@ -109,6 +109,28 @@ Maintenance rules: `.cursor/rules/code-todo.mdc`
   - ``tests/test_magnet_encoder_incremental_parity.py``
   - ``tests/test_magnet_encoder_incremental_parity_unit.py``
 
+### `eq-mag-prediction-merge-and-canonical-checkout`
+- **Status:** open
+- **Added:** 2026-07-24
+- **Updated:** 2026-07-24
+- **Goal:** Consolidate on a single `eq_mag_prediction` checkout (`eq_mag_prediction/eq_mag_prediction`, branch `hanamel-extrap-work`) by merging ETAS-specific work from the `eq_mag_prediction_clean` worktree (`branch-clean-test-FINAL`), then repoint etas workspace/env imports to main.
+- **Context:** Today etas uses **clean** as canonical: `pip install -e` → `eq_mag_prediction_clean`; workspace folder + `PYTHONPATH` list clean first; ~20 etas files hardcode `eq_mag_prediction_clean` paths. Main has **16 trained checkpoints** under `eq_mag_prediction/eq_mag_prediction/results/trained_models/` (Hauksson, Hauksson_retrain, JMA, GeoNet_NZ, recreate variants, etc.); clean has none; parent `eq_mag_prediction/results/trained_models/Hauksson` is incomplete (no `model/`). **Model comparison does not require a workspace swap:** `magnet.mode: "load"` + absolute `model_dir`, or `MAGNET_TEST_MODEL_DIR`, works with clean’s package — verified 2026-07-24 (`test_magnet_etas_integration_smoke` passed loading main’s `Hauksson`). Branches diverged (~79 differing package files); clean-only code etas depends on: `ingestion/catalog_format_converter.py`, `utilities/catalog_methods.py`, `forecasting/configs/.../hauksson_etas_pipeline_test.gin`, `forecasting/evaluation/`. Both trees are git worktrees of the same repo.
+- **Acceptance:**
+  - Merge `branch-clean-test-FINAL` → `hanamel-extrap-work` (or equivalent) with ETAS glue preserved (`catalog_format_converter`, catalog depth/time fixes, `catalog_methods`, pipeline gin).
+  - etas tests pass on merged main (`pytest -m "unit or integration"` at minimum; MAGNET smoke if TF available).
+  - etas workspace + env repointed: `etas_magnet.code-workspace`, `.vscode/settings.json`, `.vscode/launch.json`, `.cursor/hooks/pytest_hooks.py`, pipeline JSON/gin paths — clean paths replaced or removed.
+  - `pip install -e` in `etas_remote` targets `.../eq_mag_prediction/eq_mag_prediction`; `python -c "import eq_mag_prediction; print(__file__)"` resolves to main.
+  - Document how to compare pre-trained main checkpoints without swapping checkout: `magnet.mode: "load"`, `magnet.model_dir` → `.../eq_mag_prediction/eq_mag_prediction/results/trained_models/<name>`.
+  - Optional: remove or archive `eq_mag_prediction_clean` worktree after merge verified.
+- **Key paths:**
+  - Sibling repo: `/a/home/cc/students/csguests/neriberman/Repos/eq_mag_prediction/eq_mag_prediction` (main), `.../eq_mag_prediction_clean` (worktree)
+  - Main checkpoints: `.../eq_mag_prediction/eq_mag_prediction/results/trained_models/`
+  - `etas/etas_magnet.code-workspace`, `.vscode/settings.json`, `.vscode/launch.json`
+  - `runnable_code/MAGNET_ETAS_pipeline.py`, `runnable_code/run_continuation_models.py` (`resolve_magnet_model_dir`, `magnet.mode: load`)
+  - `config/pipeline_single_source.json`, `config/pipeline_single_source_repo_default.json`
+  - `tests/test_magnet_etas_integration_smoke.py`
+  - `docs/script-usage-flows.md`
+
 ### `magnet-mc-matches-etas`
 - **Status:** in_progress
 - **Added:** 2026-07-10 20:09
