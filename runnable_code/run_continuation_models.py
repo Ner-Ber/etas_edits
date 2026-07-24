@@ -393,11 +393,11 @@ def apply_magnet_prediction_cli(
 
 
 def validate_magnet_for_methods(methods: tuple[str, ...], magnet: dict) -> None:
-    needs_magnet = "thinning_magnet" in methods
+    needs_magnet = any(ens.method_uses_magnet(method) for method in methods)
     mode = magnet["mode"]
     if needs_magnet and mode == "skip":
         raise ValueError(
-            "methods includes 'thinning_magnet' but magnet.mode is 'skip'; "
+            f"methods includes {ens.METHOD_FINE!r} but magnet.mode is 'skip'; "
             "set magnet.mode to 'load' or 'train'"
         )
     if not needs_magnet:
@@ -642,8 +642,8 @@ def resolve_magnet_model_dir(
     repo_root: pathlib.Path,
     output_root: pathlib.Path,
 ) -> pathlib.Path | None:
-    """Train or load MAGNET when thinning_magnet is requested; else None."""
-    if "thinning_magnet" not in methods:
+    """Train or load MAGNET when FINE is requested; else None."""
+    if not any(ens.method_uses_magnet(method) for method in methods):
         return None
 
     mode = magnet["mode"]
@@ -743,7 +743,7 @@ def expected_meta_for_method(
     if method == "thinning":
         meta["thinning_magnitude_generator"] = "simulate_magnitudes"
         meta["thinning_model_dir"] = None
-    elif method == "thinning_magnet":
+    elif ens.method_uses_magnet(method):
         meta["thinning_magnitude_generator"] = "MAGNET_magnitude"
         meta["thinning_model_dir"] = str(magnet_model_dir) if magnet_model_dir else None
     else:
@@ -753,7 +753,35 @@ def expected_meta_for_method(
 
 
 def realization_dir(output_root: pathlib.Path, method: str, inv_id: str, seed: int) -> pathlib.Path:
-    return output_root / method / f"inv_{inv_id}" / f"seed_{seed}"
+    method_key = ens.normalize_continuation_method(method)
+    return output_root / method_key / f"inv_{inv_id}" / f"seed_{seed}"
+
+
+def legacy_realization_dir(
+    output_root: pathlib.Path, method: str, inv_id: str, seed: int
+) -> pathlib.Path | None:
+    legacy_name = ens.legacy_method_output_name(method)
+    if legacy_name is None:
+        return None
+    return output_root / legacy_name / f"inv_{inv_id}" / f"seed_{seed}"
+
+
+def find_cached_run_dir(
+    output_root: pathlib.Path,
+    method: str,
+    inv_id: str,
+    seed: int,
+    expected: dict,
+    force_rerun: bool,
+) -> pathlib.Path | None:
+    candidates = [realization_dir(output_root, method, inv_id, seed)]
+    legacy_dir = legacy_realization_dir(output_root, method, inv_id, seed)
+    if legacy_dir is not None:
+        candidates.append(legacy_dir)
+    for candidate in candidates:
+        if cache_hit(candidate, expected, force_rerun):
+            return candidate
+    return None
 
 
 def cache_hit(run_dir: pathlib.Path, expected: dict, force_rerun: bool) -> bool:
@@ -788,7 +816,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--methods",
         default=None,
-        help="Comma-separated subset: etas,thinning,thinning_magnet (overrides config).",
+        help=(
+            "Comma-separated subset: etas,thinning,FINE "
+            f"(legacy alias: {ens.METHOD_FINE_LEGACY}) (overrides config)."
+        ),
     )
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--n-runs", type=int, default=None)
@@ -925,7 +956,7 @@ def main(argv: list[str] | None = None) -> int:
         output_root=output_root,
     )
 
-    if "thinning_magnet" in methods:
+    if any(ens.method_uses_magnet(method) for method in methods):
         import etas.magnet_inference as magnet_inference
 
         magnet_inference.configure_prediction_recording(
@@ -1015,14 +1046,16 @@ def main(argv: list[str] | None = None) -> int:
             {
                 **cfg,
                 "thinning_magnitude_generator": (
-                    "MAGNET_magnitude" if method == "thinning_magnet" else "simulate_magnitudes"
+                    "MAGNET_magnitude"
+                    if ens.method_uses_magnet(method)
+                    else "simulate_magnitudes"
                 ),
                 "thinning_model_dir": str(magnet_model_dir) if magnet_model_dir else None,
             },
             method,
             repo_root,
         )
-        if method == "thinning_magnet" and magnet_model_dir is not None:
+        if ens.method_uses_magnet(method) and magnet_model_dir is not None:
             import etas.magnet_inference as magnet_inference
 
             magnet_inference.warm_magnet_session(
@@ -1047,8 +1080,22 @@ def main(argv: list[str] | None = None) -> int:
                 magnet_model_dir=magnet_model_dir,
                 max_forecast_events=max_forecast_events,
             )
-            if cache_hit(run_dir, expected, force_rerun):
-                print(f"  seed={seed}: cache hit → {run_dir}", flush=True)
+            cached_dir = find_cached_run_dir(
+                output_root,
+                method,
+                inv_id,
+                seed,
+                expected,
+                force_rerun,
+            )
+            if cached_dir is not None:
+                if cached_dir != run_dir:
+                    print(
+                        f"  seed={seed}: legacy cache hit → {cached_dir}",
+                        flush=True,
+                    )
+                else:
+                    print(f"  seed={seed}: cache hit → {run_dir}", flush=True)
                 n_cached += 1
                 continue
 
@@ -1077,7 +1124,7 @@ def main(argv: list[str] | None = None) -> int:
                 etas_catalog, thinning_catalog, method
             )
             ens.save_realization_outputs(run_dir, forecast_catalog, expected)
-            if method == "thinning_magnet" and magnet_model_dir is not None:
+            if ens.method_uses_magnet(method) and magnet_model_dir is not None:
                 import etas.magnet_inference as magnet_inference
 
                 sidecar = magnet_inference.flush_magnet_predictions_for_model(

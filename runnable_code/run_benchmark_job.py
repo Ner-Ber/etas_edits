@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one cell of the MAGNET benchmark matrix (shared or variant job)."""
+"""Run one cell of the MAGNET benchmark matrix (shared baselines or FINE job)."""
 
 from __future__ import annotations
 
@@ -9,6 +9,24 @@ import json
 import pathlib
 import subprocess
 import sys
+
+import continuation_ensemble as ens
+
+SHARED_JOB_KIND = "shared"
+FINE_JOB_KIND = "FINE"
+_LEGACY_FINE_JOB_KIND = "variant"
+
+
+def normalize_job_kind(job_kind: str) -> str:
+    kind = job_kind.strip()
+    if kind == _LEGACY_FINE_JOB_KIND:
+        return FINE_JOB_KIND
+    if kind in (SHARED_JOB_KIND, FINE_JOB_KIND):
+        return kind
+    raise ValueError(
+        f"Unknown job_kind {job_kind!r}; expected {SHARED_JOB_KIND!r} or "
+        f"{FINE_JOB_KIND!r} (legacy alias: {_LEGACY_FINE_JOB_KIND!r})"
+    )
 
 
 def _load_json(path: pathlib.Path) -> dict:
@@ -39,13 +57,14 @@ def build_job_config(
     cfg["output_root"] = str(output_root.resolve())
 
     magnet = dict(cfg.get("magnet") or {})
-    if job_kind == "shared":
+    job_kind = normalize_job_kind(job_kind)
+    if job_kind == SHARED_JOB_KIND:
         magnet["mode"] = "skip"
         cfg["methods"] = methods or ["etas", "thinning"]
         cfg["magnet"] = magnet
         return cfg
 
-    if job_kind != "variant":
+    if job_kind != FINE_JOB_KIND:
         raise ValueError(f"Unknown job_kind {job_kind!r}")
 
     variant = magnet_variant or {}
@@ -54,7 +73,7 @@ def build_job_config(
     magnet["use_depth_as_feature"] = variant.get("use_depth_as_feature")
     if variant.get("gin_config_path"):
         magnet["gin_config_path"] = variant["gin_config_path"]
-    cfg["methods"] = methods or ["thinning_magnet"]
+    cfg["methods"] = methods or [ens.METHOD_FINE]
     cfg["magnet"] = magnet
     if shared_output_root is not None:
         cfg["inversion_output_dir"] = str(shared_output_root / "inversions")
@@ -71,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--job-kind",
-        choices=("shared", "variant"),
+        choices=(SHARED_JOB_KIND, FINE_JOB_KIND, _LEGACY_FINE_JOB_KIND),
         required=True,
     )
     parser.add_argument(
@@ -83,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
         "--shared-output-root",
         type=pathlib.Path,
         default=None,
-        help="Shared catalog output root (variant jobs reuse its inversion).",
+        help="Shared catalog output root (FINE jobs reuse its inversion).",
     )
     parser.add_argument(
         "--dry-run",

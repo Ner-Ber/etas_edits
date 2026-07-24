@@ -60,13 +60,14 @@ Legacy wrappers (same as the generic scripts):
 
 ```
 continuation_models_config.json
-  methods: [etas] and/or [thinning] and/or [thinning_magnet]
+  methods: [etas] and/or [thinning] and/or [FINE]
+        (legacy config alias: thinning_magnet)
   magnet.mode: skip | load | train
         │
         ▼
 run_continuation_models.py
         │
-        ├─ if thinning_magnet:
+        ├─ if FINE:
         │     load model_dir  OR  train (Hauksson gin template + JSON overlays)
         │     → <output_root>/magnet/<model_id>/
         │
@@ -248,7 +249,7 @@ outputs/continuation_models/          # run_continuation_models.py
   magnet/<model_id>/                  # if train/load
   etas/inv_<id>/seed_<seed>/
   thinning/inv_<id>/seed_<seed>/
-  thinning_magnet/inv_<id>/seed_<seed>/
+  FINE/inv_<id>/seed_<seed>/           # legacy on-disk folder: thinning_magnet/
 
 outputs/catalog_etas_vs_thinning/     # compare / ensemble defaults
   inversions/inv_<id>/
@@ -263,7 +264,7 @@ outputs/benchmark_matrix/<run_id>/    # benchmark_matrix.py
   logs/<job_id>.log
   jobs.sh / jobs.jsonl / matrix_manifest.json
   <catalog>/shared/                   # etas + thinning (once per catalog)
-  <catalog>/variants/<variant_id>/    # magnet train + thinning_magnet + reports/
+  <catalog>/FINE_variants/<encoder_id>/ # MAGNET train + FINE forecast + reports/
 ```
 
 ---
@@ -273,12 +274,14 @@ outputs/benchmark_matrix/<run_id>/    # benchmark_matrix.py
 **Script:** `runnable_code/benchmark_matrix.py`  
 **Manifest:** `config/benchmark_matrix.json`
 
-Runs Hauksson + California with four MAGNET encoder variants each:
+Per catalog: one **shared** job (`etas`, `thinning`) then four **FINE** jobs (MAGNET train + `FINE` forecast + post-train report).
+
+**Nomenclature:** `etas` = classic ETAS; `thinning` = Ogata thinning; `FINE` = thinning + MAGNET magnitude draw.
+
+Encoder grid (`FINE_encoder_variants` in manifest):
 
 - `encoder_filter`: `all_events` | `above_mc`
 - `use_depth_as_feature`: `true` | `false`
-
-Per catalog: one **shared** job (`etas`, `thinning`) then four **variant** jobs (`thinning_magnet` train + forecast + post-train report).
 
 **Launch modes:**
 
@@ -286,7 +289,7 @@ Per catalog: one **shared** job (`etas`, `thinning`) then four **variant** jobs 
 # Print commands + write jobs.sh
 python runnable_code/benchmark_matrix.py --dry-run --run-id 20260723
 
-# Run-and-forget (phased: shared → variants)
+# Run-and-forget (phased: shared → FINE)
 python runnable_code/benchmark_matrix.py --execute --run-id 20260723 \
   --max-workers 4 --max-train-workers 1
 

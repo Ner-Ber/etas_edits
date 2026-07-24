@@ -2,7 +2,7 @@
 """
 Run multiple stochastic realizations of a single catalog continuation method.
 
-Each invocation runs one of ``etas``, ``thinning``, or ``thinning_magnet`` over
+Each invocation runs one of ``etas``, ``thinning``, or ``FINE`` over
 ``timewindow_end`` -> ``testwindow_end``. Per-realization forecast catalogs are
 saved under::
 
@@ -17,7 +17,7 @@ Usage::
     --method etas --n-runs 10
 
   python runnable_code/continuation_ensemble.py \\
-    --method thinning_magnet \\
+    --method FINE \\
     --thinning-model-dir /path/to/magnet_model \\
     --n-runs 5 \\
     --seed 100
@@ -41,7 +41,14 @@ import continuation_compare as cat_cmp
 
 _DEFAULT_CONFIG = cat_cmp._DEFAULT_CONFIG
 
-CONTINUATION_METHODS = ("etas", "thinning", "thinning_magnet")
+METHOD_ETAS = "etas"
+METHOD_THINNING = "thinning"
+METHOD_FINE = "FINE"
+# Pre-FINE output dirs and config values used this method id.
+METHOD_FINE_LEGACY = "thinning_magnet"
+
+CONTINUATION_METHODS = (METHOD_ETAS, METHOD_THINNING, METHOD_FINE)
+_FINE_METHOD_ALIASES = frozenset({METHOD_FINE.lower(), METHOD_FINE_LEGACY})
 
 _FORECAST_CATALOG_NAME = "forecast_catalog.csv"
 _REALIZATION_META_NAME = "realization_meta.json"
@@ -69,21 +76,44 @@ _METRIC_COLUMNS = [
 
 def normalize_continuation_method(method: str) -> str:
     normalized = method.strip().lower()
-    if normalized not in CONTINUATION_METHODS:
-        raise ValueError(
-            f"Unknown continuation method {method!r}; "
-            f"expected one of {CONTINUATION_METHODS}"
-        )
-    return normalized
+    if normalized in _FINE_METHOD_ALIASES:
+        return METHOD_FINE
+    if normalized == METHOD_ETAS:
+        return METHOD_ETAS
+    if normalized == METHOD_THINNING:
+        return METHOD_THINNING
+    raise ValueError(
+        f"Unknown continuation method {method!r}; "
+        f"expected one of {CONTINUATION_METHODS} "
+        f"(legacy alias: {METHOD_FINE_LEGACY!r} → {METHOD_FINE!r})"
+    )
+
+
+def method_uses_magnet(method: str) -> bool:
+    return normalize_continuation_method(method) == METHOD_FINE
+
+
+def legacy_method_output_name(method: str) -> str | None:
+    """Legacy on-disk folder name for a method, if any."""
+    if normalize_continuation_method(method) == METHOD_FINE:
+        return METHOD_FINE_LEGACY
+    return None
 
 
 def method_label(method: str) -> str:
     labels = {
-        "etas": "Classic ETAS",
-        "thinning": "Ogata thinning",
-        "thinning_magnet": "Ogata thinning + MAGNET",
+        METHOD_ETAS: "ETAS",
+        METHOD_THINNING: "thinning",
+        METHOD_FINE: "FINE",
     }
     return labels[normalize_continuation_method(method)]
+
+
+def _continuation_methods_equivalent(stored: object, expected: object) -> bool:
+    if stored == expected:
+        return True
+    fine_ids = {METHOD_FINE, METHOD_FINE_LEGACY}
+    return stored in fine_ids and expected in fine_ids
 
 
 def forecast_methods_for(method: str) -> tuple[str, ...]:
@@ -99,6 +129,29 @@ def ensemble_dir_for_method(
     inv_id: str,
 ) -> pathlib.Path:
     return ensemble_root / normalize_continuation_method(method) / f"inv_{inv_id}"
+
+
+def legacy_ensemble_dir_for_method(
+    ensemble_root: pathlib.Path,
+    method: str,
+    inv_id: str,
+) -> pathlib.Path | None:
+    legacy_name = legacy_method_output_name(method)
+    if legacy_name is None:
+        return None
+    return ensemble_root / legacy_name / f"inv_{inv_id}"
+
+
+def ensemble_dirs_for_cache(
+    ensemble_root: pathlib.Path,
+    method: str,
+    inv_id: str,
+) -> list[pathlib.Path]:
+    dirs = [ensemble_dir_for_method(ensemble_root, method, inv_id)]
+    legacy_dir = legacy_ensemble_dir_for_method(ensemble_root, method, inv_id)
+    if legacy_dir is not None:
+        dirs.append(legacy_dir)
+    return dirs
 
 
 def thinning_settings_for_method(
@@ -123,7 +176,7 @@ def thinning_settings_for_method(
     thin_cfg["magnitude_generator"] = "MAGNET_magnitude"
     if thin_cfg["model_dir"] is None:
         raise ValueError(
-            "thinning_model_dir is required when --method is thinning_magnet"
+            f"thinning_model_dir is required when method is {METHOD_FINE!r}"
         )
     generator = cat_cmp.resolve_thinning_magnitude_generator(
         **thin_cfg,
@@ -210,7 +263,15 @@ def realization_meta_matches(run_dir: pathlib.Path, expected: dict) -> bool:
     if not meta_path.is_file():
         return True
     stored = json.loads(meta_path.read_text(encoding="utf-8"))
-    return all(stored.get(key) == expected.get(key) for key in _REALIZATION_META_KEYS)
+    for key in _REALIZATION_META_KEYS:
+        stored_val = stored.get(key)
+        expected_val = expected.get(key)
+        if key == "continuation_method":
+            if not _continuation_methods_equivalent(stored_val, expected_val):
+                return False
+        elif stored_val != expected_val:
+            return False
+    return True
 
 
 def write_realization_meta(run_dir: pathlib.Path, meta: dict) -> None:
@@ -372,7 +433,7 @@ def main(argv: list[str] | None = None) -> int:
         "--thinning-model-dir",
         type=pathlib.Path,
         default=None,
-        help="Trained MAGNET model directory (required for thinning_magnet).",
+        help=f"Trained MAGNET model directory (required for {METHOD_FINE}).",
     )
     parser.add_argument("--force-inversion", action="store_true")
     parser.add_argument(
@@ -551,14 +612,14 @@ def main(argv: list[str] | None = None) -> int:
 
     thin_mag_meta: dict = {}
     thinning_mag_gen = None
-    if method in ("thinning", "thinning_magnet"):
+    if method in (METHOD_THINNING, METHOD_FINE):
         thin_mag_meta = cat_cmp.thinning_magnitude_meta(cfg, repo_root)
-        if method == "thinning":
+        if method == METHOD_THINNING:
             thin_mag_meta = {
                 "thinning_magnitude_generator": "simulate_magnitudes",
             }
         thin_cfg, thinning_mag_gen = thinning_settings_for_method(cfg, method, repo_root)
-        if method == "thinning_magnet":
+        if method == METHOD_FINE:
             print(
                 f"Stage: thinning magnitude generator = MAGNET ({thin_cfg['model_dir']})",
                 flush=True,
@@ -644,7 +705,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             forecast_catalog = pick_forecast_catalog(etas_catalog, thinning_catalog, method)
             save_realization_outputs(run_dir, forecast_catalog, realization_meta)
-            if method == "thinning_magnet" and thin_cfg.get("model_dir"):
+            if method == METHOD_FINE and thin_cfg.get("model_dir"):
                 import etas.magnet_inference as magnet_inference
 
                 magnet_inference.flush_magnet_predictions_for_model(
