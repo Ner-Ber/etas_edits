@@ -90,7 +90,8 @@ def test_continuation_ensemble_module_imports() -> None:
     assert hasattr(single_ens, "main")
     assert single_ens.normalize_continuation_method("etas") == "etas"
     assert single_ens.forecast_methods_for("thinning") == ("thinning",)
-    assert single_ens.method_label("thinning_magnet") == "Ogata thinning + MAGNET"
+    assert single_ens.method_label("FINE") == "FINE"
+    assert single_ens.method_label("thinning_magnet") == "FINE"
 
 
 def test_pick_forecast_catalog() -> None:

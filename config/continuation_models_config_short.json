@@ -1,7 +1,7 @@
 {
     "methods": [
         "etas",
-        "thinning_magnet"
+        "FINE"
     ],
     "fn_catalog": "input_data/example_catalog.csv",
     "shape_coords": "input_data/california_shape.npy",

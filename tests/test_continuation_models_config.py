@@ -60,7 +60,8 @@ def test_resolve_max_forecast_events_defaults_and_overrides() -> None:
 def test_normalize_methods_list_and_csv() -> None:
     mod = _load_runner()
     assert mod.normalize_methods(["etas", "thinning"]) == ("etas", "thinning")
-    assert mod.normalize_methods("etas,thinning_magnet") == ("etas", "thinning_magnet")
+    assert mod.normalize_methods("etas,thinning_magnet") == ("etas", "FINE")
+    assert mod.normalize_methods("etas,FINE") == ("etas", "FINE")
 
 
 def test_normalize_methods_rejects_empty() -> None:
@@ -73,11 +74,11 @@ def test_normalize_methods_rejects_empty() -> None:
 
 def test_validate_magnet_skip_with_thinning_magnet_errors() -> None:
     mod = _load_runner()
-    with pytest.raises(ValueError, match="thinning_magnet"):
-        mod.validate_magnet_for_methods(
-            ("thinning_magnet",),
-            {"mode": "skip", "model_dir": None, "gin_config_path": None},
-        )
+    magnet_cfg = {"mode": "skip", "model_dir": None, "gin_config_path": None}
+    with pytest.raises(ValueError, match="FINE"):
+        mod.validate_magnet_for_methods(("FINE",), magnet_cfg)
+    with pytest.raises(ValueError, match="FINE"):
+        mod.validate_magnet_for_methods(("thinning_magnet",), magnet_cfg)
 
 
 def test_validate_magnet_ok_when_not_needed() -> None:

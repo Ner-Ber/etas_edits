@@ -132,7 +132,7 @@ def _run_main_smoke(
 
     sentinel_generator = object()
     module_patches = {"etas.inversion": _stub_inversion_module()}
-    if method == "thinning_magnet":
+    if method == "FINE":
         module_patches["etas.magnet_inference"] = _stub_magnet_inference_module()
 
     with (
@@ -152,7 +152,7 @@ def _run_main_smoke(
         return ens.main(argv)
 
 
-@pytest.mark.parametrize("method", ["etas", "thinning", "thinning_magnet"])
+@pytest.mark.parametrize("method", ["etas", "thinning", "FINE", "thinning_magnet"])
 def test_continuation_ensemble_main_smoke(
     repo_root: Path,
     tmp_path: Path,
@@ -162,7 +162,7 @@ def test_continuation_ensemble_main_smoke(
     import continuation_ensemble as ens
 
     extra = []
-    if method == "thinning_magnet":
+    if method == "FINE":
         extra = ["--thinning-model-dir", str(tmp_path / "magnet_model")]
 
     exit_code = _run_main_smoke(
