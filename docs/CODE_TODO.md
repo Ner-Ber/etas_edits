@@ -58,24 +58,6 @@ Maintenance rules: `.cursor/rules/code-todo.mdc`
   - `docs/script-usage-flows.md`
   - `.cursor/rules/etas-edits-upstream.mdc`
 
-### `magnet-projection-from-region`
-- **Status:** in_progress
-- **Added:** 2026-07-10
-- **Updated:** 2026-07-13
-- **Goal:** Stop silently defaulting MAGNET `_project_utm.projection` to `@california_projection()` when `magnet.projection` is omitted — that will bite non-California runs.
-- **Context:** Implemented `resolve_magnet_projection` + `_REGION_TO_MAGNET_PROJECTION`; removed silent `_DEFAULT_MAGNET_PROJECTION`. Configs set `region: california`. Unit tests cover mapping + missing/unknown region. Docs table in `docs/script-usage-flows.md`.
-- **Acceptance:**
-  - JSON schema documents `region` (and/or required `magnet.projection`) with a clear mapping table (e.g. california → `@california_projection()`).
-  - Runner assigns `_project_utm.projection` from that mapping; no silent California default for unspecified regions.
-  - Short/example configs set region explicitly; docs updated in `docs/script-usage-flows.md`.
-  - Unit test covers mapping + error when region/projection cannot be resolved.
-- **Key paths:**
-  - `runnable_code/run_continuation_models.py` (`resolve_magnet_projection`, `apply_continuation_overrides_to_magnet_gin`, `magnet_section`)
-  - `config/continuation_models_config.json` / `_short.json`
-  - `docs/script-usage-flows.md`
-  - `tests/test_continuation_models_config.py`
-  - MAGNET `data_utils` projection helpers (e.g. `california_projection`) in `eq_mag_prediction_clean`
-
 ### `magnet-native-catalog-not-etas-transform`
 - **Status:** open
 - **Added:** 2026-07-10 19:00
@@ -96,18 +78,35 @@ Maintenance rules: `.cursor/rules/code-todo.mdc`
 ### `magnet-incremental-encoders`
 - **Status:** in_progress
 - **Added:** 2026-07-23
-- **Updated:** 2026-07-23
-- **Goal:** Speed up thinning+MAGNET by reusing warmed encoders and an append-only incremental catalog state instead of rebuilding encoder features from scratch via ``create_altered_prediction_single_loc`` every thinning step.
-- **Context:** Merged into ``feature/magnet-benchmark-matrix``. Default on (``MAGNET_INCREMENTAL_ENCODERS=1``); set ``0`` for legacy path. Exact parity required vs upstream ``encoder.build_features`` / ``forecasts._create_altered_features`` (``np.array_equal``).
-- **Acceptance:**
+- **Updated:** 2026-07-27
+- **Goal:** Speed up FINE/thinning+MAGNET in two layers: (A) scaffolding reuse (done) and (B) true incremental encoder **feature** state (planned below).
+- **Context:**
+  - **Phase A (done):** ``IncrementalEncoderState`` in ``etas/magnet_encoder_incremental.py`` — append-only catalog + reuse warmed ``all_encoders``; still calls upstream ``encoder.build_features`` per query. Default on (``MAGNET_INCREMENTAL_ENCODERS=1``); ``0`` = legacy ``create_altered_prediction_single_loc`` path.
+  - **Phase B (next):** Push/sliding-window feature buffers so ``build_features`` is not rescanned per thinning step. **Do not delete** current methods; add parallel ``*_incremental`` implementations; after parity + benchmarks, rename current → ``*_old`` and promote new names.
+  - Parity oracle: ``reference_raw_encoder_features`` / ``encoder.build_features`` with ``np.array_equal`` (and integration thinning parity).
+- **Phase B execution order:**
+  1. **Harness** — ``features_for_example_via_build_features`` (rename of current logic), env ``MAGNET_INCREMENTAL_FEATURE_STATE=1``, unit parity tests per encoder submodule.
+  2. **Recent earthquakes** — ``RecentEarthquakesRingBuffer`` + ``features_recent_earthquakes_incremental`` (deque ≤``max_earthquakes``, prune by ``limit_lookback_seconds``, O(80) time-dependent cols).
+  3. **Seismicity rate** — ``SeismicityRateTimelineState`` + ``features_seismicity_rate_incremental`` (per-mag event lists, prefix sums on time, single-pass spatial box filter; 8 lookbacks via cumsum + existing diff/divide).
+  4. **Cross-call persistence** — session-level state across thinning ``predict_magnitudes`` calls (append-only catalog extension, avoid ``reset`` + ``catalog.copy`` when prefix unchanged); optional ``rate_simulation`` hook.
+  5. **Catalog columns** — ``features_catalog_columns_incremental`` (O(1) time-since-last + query lon/lat).
+  6. **Seismicity grid** (only if encoder enabled in a variant) — global histogram + window extract, or incremental event list + ``histogram2d`` on lookback slice.
+  7. **Switchover** — after user approval: ``features_for_example`` → ``features_for_example_old``; promote ``features_for_example_incremental``; document in ``docs/script-usage-flows.md``; benchmark ``runnable_code/benchmark_magnet_incremental.py``.
+- **Acceptance (Phase A — done):**
   - ``etas/magnet_encoder_incremental.py`` + wired in ``etas/magnet_inference.py``.
   - Exact-parity tests pass (``tests/test_magnet_encoder_incremental_parity_unit.py``; integration parity when checkpoint available).
-  - Measurable speedup on continuation thinning (follow-up: seismicity sliding-window optimization).
+- **Acceptance (Phase B):**
+  - Each phase lands with parity tests before the next phase.
+  - Measurable speedup on continuation thinning vs Phase A (log timings in benchmark script).
+  - No removal of old code until user approves switchover (step 7).
 - **Key paths:**
-  - ``etas/magnet_encoder_incremental.py``
+  - ``etas/magnet_encoder_incremental.py`` (or split: ``etas/magnet_encoder_features_recent.py``, ``etas/magnet_encoder_features_seismicity.py``)
   - ``etas/magnet_inference.py``
+  - ``etas/rate_simulation.py`` (step 4)
   - ``tests/test_magnet_encoder_incremental_parity.py``
   - ``tests/test_magnet_encoder_incremental_parity_unit.py``
+  - ``tests/test_magnet_encoder_features_incremental.py`` (new, per-phase)
+  - ``runnable_code/benchmark_magnet_incremental.py``
 
 ### `eq-mag-prediction-merge-and-canonical-checkout`
 - **Status:** open
@@ -152,6 +151,18 @@ Maintenance rules: `.cursor/rules/code-todo.mdc`
 ---
 
 ## Done (keep until user asks to prune)
+
+### `magnet-projection-from-region`
+- **Status:** done
+- **Added:** 2026-07-10
+- **Updated:** 2026-07-27
+- **Closed:** 2026-07-27 — user approved; `resolve_magnet_projection` + region mapping table; no silent California default; configs/docs/tests in place.
+- **Goal:** Stop silently defaulting MAGNET `_project_utm.projection` to `@california_projection()` when `magnet.projection` is omitted — that will bite non-California runs.
+- **Key paths:**
+  - `runnable_code/run_continuation_models.py` (`resolve_magnet_projection`, `apply_continuation_overrides_to_magnet_gin`, `magnet_section`)
+  - `config/continuation_models_config.json` / `_short.json`
+  - `docs/script-usage-flows.md`
+  - `tests/test_continuation_models_config.py`
 
 ### `etas-to-magnet-depth-upstream`
 - **Status:** done
