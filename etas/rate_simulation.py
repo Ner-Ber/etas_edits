@@ -284,6 +284,17 @@ def _append_event_to_available_catalog(
     return pd.concat([catalog_df, row], ignore_index=True)
 
 
+def _magnet_catalog_for_thinning(catalog):
+    """Return catalog for MAGNET; skip copy when incremental feature state is enabled."""
+    if catalog is None:
+        return None
+    import etas.magnet_encoder_incremental as magnet_encoder_incremental
+
+    if magnet_encoder_incremental.incremental_feature_state_enabled():
+        return catalog
+    return catalog.copy()
+
+
 def _thinning_magnitude(
     magnitude_generator,
     beta_main,
@@ -296,7 +307,7 @@ def _thinning_magnitude(
 ):
     mag_kwargs = {"beta": beta_main, "mc": mc}
     if catalog is not None:
-        mag_kwargs["catalog"] = catalog.copy()
+        mag_kwargs["catalog"] = _magnet_catalog_for_thinning(catalog)
     event_time = _EPOCH + pd.Timedelta(days=t_days)
     aftershock_row = {
         "latitude": [lat],
