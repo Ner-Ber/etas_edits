@@ -248,7 +248,10 @@ class MagnetInferenceSession:
                     )
                 )
             base_history = catalog if catalog is not None else pd.DataFrame()
-            self._incremental_state.reset(base_history)
+            if magnet_encoder_incremental.incremental_feature_state_enabled():
+                self._incremental_state.sync_catalog_extension(base_history)
+            else:
+                self._incremental_state.reset(base_history)
             event_iter = tqdm(
                 zip(sorted_indices, sorted_times, sorted_locations),
                 total=n_events,
