@@ -12,6 +12,7 @@ ASCII diagrams render in Cursor/VS Code markdown preview (no Mermaid required).
 | Goal | Script | Config |
 |------|--------|--------|
 | Run classic ETAS and/or thinning and/or thinning+MAGNET | **`run_continuation_models.py`** | `config/continuation_models_config.json` |
+| Sequential walk-forward rolling forecasts & T-sweep divergence | **`run_rolling_continuation.py`** | `config/rolling_continuation_config.json` |
 | Side-by-side ETAS vs thinning + HTML report (one seed) | `continuation_compare.py` | `config/catalog_california_etas_vs_thinning_config.json` |
 | Many seeds, one method | `continuation_ensemble.py` | same California config (or Hauksson) |
 | Many seeds, ETAS+thinning paired | `catalog_california_etas_vs_thinning_ensemble.py` | same |
@@ -97,6 +98,32 @@ python runnable_code/run_continuation_models.py \
 
 python runnable_code/run_continuation_models.py \
   --methods thinning,thinning_magnet --force-rerun
+```
+
+---
+
+## Sequential walk-forward rolling forecasts (T ahead)
+
+**Script:** `runnable_code/run_rolling_continuation.py`  
+**Helper module:** `runnable_code/rolling_continuation.py`  
+**Config:** `config/rolling_continuation_config.json` (or `continuation_models_config_short.json`)
+
+Runs step-ahead forecasts of length $T$, advances the conditioning history by $T$ with true observed events, and repeats over the test horizon. Supports sweeping across multiple $T$s (e.g. `--horizon-days 7,14,30,90`) to evaluate forecast divergence and skill scaling.
+
+Outputs:
+```
+<output_root>/
+  horizon_30d/
+    rolling_summary.csv
+    horizon_summary.json
+    step_000/
+      step_summary.json
+      step_config.json
+      etas/inv_<id>/seed_<seed>/forecast_catalog.csv
+      FINE/inv_<id>/seed_<seed>/forecast_catalog.csv
+    step_001/
+      ...
+  horizon_divergence_comparison.csv   # when sweeping multiple horizons
 ```
 
 ### MAGNET train / load notes (continuation runner)
