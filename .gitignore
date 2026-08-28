@@ -1,4 +1,7 @@
 # Custom
+.analysis_cache/
+**/analysis_cache/
+src/
 .cursor/hooks/.pytest-last-run.json
 output_data/*
 outputs/*
