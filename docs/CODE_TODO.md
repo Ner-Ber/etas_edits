@@ -75,6 +75,26 @@ Maintenance rules: `.cursor/rules/code-todo.mdc`
   - MAGNET ingested catalogs (e.g. `.../results/catalogs/ingested/hauksson.csv`)
   - `docs/script-usage-flows.md`
 
+### `preserve-depth-etas-magnet-roundtrip`
+- **Status:** open
+- **Added:** 2026-08-08
+- **Updated:** 2026-08-08
+- **Goal:** Preserve per-event hypocentral **depth** through the MAGNET↔ETAS catalog pipeline so benchmark/FINE depth variants use original catalog depths without a post-hoc `depth_source_catalog` join.
+- **Context:** Benchmark matrix catalogs (`input_data/etas_converted_*.csv`) are ETAS-format with columns `id, latitude, longitude, time, magnitude` — **no depth**. Root cause: `convert_magnet_to_etas` (eq_mag_prediction) drops depth; `convert_etas_to_magnet` then fills a constant default (0.0). `run_continuation_models.prepare_magnet_catalog_for_magnet_template` + `enrich_magnet_catalog_depth_from_source` (`magnet.depth_source_catalog`) re-join depth from native ingested CSVs by rounded `(time, lat, lon, magnitude)` — a workaround that can miss events (unmatched → default ~10 km) and logs misleading `unique depths` / `mean depth` stats instead of match quality. Cleaner fix: keep depth in ETAS exports and round-trip conversion so each event retains its OG depth automatically. Related: `magnet-native-catalog-not-etas-transform` (bypass conversion entirely); closed `etas-to-magnet-depth-upstream` (default fill on missing column only).
+- **Acceptance:**
+  - `convert_magnet_to_etas` retains a `depth` column (or ETAS-side convention agreed with inversion) when source MAGNET catalog has depth.
+  - `convert_etas_to_magnet` copies preserved depth through; no constant 0.0 fill when depth is present on input.
+  - Benchmark / continuation path: depth variants (`all_depth`, `mc_depth`) with `use_depth_as_feature=True` pass `validate_magnet_catalog_for_gin` without `magnet.depth_source_catalog`.
+  - Unit test: native catalog → ETAS → MAGNET round-trip yields per-event depth **identical** to source (within float tolerance); constant-depth failure cannot occur for catalogs with varying depth.
+  - Docs note when `depth_source_catalog` is still needed (legacy ETAS-only files with no depth column).
+- **Key paths:**
+  - Sibling repo: `eq_mag_prediction/.../ingestion/catalog_format_converter.py` (`convert_magnet_to_etas`, `convert_etas_to_magnet`)
+  - `runnable_code/run_continuation_models.py` (`prepare_magnet_catalog_for_magnet_template`, `enrich_magnet_catalog_depth_from_source`)
+  - `input_data/etas_converted_*.csv`, benchmark configs under `outputs/benchmark_matrix/`
+  - `config/benchmark_matrix.json`
+  - `docs/script-usage-flows.md`
+  - `tests/test_continuation_models_config.py` (or sibling-repo converter tests)
+
 ### `magnet-incremental-encoders`
 - **Status:** in_progress
 - **Added:** 2026-07-23

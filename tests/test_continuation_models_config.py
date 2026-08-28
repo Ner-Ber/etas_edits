@@ -6,6 +6,7 @@ import json
 import warnings
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 pytestmark = pytest.mark.unit
@@ -140,7 +141,8 @@ def test_apply_continuation_overrides_sets_required_macros(
     catalog = tmp_path / "example_catalog.csv"
     catalog.write_text(
         "latitude,longitude,time,magnitude,depth\n"
-        "34.0,-118.0,2017-01-02 00:00:00,4.0,5.0\n",
+        "34.0,-118.0,2017-01-02 00:00:00,4.0,5.0\n"
+        "34.1,-118.1,2017-01-03 00:00:00,3.5,8.0\n",
         encoding="utf-8",
     )
 
@@ -277,7 +279,8 @@ def test_apply_continuation_overrides_can_keep_gin_domain_times(
     catalog = tmp_path / "example_catalog.csv"
     catalog.write_text(
         "latitude,longitude,time,magnitude,depth\n"
-        "34.0,-118.0,2017-01-02 00:00:00,4.0,5.0\n",
+        "34.0,-118.0,2017-01-02 00:00:00,4.0,5.0\n"
+        "34.1,-118.1,2017-01-03 00:00:00,3.5,8.0\n",
         encoding="utf-8",
     )
 
@@ -380,6 +383,25 @@ def test_validate_magnet_catalog_reports_missing_depth(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="depth"):
+        mod.validate_magnet_catalog_for_gin(gin, catalog)
+
+
+def test_validate_magnet_catalog_reports_constant_depth(tmp_path: Path) -> None:
+    mod = _load_runner()
+    repo = Path(__file__).resolve().parents[1]
+    gin = tmp_path / "cfg.gin"
+    gin.write_text(
+        (repo / "config" / "magnet_hauksson_template.gin").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    catalog = tmp_path / "flat_depth.csv"
+    catalog.write_text(
+        "time,latitude,longitude,magnitude,depth\n"
+        "1,34,-118,4,5.0\n"
+        "2,34.1,-118.1,3.5,5.0\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="constant"):
         mod.validate_magnet_catalog_for_gin(gin, catalog)
 
 
@@ -503,6 +525,32 @@ def test_prepare_magnet_catalog_for_magnet_template_preserves_depth(
     assert "12.5" in lines[2]
 
 
+def test_enrich_magnet_catalog_depth_from_native_source(tmp_path: Path) -> None:
+    mod = _load_runner()
+    native = tmp_path / "native.csv"
+    native.write_text(
+        "time,latitude,longitude,magnitude,depth\n"
+        "1000,34.0,-118.0,3.5,8.2\n"
+        "2000,35.0,-117.0,4.0,12.5\n",
+        encoding="utf-8",
+    )
+    etas_like = tmp_path / "etas_magnet.csv"
+    etas_like.write_text(
+        "time,latitude,longitude,magnitude,depth\n"
+        "1000,34.0,-118.0,3.5,0.0\n"
+        "2000,35.0,-117.0,4.0,0.0\n",
+        encoding="utf-8",
+    )
+    dest = tmp_path / "prepared.csv"
+    mod.prepare_magnet_catalog_for_magnet_template(
+        etas_like,
+        dest,
+        depth_source_csv=native,
+    )
+    df = pd.read_csv(dest)
+    assert df["depth"].tolist() == [8.2, 12.5]
+
+
 def test_apply_overrides_errors_without_region_or_projection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -516,7 +564,8 @@ def test_apply_overrides_errors_without_region_or_projection(
     catalog = tmp_path / "example_catalog.csv"
     catalog.write_text(
         "latitude,longitude,time,magnitude,depth\n"
-        "34.0,-118.0,2017-01-02 00:00:00,4.0,5.0\n",
+        "34.0,-118.0,2017-01-02 00:00:00,4.0,5.0\n"
+        "34.1,-118.1,2017-01-03 00:00:00,3.5,8.0\n",
         encoding="utf-8",
     )
 
@@ -590,7 +639,8 @@ def test_apply_overrides_mc_mismatch_raises(
     catalog = tmp_path / "example_catalog.csv"
     catalog.write_text(
         "latitude,longitude,time,magnitude,depth\n"
-        "34.0,-118.0,2017-01-02 00:00:00,4.0,5.0\n",
+        "34.0,-118.0,2017-01-02 00:00:00,4.0,5.0\n"
+        "34.1,-118.1,2017-01-03 00:00:00,3.5,8.0\n",
         encoding="utf-8",
     )
 
@@ -851,7 +901,8 @@ def test_apply_encoder_filter_overrides(
     catalog = tmp_path / "example_catalog.csv"
     catalog.write_text(
         "latitude,longitude,time,magnitude,depth\n"
-        "34.0,-118.0,2017-01-02 00:00:00,4.0,5.0\n",
+        "34.0,-118.0,2017-01-02 00:00:00,4.0,5.0\n"
+        "34.1,-118.1,2017-01-03 00:00:00,3.5,8.0\n",
         encoding="utf-8",
     )
 

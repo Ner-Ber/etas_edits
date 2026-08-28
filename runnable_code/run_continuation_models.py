@@ -31,6 +31,7 @@ import re
 import sys
 import warnings
 
+import numpy as np
 import pandas as pd
 from shapely.geometry import Polygon
 
@@ -88,11 +89,91 @@ def _gin_raw_truthy(raw: str | None, default: bool = False) -> bool:
     return raw.strip().lower() in ("true", "1", "yes")
 
 
+def _catalog_time_epoch_seconds(time_series: pd.Series) -> pd.Series:
+    """Normalize catalog ``time`` to UTC epoch seconds (float)."""
+    if pd.api.types.is_numeric_dtype(time_series):
+        return time_series.astype(float)
+    parsed = pd.to_datetime(time_series, utc=True, errors="raise")
+    return (parsed - pd.Timestamp(0, tz="UTC")).dt.total_seconds().astype(float)
+
+
+def _catalog_merge_keys(df: pd.DataFrame) -> pd.DataFrame:
+    """Stable join keys for matching events across MAGNET/ETAS catalog variants."""
+    return pd.DataFrame(
+        {
+            "_merge_time": _catalog_time_epoch_seconds(df["time"]).round().astype(np.int64),
+            "_merge_lat": df["latitude"].astype(float).round(4),
+            "_merge_lon": df["longitude"].astype(float).round(4),
+            "_merge_mag": df["magnitude"].astype(float).round(2),
+        },
+        index=df.index,
+    )
+
+
+def enrich_magnet_catalog_depth_from_source(
+    catalog_df: pd.DataFrame,
+    depth_source_csv: pathlib.Path,
+) -> pd.DataFrame:
+    """
+    Replace ``depth`` in ``catalog_df`` by joining a native MAGNET catalog.
+
+    ETAS-format catalogs drop depth during ``convert_magnet_to_etas``; the
+  subsequent ``convert_etas_to_magnet`` pass only fills a constant default.
+    Use ``magnet.depth_source_catalog`` in the continuation JSON to restore
+    hypocentral depths before MAGNET training.
+    """
+    source = pd.read_csv(depth_source_csv)
+    if "depth" not in source.columns:
+        raise ValueError(
+            f"depth_source_catalog has no 'depth' column: {depth_source_csv}"
+        )
+    for col in ("time", "latitude", "longitude", "magnitude"):
+        if col not in source.columns:
+            raise ValueError(
+                f"depth_source_catalog missing {col!r}: {depth_source_csv}"
+            )
+
+    out = catalog_df.copy()
+    src_keys = _catalog_merge_keys(source)
+    lookup = pd.concat(
+        [src_keys, source["depth"].astype(float)],
+        axis=1,
+    ).drop_duplicates(
+        subset=["_merge_time", "_merge_lat", "_merge_lon", "_merge_mag"],
+        keep="first",
+    )
+    out_keys = _catalog_merge_keys(out)
+    merged = out_keys.merge(
+        lookup,
+        on=["_merge_time", "_merge_lat", "_merge_lon", "_merge_mag"],
+        how="left",
+    )
+    matched = int(merged["depth"].notna().sum())
+    total = len(out)
+    if matched == 0:
+        raise ValueError(
+            f"depth_source_catalog matched 0/{total} events: {depth_source_csv}"
+        )
+    if matched < total:
+        warnings.warn(
+            f"depth_source_catalog matched {matched}/{total} events "
+            f"({depth_source_csv}); unmatched rows keep existing depth",
+            UserWarning,
+            stacklevel=2,
+        )
+    out["depth"] = merged["depth"].to_numpy()
+    still_missing = out["depth"].isna()
+    if still_missing.any():
+        out.loc[still_missing, "depth"] = float(_DEFAULT_MAGNET_DEPTH_KM)
+    return out
+
+
 def prepare_magnet_catalog_for_magnet_template(
     source_magnet_csv: pathlib.Path,
     dest_csv: pathlib.Path,
     *,
     default_depth_km: float = _DEFAULT_MAGNET_DEPTH_KM,
+    depth_source_csv: pathlib.Path | None = None,
 ) -> pathlib.Path:
     """
     Write a MAGNET catalog that satisfies MAGNET-style encoder requirements.
@@ -102,6 +183,9 @@ def prepare_magnet_catalog_for_magnet_template(
     preserves existing ``depth`` values when present, else fills with
     ``default_depth_km``. RecentEarthquakesEncoder (use_depth_as_feature=True)
     needs a depth column.
+
+    When ``depth_source_csv`` is set (or ``magnet.depth_source_catalog`` in JSON),
+    depths are joined from that native catalog after the ETAS round-trip.
     """
     df = pd.read_csv(source_magnet_csv)
     missing_core = [
@@ -118,6 +202,16 @@ def prepare_magnet_catalog_for_magnet_template(
         .sort_values("time")
         .reset_index(drop=True)
     )
+    if depth_source_csv is not None:
+        n_before = int(df["depth"].nunique(dropna=True))
+        df = enrich_magnet_catalog_depth_from_source(df, depth_source_csv)
+        n_after = int(df["depth"].nunique(dropna=True))
+        print(
+            "MAGNET catalog depth enrichment: "
+            f"{depth_source_csv} → unique depths {n_before} → {n_after}, "
+            f"mean depth {df['depth'].mean():.2f} km",
+            flush=True,
+        )
     dest_csv.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(dest_csv, index=False)
     return dest_csv.resolve()
@@ -155,6 +249,16 @@ def validate_magnet_catalog_for_gin(
             "missing column 'depth' but RecentEarthquakesEncoder.use_depth_as_feature "
             "is True (MAGNET template). ETAS→MAGNET catalogs need depth filled in."
         )
+    if use_depth and "depth" in columns:
+        depth_sample = pd.read_csv(catalog_csv, usecols=["depth"])
+        if depth_sample["depth"].nunique(dropna=True) <= 1:
+            problems.append(
+                "depth column is constant "
+                f"({depth_sample['depth'].iloc[0]!r}); "
+                "RecentEarthquakesEncoder.use_depth_as_feature is True but "
+                "depth carries no information — set magnet.depth_source_catalog "
+                "to a native catalog with hypocentral depths"
+            )
 
     add_angles = _gin_raw_truthy(flat.get("_mock_earthquake.add_angles"), default=False)
     if add_angles:
@@ -352,6 +456,7 @@ def magnet_section(cfg: dict) -> dict:
         "catalog_format": section.get("catalog_format"),
         "catalog_loader": section.get("catalog_loader"),
         "default_depth_km": section.get("default_depth_km"),
+        "depth_source_catalog": section.get("depth_source_catalog"),
         "allow_mc_mismatch": bool(section.get("allow_mc_mismatch", False)),
         # Default True: JSON timewindow_* / testwindow_end overwrite gin domain macros
         # on the working copy. Set false to keep times from gin_config_path as-is.
@@ -497,6 +602,16 @@ def apply_continuation_overrides_to_magnet_gin(
     default_depth = (
         float(depth_raw) if depth_raw is not None else _DEFAULT_MAGNET_DEPTH_KM
     )
+    depth_source_raw = magnet.get("depth_source_catalog")
+    depth_source_csv = (
+        compare._resolve_path(repo_root, depth_source_raw)
+        if depth_source_raw
+        else None
+    )
+    if depth_source_csv is not None and not depth_source_csv.is_file():
+        raise FileNotFoundError(
+            f"magnet.depth_source_catalog not found: {depth_source_csv}"
+        )
 
     if "auxiliary_start" not in cfg:
         raise KeyError(
@@ -524,6 +639,7 @@ def apply_continuation_overrides_to_magnet_gin(
         magnet_catalog,
         work_dir / "magnet_catalog_prepared.csv",
         default_depth_km=default_depth,
+        depth_source_csv=depth_source_csv,
     )
 
     loader_override = magnet.get("catalog_loader")
