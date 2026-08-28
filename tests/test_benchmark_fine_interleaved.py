@@ -77,3 +77,45 @@ def test_resolve_variants_prefers_default_order(tmp_path: Path) -> None:
 
     resolved = mod.resolve_variants(None, run_root=run_root, catalog_id="jma")
     assert resolved[:3] == ("all_nodepth", "all_depth", "mc_depth")
+
+
+def test_variant_output_root_without_container_uses_config(tmp_path: Path) -> None:
+    mod = _load_mod()
+    run_root = tmp_path / "run"
+    catalog = run_root / "hauksson"
+    catalog.mkdir(parents=True)
+    configs = run_root / "configs"
+    configs.mkdir(parents=True)
+    variant_out = catalog / "FINE_variants" / "all_nodepth"
+    (configs / "hauksson_all_nodepth.json").write_text(
+        f'{{"output_root": "{variant_out}"}}\n',
+        encoding="utf-8",
+    )
+
+    resolved = mod.variant_output_root(run_root, "hauksson", "all_nodepth")
+    assert resolved == variant_out
+
+
+def test_realization_is_complete_without_container_dir(tmp_path: Path) -> None:
+    mod = _load_mod()
+    run_root = tmp_path / "run"
+    catalog = run_root / "hauksson"
+    configs = run_root / "configs"
+    configs.mkdir(parents=True)
+    variant_root = catalog / "FINE_variants" / "all_nodepth"
+    (configs / "hauksson_all_nodepth.json").write_text(
+        f'{{"output_root": "{variant_root}"}}\n',
+        encoding="utf-8",
+    )
+
+    assert mod.realization_is_complete(run_root, "hauksson", "all_nodepth", 0) is False
+
+
+def test_ensure_variant_container_creates_fine_variants(tmp_path: Path) -> None:
+    mod = _load_mod()
+    run_root = tmp_path / "run"
+    (run_root / "hauksson" / "shared").mkdir(parents=True)
+
+    created = mod.ensure_variant_container(run_root, "hauksson")
+    assert created == run_root / "hauksson" / "FINE_variants"
+    assert created.is_dir()
