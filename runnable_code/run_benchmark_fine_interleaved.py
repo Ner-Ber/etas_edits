@@ -114,9 +114,25 @@ def _variant_container_name(catalog_root: Path) -> str | None:
 def variant_output_root(run_root: Path, catalog_id: str, variant_id: str) -> Path:
     catalog_root = run_root / catalog_id
     container = _variant_container_name(catalog_root)
-    if container is None:
-        raise FileNotFoundError(f"No variant directory under {catalog_root}")
-    return catalog_root / container / variant_id
+    if container is not None:
+        return catalog_root / container / variant_id
+    config_path = variant_config_path(run_root, catalog_id, variant_id)
+    if config_path.is_file():
+        output_root = _load_json(config_path).get("output_root")
+        if output_root:
+            return Path(output_root)
+    return catalog_root / "FINE_variants" / variant_id
+
+
+def ensure_variant_container(run_root: Path, catalog_id: str) -> Path:
+    """Create FINE_variants/ when shared-only layout exists (fresh matrix run)."""
+    catalog_root = run_root / catalog_id
+    container = _variant_container_name(catalog_root)
+    if container is not None:
+        return catalog_root / container
+    variant_dir = catalog_root / "FINE_variants"
+    variant_dir.mkdir(parents=True, exist_ok=True)
+    return variant_dir
 
 
 def _list_inv_dirs(method_root: Path) -> list[Path]:
@@ -352,6 +368,8 @@ def run_interleaved_catalog(
         f"= {len(steps)} steps (order: {' → '.join(variants)})",
         flush=True,
     )
+
+    ensure_variant_container(run_root, catalog_id)
 
     failures = 0
     skipped = 0
