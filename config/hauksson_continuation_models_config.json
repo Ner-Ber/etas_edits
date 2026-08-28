@@ -41,6 +41,7 @@
         "region": "california",
         "save_predictions": false,
         "prediction_statistics": "sample",
-        "override_domain_times": true
+        "override_domain_times": true,
+        "depth_source_catalog": "/a/home/cc/students/csguests/neriberman/Repos/eq_mag_prediction/eq_mag_prediction/results/catalogs/ingested/hauksson.csv"
     }
 }
