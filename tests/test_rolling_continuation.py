@@ -206,3 +206,38 @@ def test_run_horizon_sweep_aggregates_results(tmp_path: Path) -> None:
     assert (out_root / "horizon_30d" / "rolling_summary.csv").is_file()
     assert (out_root / "horizon_60d" / "rolling_summary.csv").is_file()
 
+
+def test_run_rolling_variant_preset_overrides(tmp_path: Path) -> None:
+    config_file = tmp_path / "cfg.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "fn_catalog": "input_data/example_catalog.csv",
+                "timewindow_start": "2017-01-01 00:00:00",
+                "timewindow_end": "2018-01-01 00:00:00",
+                "testwindow_end": "2018-03-01 00:00:00",
+                "mc": 3.6,
+                "methods": ["etas"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with patch("rolling_continuation.run_walk_forward_for_horizon") as mock_run:
+        rc = run_rolling.main(
+            [
+                "--config",
+                str(config_file),
+                "--horizon-days",
+                "30",
+                "--variant",
+                "mc_nodepth",
+                "--output-root",
+                str(tmp_path / "out"),
+            ]
+        )
+        assert rc == 0
+        called_cfg = mock_run.call_args.kwargs["base_cfg"]
+        assert called_cfg["magnet"]["encoder_filter"] == "above_mc"
+        assert called_cfg["magnet"]["use_depth_as_feature"] is False
+
+
