@@ -35,6 +35,13 @@ import run_continuation_models as runner
 
 _DEFAULT_CONFIG = "config/continuation_models_config_short.json"
 
+_VARIANT_SETTINGS: dict[str, dict[str, Any]] = {
+    "all_depth": {"encoder_filter": "all_events", "use_depth_as_feature": True},
+    "all_nodepth": {"encoder_filter": "all_events", "use_depth_as_feature": False},
+    "mc_depth": {"encoder_filter": "above_mc", "use_depth_as_feature": True},
+    "mc_nodepth": {"encoder_filter": "above_mc", "use_depth_as_feature": False},
+}
+
 
 def parse_horizons(raw: str) -> list[float]:
     """Parse comma-separated or single horizon string into list of floats."""
@@ -73,6 +80,16 @@ def main(argv: list[str] | None = None) -> int:
         "--methods",
         default=None,
         help="Comma-separated subset: etas,thinning,FINE (default from config or all).",
+    )
+    parser.add_argument(
+        "--variant",
+        choices=["all_depth", "all_nodepth", "mc_depth", "mc_nodepth"],
+        default=None,
+        help=(
+            "FINE variant preset for MAGNET training: "
+            "'all_depth' (all events + depth), 'all_nodepth' (all events, no depth), "
+            "'mc_depth' (above Mc + depth), 'mc_nodepth' (above Mc, no depth)."
+        ),
     )
     parser.add_argument("--seed", type=int, default=None, help="Random seed.")
     parser.add_argument("--n-runs", type=int, default=None, help="Number of realization runs per step.")
@@ -131,6 +148,13 @@ def main(argv: list[str] | None = None) -> int:
         cfg["seed"] = int(args.seed)
     if args.n_runs is not None:
         cfg["n_runs"] = int(args.n_runs)
+
+    if args.variant is not None:
+        if "magnet" not in cfg or not isinstance(cfg["magnet"], dict):
+            cfg["magnet"] = {}
+        variant_opts = _VARIANT_SETTINGS[args.variant]
+        cfg["magnet"]["encoder_filter"] = variant_opts["encoder_filter"]
+        cfg["magnet"]["use_depth_as_feature"] = variant_opts["use_depth_as_feature"]
 
     output_root = (
         args.output_root.resolve()
