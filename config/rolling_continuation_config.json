@@ -38,6 +38,7 @@
         "model_dir": null,
         "gin_config_path": "config/magnet_hauksson_template.gin",
         "region": "california",
+        "use_depth_as_feature": false,
         "epochs": 2,
         "save_predictions": false
     }
