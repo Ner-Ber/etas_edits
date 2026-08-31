@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-os.environ.setdefault("TF_USE_LEGACY_KERAS", "1")
+os.environ.pop("TF_USE_LEGACY_KERAS", None)
 
 import gin
 import numpy as np
