@@ -27,6 +27,7 @@ import argparse
 import logging
 import pathlib
 import sys
+from typing import Any
 
 import continuation_compare as compare
 import continuation_ensemble as ens
@@ -112,6 +113,15 @@ def main(argv: list[str] | None = None) -> int:
         help="Pre-trained MAGNET model directory to load (avoids re-training per step).",
     )
     parser.add_argument(
+        "--schedule",
+        choices=["by_step", "by-realization", "by_realization"],
+        default=None,
+        help=(
+            "Realization scheduling: by_step (all seeds per window, default) or "
+            "by_realization (all windows for seed 0, then seed 1, ...)."
+        ),
+    )
+    parser.add_argument(
         "--force-rerun",
         action="store_true",
         help="Re-simulate selected methods even if cached.",
@@ -183,30 +193,31 @@ def main(argv: list[str] | None = None) -> int:
                 )
 
     horizons = parse_horizons(args.horizon_days)
+    schedule = rolling.normalize_schedule_mode(
+        args.schedule if args.schedule is not None else cfg.get("schedule")
+    )
+
+    walk_kwargs = dict(
+        base_cfg=cfg,
+        output_root=output_root,
+        repo_root=repo_root,
+        methods=methods,
+        magnet_model_dir=magnet_model_dir,
+        force_inversion=args.force_inversion,
+        force_rerun=args.force_rerun,
+        finetuning_time_days=args.finetuning_time_days,
+        schedule=schedule,
+    )
 
     if len(horizons) == 1:
         rolling.run_walk_forward_for_horizon(
-            base_cfg=cfg,
             horizon_days=horizons[0],
-            output_root=output_root,
-            repo_root=repo_root,
-            methods=methods,
-            magnet_model_dir=magnet_model_dir,
-            force_inversion=args.force_inversion,
-            force_rerun=args.force_rerun,
-            finetuning_time_days=args.finetuning_time_days,
+            **walk_kwargs,
         )
     else:
         rolling.run_horizon_sweep(
-            base_cfg=cfg,
             horizons=horizons,
-            output_root=output_root,
-            repo_root=repo_root,
-            methods=methods,
-            magnet_model_dir=magnet_model_dir,
-            force_inversion=args.force_inversion,
-            force_rerun=args.force_rerun,
-            finetuning_time_days=args.finetuning_time_days,
+            **walk_kwargs,
         )
 
     return 0

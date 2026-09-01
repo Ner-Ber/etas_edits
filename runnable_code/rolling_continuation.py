@@ -17,7 +17,7 @@ import math
 import os
 import pathlib
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any, Literal, Sequence
 
 import numpy as np
 import pandas as pd
@@ -29,6 +29,23 @@ import run_continuation_models as runner
 
 _STEP_DIR_PREFIX = "step_"
 _HORIZON_DIR_PREFIX = "horizon_"
+
+ScheduleMode = Literal["by_step", "by_realization"]
+
+
+def normalize_schedule_mode(raw: str | None) -> ScheduleMode:
+    """Map CLI/config schedule string to canonical mode."""
+    if raw is None:
+        return "by_step"
+    key = str(raw).strip().lower().replace("-", "_")
+    if key in ("by_step", "step", "steps"):
+        return "by_step"
+    if key in ("by_realization", "realization", "realizations", "seed", "seeds"):
+        return "by_realization"
+    raise ValueError(
+        "schedule must be 'by_step' or 'by_realization'; "
+        f"got {raw!r}"
+    )
 
 
 @dataclass(frozen=True)
@@ -161,6 +178,95 @@ def extract_observed_events(
     return df.loc[mask].sort_values("time").reset_index(drop=True)
 
 
+def collect_realizations_for_step(
+    *,
+    step_output_dir: pathlib.Path,
+    methods: Sequence[str],
+    seed_start: int,
+    n_runs: int,
+) -> dict[str, list[pd.DataFrame]]:
+    """Load forecast catalogs for each method and seed under a step directory."""
+    realizations_by_method: dict[str, list[pd.DataFrame]] = {}
+    for method in methods:
+        norm_method = ens.normalize_continuation_method(method)
+        method_cats: list[pd.DataFrame] = []
+        method_dir = step_output_dir / norm_method
+        if not method_dir.is_dir() and norm_method == ens.METHOD_FINE:
+            method_dir = step_output_dir / ens.METHOD_FINE_LEGACY
+
+        if method_dir.is_dir():
+            for seed_idx in range(n_runs):
+                seed = seed_start + seed_idx
+                for inv_dir in method_dir.glob("inv_*"):
+                    cat_file = inv_dir / f"seed_{seed}" / ens._FORECAST_CATALOG_NAME
+                    if cat_file.is_file():
+                        method_cats.append(pd.read_csv(cat_file))
+                        break
+        realizations_by_method[norm_method] = method_cats
+    return realizations_by_method
+
+
+def finalize_rolling_step(
+    *,
+    base_cfg: dict,
+    step_window: RollingStepWindows,
+    step_output_dir: pathlib.Path,
+    repo_root: pathlib.Path,
+    methods: Sequence[str],
+) -> dict[str, Any]:
+    """Aggregate all seed catalogs for a step and write step_summary.json."""
+    catalog_path = compare._resolve_path(repo_root, base_cfg["fn_catalog"])
+    raw_catalog = pd.read_csv(catalog_path)
+    mc = float(base_cfg.get("mc", 3.0))
+    obs_events = extract_observed_events(
+        raw_catalog,
+        step_window.forecast_start,
+        step_window.forecast_end,
+        mc=mc,
+    )
+    seed_start = int(base_cfg.get("seed", 0))
+    n_runs = int(base_cfg.get("n_runs", 1))
+    realizations_by_method = collect_realizations_for_step(
+        step_output_dir=step_output_dir,
+        methods=methods,
+        seed_start=seed_start,
+        n_runs=n_runs,
+    )
+    metrics = compute_step_divergence_metrics(obs_events, realizations_by_method, mc=mc)
+    step_meta = {
+        "step_index": step_window.step_index,
+        "windows": step_window.to_dict(),
+        "metrics": metrics,
+    }
+    (step_output_dir / "step_summary.json").write_text(
+        json.dumps(step_meta, indent=2),
+        encoding="utf-8",
+    )
+    return step_meta
+
+
+def _step_summary_row(
+    *,
+    horizon_days: float,
+    step_window: RollingStepWindows,
+    step_meta: dict[str, Any],
+) -> dict[str, Any]:
+    row_base = {
+        "horizon_days": horizon_days,
+        "step_index": step_window.step_index,
+        "forecast_start": str(step_window.forecast_start),
+        "forecast_end": str(step_window.forecast_end),
+        "observed_count": step_meta["metrics"]["observed_n_events"],
+    }
+    for method_name, m_stats in step_meta["metrics"]["methods"].items():
+        row_base[f"{method_name}_mean_count"] = m_stats["mean_count"]
+        row_base[f"{method_name}_std_count"] = m_stats["std_count"]
+        row_base[f"{method_name}_count_error"] = m_stats["count_error"]
+        row_base[f"{method_name}_rel_count_error"] = m_stats["rel_count_error"]
+        row_base[f"{method_name}_wasserstein_mag"] = m_stats["wasserstein_mag_dist"]
+    return row_base
+
+
 def compute_step_divergence_metrics(
     observed_df: pd.DataFrame,
     realizations_by_method: dict[str, list[pd.DataFrame]],
@@ -248,16 +354,19 @@ def execute_rolling_step(
     magnet_model_dir: pathlib.Path | None = None,
     force_inversion: bool = False,
     force_rerun: bool = False,
-) -> dict[str, Any]:
+    seed: int | None = None,
+    write_summary: bool = True,
+) -> dict[str, Any] | None:
     """
     Execute forecasts for a single step in the walk-forward sequence.
 
     Uses observed catalog data up to step_window.forecast_start as history.
+    When ``seed`` is set, runs a single realization (--n-runs 1) for that seed.
+    When ``write_summary`` is False, skips metrics aggregation (for partial runs).
     """
     step_output_dir.mkdir(parents=True, exist_ok=True)
     step_cfg = copy.deepcopy(base_cfg)
 
-    # Set step-specific time windows
     step_cfg["timewindow_start"] = str(step_window.train_start)
     step_cfg["timewindow_end"] = str(step_window.train_end)
     step_cfg["testwindow_end"] = str(step_window.forecast_end)
@@ -266,18 +375,19 @@ def execute_rolling_step(
     step_cfg["force_inversion"] = force_inversion
     step_cfg["force_rerun"] = force_rerun
 
-    # If MAGNET model is pre-trained or loaded, lock it to mode=load
+    if seed is not None:
+        step_cfg["seed"] = int(seed)
+        step_cfg["n_runs"] = 1
+
     if magnet_model_dir is not None:
         if "magnet" not in step_cfg:
             step_cfg["magnet"] = {}
         step_cfg["magnet"]["mode"] = "load"
         step_cfg["magnet"]["model_dir"] = str(magnet_model_dir)
 
-    # Write step config for provenance
     step_cfg_path = step_output_dir / "step_config.json"
     step_cfg_path.write_text(json.dumps(step_cfg, indent=2), encoding="utf-8")
 
-    # Run continuation models for this step
     runner_args = [
         "--config",
         str(step_cfg_path),
@@ -285,7 +395,11 @@ def execute_rolling_step(
         str(repo_root),
         "--methods",
         ",".join(methods),
+        "--n-runs",
+        "1" if seed is not None else str(int(step_cfg.get("n_runs", 1))),
     ]
+    if seed is not None:
+        runner_args.extend(["--seed", str(seed)])
     if force_inversion:
         runner_args.append("--force-inversion")
     if force_rerun:
@@ -295,54 +409,16 @@ def execute_rolling_step(
     if rc != 0:
         raise RuntimeError(f"Step {step_window.step_index} execution failed with exit code {rc}")
 
-    # Collect generated catalogs and evaluate against true data
-    catalog_path = compare._resolve_path(repo_root, base_cfg["fn_catalog"])
-    raw_catalog = pd.read_csv(catalog_path)
-    mc = float(base_cfg.get("mc", 3.0))
-    obs_events = extract_observed_events(
-        raw_catalog,
-        step_window.forecast_start,
-        step_window.forecast_end,
-        mc=mc,
+    if not write_summary:
+        return None
+
+    return finalize_rolling_step(
+        base_cfg=base_cfg,
+        step_window=step_window,
+        step_output_dir=step_output_dir,
+        repo_root=repo_root,
+        methods=methods,
     )
-
-    realizations_by_method: dict[str, list[pd.DataFrame]] = {}
-    seed_start = int(base_cfg.get("seed", 0))
-    n_runs = int(base_cfg.get("n_runs", 1))
-
-    for method in methods:
-        norm_method = ens.normalize_continuation_method(method)
-        method_cats: list[pd.DataFrame] = []
-        for seed_idx in range(n_runs):
-            seed = seed_start + seed_idx
-            # Search for realization forecast catalog
-            # Output layout: <step_output_dir>/<method>/inv_<id>/seed_<seed>/forecast_catalog.csv
-            method_dir = step_output_dir / norm_method
-            if not method_dir.is_dir() and norm_method == ens.METHOD_FINE:
-                method_dir = step_output_dir / ens.METHOD_FINE_LEGACY
-
-            if method_dir.is_dir():
-                for inv_dir in method_dir.glob("inv_*"):
-                    seed_dir = inv_dir / f"seed_{seed}"
-                    cat_file = seed_dir / ens._FORECAST_CATALOG_NAME
-                    if cat_file.is_file():
-                        cat_df = pd.read_csv(cat_file)
-                        method_cats.append(cat_df)
-                        break
-        realizations_by_method[norm_method] = method_cats
-
-    metrics = compute_step_divergence_metrics(obs_events, realizations_by_method, mc=mc)
-    step_meta = {
-        "step_index": step_window.step_index,
-        "windows": step_window.to_dict(),
-        "metrics": metrics,
-    }
-
-    (step_output_dir / "step_summary.json").write_text(
-        json.dumps(step_meta, indent=2),
-        encoding="utf-8",
-    )
-    return step_meta
 
 
 def run_walk_forward_for_horizon(
@@ -356,9 +432,14 @@ def run_walk_forward_for_horizon(
     force_inversion: bool = False,
     force_rerun: bool = False,
     finetuning_time_days: float | None = None,
+    schedule: ScheduleMode = "by_step",
 ) -> dict[str, Any]:
     """
     Run the full sequential walk-forward forecast for a fixed horizon T.
+
+    schedule:
+      by_step — for each time window, run all realizations (default).
+      by_realization — finish all windows for seed 0, then seed 1, etc.
     """
     steps = compute_rolling_steps(
         timewindow_start=base_cfg["timewindow_start"],
@@ -372,9 +453,13 @@ def run_walk_forward_for_horizon(
     h_dir = output_root / horizon_dir_name(horizon_days)
     h_dir.mkdir(parents=True, exist_ok=True)
 
+    seed_start = int(base_cfg.get("seed", 0))
+    n_runs = int(base_cfg.get("n_runs", 1))
+
     print(
         f"\n========================================\n"
         f"Starting walk-forward for T = {horizon_days:g} days ({len(steps)} steps)\n"
+        f"Schedule: {schedule} | realizations: {n_runs} (seeds {seed_start}..{seed_start + n_runs - 1})\n"
         f"Output: {h_dir}\n"
         f"========================================",
         flush=True,
@@ -383,42 +468,80 @@ def run_walk_forward_for_horizon(
     step_summaries: list[dict[str, Any]] = []
     rows_for_csv: list[dict[str, Any]] = []
 
-    for step in steps:
-        s_dir = h_dir / step_dir_name(step.step_index)
-        print(
-            f"\n--- Step {step.step_index + 1}/{len(steps)}: "
-            f"[{step.forecast_start} → {step.forecast_end}] "
-            f"(history through {step.train_end}) ---",
-            flush=True,
-        )
+    if schedule == "by_realization":
+        for run_idx, seed in enumerate(range(seed_start, seed_start + n_runs), start=1):
+            print(
+                f"\n=== Realization {run_idx}/{n_runs} (seed={seed}) ===",
+                flush=True,
+            )
+            for step in steps:
+                s_dir = h_dir / step_dir_name(step.step_index)
+                print(
+                    f"\n--- Step {step.step_index + 1}/{len(steps)} "
+                    f"(seed={seed}): "
+                    f"[{step.forecast_start} → {step.forecast_end}] "
+                    f"(history through {step.train_end}) ---",
+                    flush=True,
+                )
+                execute_rolling_step(
+                    base_cfg=base_cfg,
+                    step_window=step,
+                    step_output_dir=s_dir,
+                    repo_root=repo_root,
+                    methods=methods,
+                    magnet_model_dir=magnet_model_dir,
+                    force_inversion=force_inversion,
+                    force_rerun=force_rerun,
+                    seed=seed,
+                    write_summary=False,
+                )
 
-        step_meta = execute_rolling_step(
-            base_cfg=base_cfg,
-            step_window=step,
-            step_output_dir=s_dir,
-            repo_root=repo_root,
-            methods=methods,
-            magnet_model_dir=magnet_model_dir,
-            force_inversion=force_inversion,
-            force_rerun=force_rerun,
-        )
-        step_summaries.append(step_meta)
+        for step in steps:
+            s_dir = h_dir / step_dir_name(step.step_index)
+            step_meta = finalize_rolling_step(
+                base_cfg=base_cfg,
+                step_window=step,
+                step_output_dir=s_dir,
+                repo_root=repo_root,
+                methods=methods,
+            )
+            step_summaries.append(step_meta)
+            rows_for_csv.append(
+                _step_summary_row(
+                    horizon_days=horizon_days,
+                    step_window=step,
+                    step_meta=step_meta,
+                )
+            )
+    else:
+        for step in steps:
+            s_dir = h_dir / step_dir_name(step.step_index)
+            print(
+                f"\n--- Step {step.step_index + 1}/{len(steps)}: "
+                f"[{step.forecast_start} → {step.forecast_end}] "
+                f"(history through {step.train_end}) ---",
+                flush=True,
+            )
 
-        # Collect tabular row
-        row_base = {
-            "horizon_days": horizon_days,
-            "step_index": step.step_index,
-            "forecast_start": str(step.forecast_start),
-            "forecast_end": str(step.forecast_end),
-            "observed_count": step_meta["metrics"]["observed_n_events"],
-        }
-        for method_name, m_stats in step_meta["metrics"]["methods"].items():
-            row_base[f"{method_name}_mean_count"] = m_stats["mean_count"]
-            row_base[f"{method_name}_std_count"] = m_stats["std_count"]
-            row_base[f"{method_name}_count_error"] = m_stats["count_error"]
-            row_base[f"{method_name}_rel_count_error"] = m_stats["rel_count_error"]
-            row_base[f"{method_name}_wasserstein_mag"] = m_stats["wasserstein_mag_dist"]
-        rows_for_csv.append(row_base)
+            step_meta = execute_rolling_step(
+                base_cfg=base_cfg,
+                step_window=step,
+                step_output_dir=s_dir,
+                repo_root=repo_root,
+                methods=methods,
+                magnet_model_dir=magnet_model_dir,
+                force_inversion=force_inversion,
+                force_rerun=force_rerun,
+            )
+            assert step_meta is not None
+            step_summaries.append(step_meta)
+            rows_for_csv.append(
+                _step_summary_row(
+                    horizon_days=horizon_days,
+                    step_window=step,
+                    step_meta=step_meta,
+                )
+            )
 
     summary_df = pd.DataFrame(rows_for_csv)
     summary_csv_path = h_dir / "rolling_summary.csv"
@@ -427,6 +550,8 @@ def run_walk_forward_for_horizon(
     horizon_meta = {
         "horizon_days": horizon_days,
         "n_steps": len(steps),
+        "schedule": schedule,
+        "n_realizations": n_runs,
         "methods": list(methods),
         "steps": step_summaries,
     }
@@ -448,6 +573,7 @@ def run_horizon_sweep(
     force_inversion: bool = False,
     force_rerun: bool = False,
     finetuning_time_days: float | None = None,
+    schedule: ScheduleMode = "by_step",
 ) -> pd.DataFrame:
     """
     Run sequential forecasts over multiple horizon T values and compute divergence summary.
@@ -466,6 +592,7 @@ def run_horizon_sweep(
             force_inversion=force_inversion,
             force_rerun=force_rerun,
             finetuning_time_days=finetuning_time_days,
+            schedule=schedule,
         )
 
         # Aggregate divergence metrics across all steps for this T
