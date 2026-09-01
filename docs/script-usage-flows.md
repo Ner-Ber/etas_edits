@@ -110,6 +110,10 @@ python runnable_code/run_continuation_models.py \
 
 Runs step-ahead forecasts of length $T$, advances the conditioning history by $T$ with true observed events, and repeats over the test horizon. Supports sweeping across multiple $T$s (e.g. `--horizon-days 7,14,30,90`) to evaluate forecast divergence and skill scaling.
 
+**Scheduling** (`--schedule` or JSON `"schedule"`):
+- `by_step` (default): for each time window, run all `n_runs` realizations before advancing.
+- `by_realization`: complete all windows for seed 0, then seed 1, … (full trajectory available earlier).
+
 Outputs:
 ```
 <output_root>/

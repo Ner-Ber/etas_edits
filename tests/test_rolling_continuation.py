@@ -19,6 +19,15 @@ def test_parse_horizons_single_and_multiple() -> None:
         run_rolling.parse_horizons("0, 10")
 
 
+def test_normalize_schedule_mode() -> None:
+    assert rolling.normalize_schedule_mode(None) == "by_step"
+    assert rolling.normalize_schedule_mode("by-step") == "by_step"
+    assert rolling.normalize_schedule_mode("by_realization") == "by_realization"
+    assert rolling.normalize_schedule_mode("realizations") == "by_realization"
+    with pytest.raises(ValueError, match="schedule"):
+        rolling.normalize_schedule_mode("invalid")
+
+
 def test_compute_rolling_steps_expanding_window() -> None:
     steps = rolling.compute_rolling_steps(
         timewindow_start="2017-01-01 00:00:00",
@@ -239,5 +248,61 @@ def test_run_rolling_variant_preset_overrides(tmp_path: Path) -> None:
         called_cfg = mock_run.call_args.kwargs["base_cfg"]
         assert called_cfg["magnet"]["encoder_filter"] == "above_mc"
         assert called_cfg["magnet"]["use_depth_as_feature"] is False
+
+
+def test_run_walk_forward_by_realization_order(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    out_root = tmp_path / "by_realization"
+    cfg = {
+        "fn_catalog": "input_data/example_catalog.csv",
+        "timewindow_start": "2017-01-01 00:00:00",
+        "timewindow_end": "2018-01-01 00:00:00",
+        "testwindow_end": "2018-03-01 00:00:00",
+        "mc": 3.6,
+        "seed": 0,
+        "n_runs": 2,
+    }
+    call_log: list[tuple[int | None, int]] = []
+
+    def fake_execute_step(**kwargs):
+        seed = kwargs.get("seed")
+        step_window = kwargs["step_window"]
+        call_log.append((seed, step_window.step_index))
+        kwargs["step_output_dir"].mkdir(parents=True, exist_ok=True)
+        return None
+
+    def fake_finalize(**kwargs):
+        step_window = kwargs["step_window"]
+        return {
+            "step_index": step_window.step_index,
+            "windows": step_window.to_dict(),
+            "metrics": {
+                "observed_n_events": 1,
+                "methods": {
+                    "etas": {
+                        "mean_count": 1.0,
+                        "std_count": 0.0,
+                        "count_error": 0.0,
+                        "rel_count_error": 0.0,
+                        "wasserstein_mag_dist": None,
+                    }
+                },
+            },
+        }
+
+    with patch("rolling_continuation.execute_rolling_step", side_effect=fake_execute_step):
+        with patch("rolling_continuation.finalize_rolling_step", side_effect=fake_finalize):
+            rolling.run_walk_forward_for_horizon(
+                base_cfg=cfg,
+                horizon_days=30,
+                output_root=out_root,
+                repo_root=repo_root,
+                methods=["etas"],
+                schedule="by_realization",
+            )
+
+    # seed 0: steps 0,1 then seed 1: steps 0,1 (2 steps for 60-day test span)
+    assert call_log == [(0, 0), (0, 1), (1, 0), (1, 1)]
+    assert (out_root / "horizon_30d" / "rolling_summary.csv").is_file()
 
 

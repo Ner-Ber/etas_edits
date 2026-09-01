@@ -20,12 +20,13 @@ Maintenance rules: `.cursor/rules/code-todo.mdc`
 ### `sequential-walk-forward-fine-etas`
 - **Status:** in_progress
 - **Added:** 2026-08-28
-- **Updated:** 2026-08-28
+- **Updated:** 2026-09-01
 - **Goal:** Provide infrastructure for sequential walk-forward forecasts of length $T$, advancing "now" by $T$ with true observed catalog events, and sweeping over multiple $T$s to evaluate FINE divergence.
 - **Context:** Classical ETAS and FINE continuation forecast for a single test window. Evaluating how easily FINE diverges over different horizons requires stepping in chunks of $T$ days, assimilating intervening truth into the conditioning history, and computing per-step and multi-horizon divergence metrics (count bias, Wasserstein magnitude distance, KS tests).
 - **Acceptance:**
   - `runnable_code/rolling_continuation.py` implements window scheduling, step execution, observation extraction, divergence metric computation, and horizon sweep aggregation.
   - `runnable_code/run_rolling_continuation.py` provides CLI entrypoint with `--horizon-days` / `--T-days` sweep support.
+  - `--schedule by_realization` completes all windows per seed before the next seed (early single-realization trajectories).
   - Unit tests in `tests/test_rolling_continuation.py` pass.
 - **Key paths:**
   - `runnable_code/rolling_continuation.py`
