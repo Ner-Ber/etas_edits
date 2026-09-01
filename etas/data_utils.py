@@ -304,3 +304,30 @@ def bin_to_precision(x: np.ndarray | list, delta_x: float = 0.1) -> np.ndarray:
     d = decimal.Decimal(str(delta_x))
     decimal_places = abs(d.as_tuple().exponent)
     return np.round(round_half_up(x / delta_x) * delta_x, decimal_places)
+
+
+def catalog_times_and_mags(
+    catalog: pd.DataFrame,
+    forecast_start: pd.Timestamp | None = None,
+) -> tuple[pd.Series | pd.DatetimeIndex, np.ndarray]:
+    """Extract datetime timestamps and magnitude array from a forecast or history catalog."""
+    mag_col = "m" if "m" in catalog.columns else "magnitude"
+    mags = pd.to_numeric(catalog[mag_col], errors="coerce").to_numpy(dtype=float)
+    if "time" in catalog.columns:
+        times = pd.to_datetime(catalog["time"], utc=True).dt.tz_convert(None)
+    elif "dt_days" in catalog.columns and forecast_start is not None:
+        times = forecast_start + pd.to_timedelta(
+            catalog["dt_days"].to_numpy(dtype=float),
+            unit="D",
+        )
+    elif "t" in catalog.columns:
+        times = pd.Timestamp("1970-01-01") + pd.to_timedelta(
+            catalog["t"].to_numpy(dtype=float),
+            unit="D",
+        )
+    else:
+        raise ValueError(
+            "Catalog missing 'time' (and cannot infer from 'dt_days' without forecast_start or 't')"
+        )
+    return times, mags
+

@@ -83,6 +83,9 @@ def _stub_inversion_module() -> types.ModuleType:
 def _stub_magnet_inference_module() -> types.ModuleType:
     mod = types.ModuleType("etas.magnet_inference")
     mod.warm_magnet_session = MagicMock()
+    mod.configure_prediction_recording = MagicMock()
+    mod.prediction_recording_enabled = MagicMock(return_value=False)
+    mod.flush_magnet_predictions_for_model = MagicMock(return_value=None)
     return mod
 
 
@@ -132,7 +135,7 @@ def _run_main_smoke(
 
     sentinel_generator = object()
     module_patches = {"etas.inversion": _stub_inversion_module()}
-    if method == "FINE":
+    if method in ("FINE", "thinning_magnet"):
         module_patches["etas.magnet_inference"] = _stub_magnet_inference_module()
 
     with (
@@ -162,7 +165,7 @@ def test_continuation_ensemble_main_smoke(
     import continuation_ensemble as ens
 
     extra = []
-    if method == "FINE":
+    if method in ("FINE", "thinning_magnet"):
         extra = ["--thinning-model-dir", str(tmp_path / "magnet_model")]
 
     exit_code = _run_main_smoke(
@@ -174,21 +177,26 @@ def test_continuation_ensemble_main_smoke(
     )
     assert exit_code == 0
 
-    ensemble_dir = tmp_path / "ensembles" / method / "inv_smoke" / "seed_0"
+    normalized_method = ens.normalize_continuation_method(method)
+    ensemble_dir = tmp_path / "ensembles" / normalized_method / "inv_smoke" / "seed_0"
     catalog_path = ensemble_dir / ens._FORECAST_CATALOG_NAME
     assert catalog_path.is_file(), f"missing forecast catalog for {method}"
 
     meta = json.loads((ensemble_dir / ens._REALIZATION_META_NAME).read_text())
-    assert meta["continuation_method"] == method
+    assert meta["continuation_method"] == normalized_method
     assert meta["seed"] == 0
 
-    metrics_path = tmp_path / "ensembles" / method / "inv_smoke" / "per_realization_metrics.csv"
+    metrics_path = (
+        tmp_path / "ensembles" / normalized_method / "inv_smoke" / "per_realization_metrics.csv"
+    )
     assert metrics_path.is_file()
-    agg_path = tmp_path / "ensembles" / method / "inv_smoke" / "aggregate_summary.csv"
+    agg_path = tmp_path / "ensembles" / normalized_method / "inv_smoke" / "aggregate_summary.csv"
     assert agg_path.is_file()
 
-    ensemble_meta_path = tmp_path / "ensembles" / method / "inv_smoke" / "ensemble_meta.json"
+    ensemble_meta_path = (
+        tmp_path / "ensembles" / normalized_method / "inv_smoke" / "ensemble_meta.json"
+    )
     assert ensemble_meta_path.is_file()
     ensemble_meta = json.loads(ensemble_meta_path.read_text())
-    assert ensemble_meta["continuation_method"] == method
+    assert ensemble_meta["continuation_method"] == normalized_method
     assert ensemble_meta["n_newly_simulated"] == 1

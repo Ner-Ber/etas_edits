@@ -11,11 +11,14 @@ Import policy (``.cursor/rules/python-imports.mdc``):
 from __future__ import annotations
 
 import importlib
+import math
 import os
 import pickle
+import re
 from pathlib import Path
 
 import gin
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from joblib.numpy_pickle import NumpyUnpickler
@@ -287,3 +290,201 @@ def write_prediction_sidecar(dest: str | Path, rows: list[dict]) -> Path | None:
         model_prediction=model_prediction,
     )
     return dest_path
+
+
+def load_magnet_predictions(run_dir: str | Path) -> dict[str, np.ndarray] | None:
+    """Load cached MAGNET prediction sidecar arrays from a run directory."""
+    path = Path(run_dir).expanduser().resolve()
+    if path.is_dir():
+        path = path / _DEFAULT_SIDECAR_NAME
+    if not path.is_file():
+        return None
+    with np.load(path, allow_pickle=True) as data:
+        return {k: data[k] for k in data.files}
+
+
+def kumaraswamy_pdf(x: np.ndarray, a: float, b: float) -> np.ndarray:
+    """Evaluate Kumaraswamy probability density function on support (0, 1)."""
+    x_arr = np.asarray(x, dtype=float)
+    a_f = float(a)
+    b_f = float(b)
+    out = np.zeros_like(x_arr, dtype=float)
+    mask = (x_arr > 0.0) & (x_arr < 1.0)
+    xm = x_arr[mask]
+    out[mask] = (
+        a_f * b_f * np.power(xm, a_f - 1.0) * np.power(1.0 - np.power(xm, a_f), b_f - 1.0)
+    )
+    return out
+
+
+def parse_kumaraswamy_params(
+    model_prediction: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Split a flat mixture vector into per-component ``(a, b, weights)``."""
+    pred = np.asarray(model_prediction, dtype=float).reshape(-1)
+    if pred.size % 3 != 0:
+        raise ValueError(f"model_prediction length must be 3*n, got {pred.size}")
+    n_comp = pred.size // 3
+    a = pred[:n_comp]
+    b = pred[n_comp : 2 * n_comp]
+    weights = pred[2 * n_comp :]
+    w_sum = float(weights.sum())
+    if w_sum > 0.0:
+        weights = weights / w_sum
+    return a, b, weights
+
+
+def mixture_pdf_normalized(u: np.ndarray, model_prediction: np.ndarray) -> np.ndarray:
+    """Evaluate normalized Kumaraswamy mixture PDF on support u in (0, 1)."""
+    a, b, weights = parse_kumaraswamy_params(model_prediction)
+    pdf = np.zeros_like(np.asarray(u, dtype=float), dtype=float)
+    for ai, bi, wi in zip(a, b, weights):
+        pdf += wi * kumaraswamy_pdf(u, ai, bi)
+    return pdf
+
+
+def magnitude_pdf_from_prediction(
+    m: np.ndarray,
+    model_prediction: np.ndarray,
+    *,
+    shift: float,
+    stretch: float,
+) -> np.ndarray:
+    """Evaluate physical magnitude PDF from a MAGNET Kumaraswamy mixture prediction."""
+    u = (np.asarray(m, dtype=float) - float(shift)) / float(stretch)
+    return mixture_pdf_normalized(u, model_prediction) / float(stretch)
+
+
+def parse_magnet_shift_stretch(
+    model_dir: str | Path | None,
+    fallback_mc: float = 2.5,
+) -> tuple[float, float]:
+    """Parse ``(shift, stretch)`` from a trained MAGNET model's ``config.gin``."""
+    stretch = float(_DEFAULT_PDF_SUPPORT_STRETCH)
+    shift = float(fallback_mc) if np.isfinite(fallback_mc) else 0.0
+    if model_dir is None:
+        return shift, stretch
+    gin_path = Path(model_dir).expanduser() / "config.gin"
+    if not gin_path.is_file():
+        return shift, stretch
+    text = gin_path.read_text(encoding="utf-8")
+    m_stretch = re.search(
+        r"train_and_evaluate_magnitude_prediction_model\.pdf_support_stretch\s*=\s*([0-9.eE+-]+)",
+        text,
+    )
+    if m_stretch:
+        stretch = float(m_stretch.group(1))
+    m_mc = re.search(
+        r"CatalogDomain\.user_magnitude_threshold\s*=\s*([0-9.eE+-]+)",
+        text,
+    )
+    if m_mc:
+        shift = float(m_mc.group(1))
+    return shift, stretch
+
+
+def select_kuma_event_indices(
+    magnitudes: np.ndarray,
+    *,
+    mode: str,
+    indices: list[int] | None = None,
+    n_events: int = 4,
+    mag_range: tuple[float, float] | None = None,
+) -> list[int]:
+    """Select event indices for Kumaraswamy mixture PDF inspection."""
+    mags = np.asarray(magnitudes, dtype=float)
+    n = len(mags)
+    if n == 0:
+        return []
+    if mode == "indices":
+        if not indices:
+            raise ValueError("mode='indices' requires non-empty indices list")
+        bad = [i for i in indices if i < 0 or i >= n]
+        if bad:
+            raise ValueError(f"indices out of range [0, {n}): {bad}")
+        return list(indices)
+    if mode == "first_n":
+        return list(range(min(n_events, n)))
+    if mode == "largest_m":
+        order = np.argsort(mags)[::-1]
+        return [int(i) for i in order[: min(n_events, n)]]
+    if mode == "magnitude_range":
+        if mag_range is None:
+            raise ValueError("mode='magnitude_range' requires mag_range tuple")
+        lo, hi = mag_range
+        hits = np.where((mags >= lo) & (mags <= hi))[0]
+        if hits.size == 0:
+            return []
+        order = hits[np.argsort(mags[hits])[::-1]]
+        return [int(i) for i in order[:n_events]]
+    raise ValueError(f"Unknown mode: {mode!r}")
+
+
+def plot_kumaraswamy_params_vs_time(
+    magnet_preds: dict[str, np.ndarray],
+    *,
+    event_stride: int = 1,
+    title: str | None = None,
+) -> plt.Figure | None:
+    """Plot Kumaraswamy mixture parameters vs event time for one realization."""
+    mp = np.asarray(magnet_preds["model_prediction"], dtype=float)
+    if mp.ndim == 1:
+        mp = mp.reshape(1, -1)
+    if mp.ndim != 2 or mp.shape[1] % 3 != 0:
+        raise ValueError(
+            f"expected model_prediction (n_events, 3*n_comp), got {mp.shape}"
+        )
+    time_s = np.asarray(magnet_preds["time"], dtype=np.int64)
+    n_events, param_dim = mp.shape
+    n_comp = param_dim // 3
+    if n_events < 1 or n_comp < 1:
+        return None
+
+    w_raw = mp[:, 2 * n_comp :]
+    w_sum = w_raw.sum(axis=1, keepdims=True)
+    w_sum = np.where(w_sum > 0.0, w_sum, 1.0)
+    a = mp[:, :n_comp]
+    b = mp[:, n_comp : 2 * n_comp]
+    w = w_raw / w_sum
+
+    event_idx = np.arange(0, n_events, max(1, int(event_stride)))
+    time_axis = pd.to_datetime(time_s[event_idx], unit="s", utc=True).tz_convert(None)
+
+    n_params = 3 * n_comp
+    n_cols = min(3, n_params)
+    n_rows = int(math.ceil(n_params / n_cols))
+    fig, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(4.6 * n_cols, 3.0 * n_rows),
+        squeeze=False,
+        sharex=True,
+    )
+    for ax in axes.ravel():
+        ax.set_visible(False)
+
+    param_specs: list[tuple[str, np.ndarray, int]] = []
+    for k in range(n_comp):
+        param_specs.append((f"a[{k}]", a[:, k], k))
+    for k in range(n_comp):
+        param_specs.append((f"b[{k}]", b[:, k], k))
+    for k in range(n_comp):
+        param_specs.append((f"w[{k}]", w[:, k], k))
+
+    comp_colors = plt.cm.tab10(np.linspace(0, 1, max(n_comp, 1)))
+    for panel_i, (label, values, comp_k) in enumerate(param_specs):
+        ax = axes[panel_i // n_cols][panel_i % n_cols]
+        ax.set_visible(True)
+        color = comp_colors[comp_k % len(comp_colors)]
+        ax.plot(time_axis, values[event_idx], color=color, lw=1.2)
+        ax.set_ylabel(label)
+        ax.grid(True, alpha=0.3)
+        if panel_i // n_cols == n_rows - 1:
+            ax.set_xlabel("time")
+
+    if title:
+        fig.suptitle(title, fontsize=12)
+    fig.autofmt_xdate(rotation=25, ha="right")
+    fig.tight_layout()
+    return fig
+
