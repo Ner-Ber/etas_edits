@@ -153,6 +153,61 @@
                 "MAGNET_INCREMENTAL_FEATURE_STATE": "1",
                 "MPLBACKEND": "TkAgg"
             }
+        },
+        {
+            "name": "Encoder features: incremental path (pytest)",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/bin/python",
+            "pythonArgs": [
+                "-u"
+            ],
+            "module": "pytest",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "tests/test_magnet_encoder_features_incremental.py",
+                "-q",
+                "--tb=short",
+                "-k",
+                "incremental_matches_via_build_features or catalog_columns_incremental or recent_incremental or seismicity_incremental or sequential_sync"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/runnable_code:/a/home/cc/students/csguests/neriberman/Repos/eq_mag_prediction/eq_mag_prediction_clean",
+                "LD_LIBRARY_PATH": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/lib",
+                "MAGNET_INCREMENTAL_ENCODERS": "1",
+                "MAGNET_INCREMENTAL_FEATURE_STATE": "1",
+                "MPLBACKEND": "Agg"
+            }
+        },
+        {
+            "name": "Encoder features: mock thinning run (Phase B)",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/bin/python",
+            "pythonArgs": [
+                "-u"
+            ],
+            "program": "${workspaceFolder}/runnable_code/debug_magnet_incremental_encoders_mock.py",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--history-size",
+                "80",
+                "--max-forecast-events",
+                "30",
+                "--seed",
+                "42"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/runnable_code:/a/home/cc/students/csguests/neriberman/Repos/eq_mag_prediction/eq_mag_prediction_clean",
+                "LD_LIBRARY_PATH": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/lib",
+                "MAGNET_INCREMENTAL_ENCODERS": "1",
+                "MAGNET_INCREMENTAL_FEATURE_STATE": "1",
+                "MPLBACKEND": "Agg"
+            }
         }
     ]
 }

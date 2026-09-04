@@ -209,6 +209,80 @@ def test_flatten_and_scale_matches_reference_scaled_inputs(
     )
 
 
+def test_catalog_columns_incremental_matches_build_features_single_step(
+    hauksson_encoders,
+) -> None:
+    from eq_mag_prediction.utilities import geometry
+
+    import etas.magnet_encoder_features_catalog as magnet_encoder_features_catalog
+    import etas.magnet_encoder_incremental as magnet_encoder_incremental
+
+    all_encoders, catalog = hauksson_encoders
+    encoder = all_encoders["catalog_earthquakes"]
+    catalog_dt = _catalog_dt(catalog)
+    state = magnet_encoder_incremental.IncrementalEncoderState(all_encoders)
+    state.reset(catalog_dt)
+    eval_time = int(catalog["time"].iloc[45])
+    loc = geometry.Point(lng=-119.6, lat=34.8)
+    altered = state.altered_catalog(eval_time)
+    examples = {eval_time: [[loc]]}
+    expected = encoder.build_features(examples, custom_catalog=altered)
+    incremental = magnet_encoder_features_catalog.features_catalog_columns_incremental(
+        encoder,
+        state.catalog["time"].to_numpy(dtype=np.int64, copy=False),
+        state.catalog["longitude"].to_numpy(dtype=np.float64, copy=False),
+        state.catalog["latitude"].to_numpy(dtype=np.float64, copy=False),
+        {},
+        eval_time,
+        loc,
+    )
+    assert np.array_equal(expected, incremental)
+
+
+def test_catalog_columns_incremental_matches_build_features_sequential(
+    hauksson_encoders,
+) -> None:
+    from eq_mag_prediction.utilities import geometry
+
+    import etas.magnet_encoder_features_catalog as magnet_encoder_features_catalog
+    import etas.magnet_encoder_incremental as magnet_encoder_incremental
+
+    all_encoders, catalog = hauksson_encoders
+    encoder = all_encoders["catalog_earthquakes"]
+    catalog_dt = _catalog_dt(catalog)
+    state = magnet_encoder_incremental.IncrementalEncoderState(all_encoders)
+    state.reset(catalog_dt)
+    last_time = catalog_dt["time"].max()
+    for i in range(40):
+        event = {
+            "time": last_time + pd.Timedelta(days=11 * (i + 1)),
+            "latitude": 34.8 + 0.018 * i,
+            "longitude": -120.5 - 0.018 * i,
+            "magnitude": 2.9 + 0.06 * (i % 6),
+            "depth": float(i % 4),
+        }
+        prep = magnet_encoder_incremental.prepare_encoder_catalog(pd.DataFrame([event]))
+        eval_time = int(prep.iloc[0]["time"])
+        loc = geometry.Point(
+            lng=float(event["longitude"]) + 0.003,
+            lat=float(event["latitude"]) - 0.002,
+        )
+        altered = state.altered_catalog(eval_time)
+        examples = {eval_time: [[loc]]}
+        expected = encoder.build_features(examples, custom_catalog=altered)
+        incremental = magnet_encoder_features_catalog.features_catalog_columns_incremental(
+            encoder,
+            state.catalog["time"].to_numpy(dtype=np.int64, copy=False),
+            state.catalog["longitude"].to_numpy(dtype=np.float64, copy=False),
+            state.catalog["latitude"].to_numpy(dtype=np.float64, copy=False),
+            {},
+            eval_time,
+            loc,
+        )
+        assert np.array_equal(expected, incremental), f"step {i}"
+        state.append_row(event)
+
+
 def test_recent_ring_buffer_empty_window_all_mock(hauksson_encoders) -> None:
     import etas.magnet_encoder_features_recent as magnet_encoder_features_recent
 
