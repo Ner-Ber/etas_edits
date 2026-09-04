@@ -16,6 +16,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+import etas.magnet_encoder_features_catalog as magnet_encoder_features_catalog
 import etas.magnet_encoder_features_recent as magnet_encoder_features_recent
 import etas.magnet_encoder_features_seismicity as magnet_encoder_features_seismicity
 
@@ -435,13 +436,25 @@ class IncrementalEncoderState:
         loc: Any,
     ) -> dict[str, np.ndarray]:
         """Fast path: ring buffers / timelines for supported encoders."""
-        altered = self.altered_catalog(evaluation_time)
-        examples = {int(evaluation_time): [[loc]]}
         raw: dict[str, np.ndarray] = {}
         if self._columns_encoder is not None:
-            raw["catalog_earthquakes"] = self._columns_encoder.build_features(
-                examples,
-                custom_catalog=altered,
+            raw["catalog_earthquakes"] = (
+                magnet_encoder_features_catalog.features_catalog_columns_incremental(
+                    self._columns_encoder,
+                    self._times,
+                    self._catalog["longitude"].to_numpy(dtype=np.float64, copy=False),
+                    self._catalog["latitude"].to_numpy(dtype=np.float64, copy=False),
+                    {
+                        column: self._catalog[column].to_numpy(
+                            dtype=np.float64, copy=False
+                        )
+                        for column in magnet_encoder_features_catalog._catalog_columns_encoder_params(
+                            self._columns_encoder
+                        )
+                    },
+                    int(evaluation_time),
+                    loc,
+                )
             )
         if self._recent_encoder is not None:
             if self._recent_buffer is None:

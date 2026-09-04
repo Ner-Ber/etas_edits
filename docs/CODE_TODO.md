@@ -78,18 +78,19 @@ Maintenance rules: `.cursor/rules/code-todo.mdc`
 ### `magnet-incremental-encoders`
 - **Status:** in_progress
 - **Added:** 2026-07-23
-- **Updated:** 2026-07-27
+- **Updated:** 2026-09-04
 - **Goal:** Speed up FINE/thinning+MAGNET in two layers: (A) scaffolding reuse (done) and (B) true incremental encoder **feature** state (planned below).
 - **Context:**
   - **Phase A (done):** ``IncrementalEncoderState`` in ``etas/magnet_encoder_incremental.py`` — append-only catalog + reuse warmed ``all_encoders``; still calls upstream ``encoder.build_features`` per query. Default on (``MAGNET_INCREMENTAL_ENCODERS=1``); ``0`` = legacy ``create_altered_prediction_single_loc`` path.
-  - **Phase B (next):** Push/sliding-window feature buffers so ``build_features`` is not rescanned per thinning step. **Do not delete** current methods; add parallel ``*_incremental`` implementations; after parity + benchmarks, rename current → ``*_old`` and promote new names.
+  - **Phase B (in progress / largely implemented):** Warm append-only event arrays + cheaper per-query rebuild (avoid ``build_features`` / pandas rescans). **Not** yet true sliding-window feature updates — see follow-on ``magnet-incremental-sliding-windows``.
+  - **Do not delete** current methods; add parallel ``*_incremental`` implementations; after parity + benchmarks, rename current → ``*_old`` and promote new names.
   - Parity oracle: ``reference_raw_encoder_features`` / ``encoder.build_features`` with ``np.array_equal`` (and integration thinning parity).
 - **Phase B execution order:**
   1. **Harness** — ``features_for_example_via_build_features`` (rename of current logic), env ``MAGNET_INCREMENTAL_FEATURE_STATE=1``, unit parity tests per encoder submodule.
   2. **Recent earthquakes** — ``RecentEarthquakesRingBuffer`` + ``features_recent_earthquakes_incremental`` (deque ≤``max_earthquakes``, prune by ``limit_lookback_seconds``, O(80) time-dependent cols).
   3. **Seismicity rate** — ``SeismicityRateTimelineState`` + ``features_seismicity_rate_incremental`` (per-mag event lists, prefix sums on time, single-pass spatial box filter; 8 lookbacks via cumsum + existing diff/divide).
   4. **Cross-call persistence** — session-level state across thinning ``predict_magnitudes`` calls (append-only catalog extension, avoid ``reset`` + ``catalog.copy`` when prefix unchanged); optional ``rate_simulation`` hook.
-  5. **Catalog columns** — ``features_catalog_columns_incremental`` (O(1) time-since-last + query lon/lat).
+  5. **Catalog columns** — ``features_catalog_columns_incremental`` in ``etas/magnet_encoder_features_catalog.py`` (vectorized space-time proximity on append-only arrays; avoids ``build_features``). **Done** (parity tests in ``tests/test_magnet_encoder_features_incremental.py``).
   6. **Seismicity grid** (only if encoder enabled in a variant) — global histogram + window extract, or incremental event list + ``histogram2d`` on lookback slice.
   7. **Switchover** — after user approval: ``features_for_example`` → ``features_for_example_old``; promote ``features_for_example_incremental``; document in ``docs/script-usage-flows.md``; benchmark ``runnable_code/benchmark_magnet_incremental.py``.
 - **Acceptance (Phase A — done):**
@@ -100,13 +101,38 @@ Maintenance rules: `.cursor/rules/code-todo.mdc`
   - Measurable speedup on continuation thinning vs Phase A (log timings in benchmark script).
   - No removal of old code until user approves switchover (step 7).
 - **Key paths:**
-  - ``etas/magnet_encoder_incremental.py`` (or split: ``etas/magnet_encoder_features_recent.py``, ``etas/magnet_encoder_features_seismicity.py``)
+  - ``etas/magnet_encoder_incremental.py`` (or split: ``etas/magnet_encoder_features_recent.py``, ``etas/magnet_encoder_features_seismicity.py``, ``etas/magnet_encoder_features_catalog.py``)
   - ``etas/magnet_inference.py``
   - ``etas/rate_simulation.py`` (step 4)
   - ``tests/test_magnet_encoder_incremental_parity.py``
   - ``tests/test_magnet_encoder_incremental_parity_unit.py``
   - ``tests/test_magnet_encoder_features_incremental.py`` (new, per-phase)
   - ``runnable_code/benchmark_magnet_incremental.py``
+
+### `magnet-incremental-sliding-windows`
+- **Status:** open
+- **Added:** 2026-09-04
+- **Updated:** 2026-09-04
+- **Goal:** Replace Phase B’s per-query **window recompute** with true **sliding / edge-update** feature state so moving-window encoders advance cheaply as history grows and evaluation time moves.
+- **Context:**
+  - Depends on / follows ``magnet-incremental-encoders`` (Phase A+B). As of 2026-09-04, Phase B keeps append-only event arrays (``RecentEarthquakesRingBuffer``, ``SeismicityRateTimelineState``) and, for each MAGNET example ``(evaluation_time, loc)``, **re-slices and rebuilds** feature tensors from that history (``subcatalog_for_evaluation_time`` / ``features_at_time``; ``cumulative_energy_grid`` + postprocess). That avoids upstream ``encoder.build_features`` + pandas rescans but is still O(window rebuild) per thinning step, not O(1)/amortized slide.
+  - Confirmed during debugging (FINE / mock thinning): ``features_for_example_incremental`` reads warm state and computes a **fresh** raw feature dict; it does not mutate a previous feature tensor. History growth is ``ingest_row`` / ``append_row``; window math is query-time only.
+  - Largest remaining speedup for ``recent_earthquakes`` and ``seismicity_rate`` is expected from sliding updates (drop events leaving the lookback, update only changed slots / aggregates), not from further “cheaper full recompute.”
+  - Constraints unchanged: logic stays in **etas only**; ``eq_mag_prediction`` remains the parity oracle; keep parallel paths until user-approved switchover; exact / tight-tolerance parity as today.
+- **Acceptance:**
+  - **Recent:** Real ring/sliding buffer — as ``t`` advances and events are ingested, prune events outside ``[t−L, t)`` / beyond ``max_earthquakes``; update feature slots incrementally where possible instead of full ``feature_functions`` pass on the whole padded window every step (document any residual full rebuilds).
+  - **Seismicity rate:** Maintain lookback/box aggregates (or persistent prefix structures) updated by add/remove of edge events when history or ``t``/``loc`` changes; avoid recomputing cumsums from scratch over the full filtered window each query when ``loc`` is unchanged or changes are local (define and document the update rules).
+  - Parity tests vs ``encoder.build_features`` (same rules as Phase B: ``np.array_equal`` / ``allclose`` for seismicity).
+  - Benchmark shows clear speedup vs current Phase B recompute path on thinning (extend ``runnable_code/benchmark_magnet_incremental.py`` or the Phase B mock runner).
+  - No deletion of Phase B recompute path until user approves.
+- **Key paths:**
+  - ``etas/magnet_encoder_features_recent.py`` (``subcatalog_for_evaluation_time``, ``features_at_time``, ``ingest_row``)
+  - ``etas/magnet_encoder_features_seismicity.py`` (``cumulative_energy_grid``, ``features_at_time``, ``ingest_row``)
+  - ``etas/magnet_encoder_incremental.py`` (``features_for_example_incremental``, ``_append_prepared_row``)
+  - ``etas/magnet_inference.py`` (``predict_magnitudes`` call site)
+  - ``tests/test_magnet_encoder_features_incremental.py``
+  - ``runnable_code/benchmark_magnet_incremental.py``
+  - ``runnable_code/debug_magnet_incremental_encoders_mock.py``
 
 ### `eq-mag-prediction-merge-and-canonical-checkout`
 - **Status:** open
