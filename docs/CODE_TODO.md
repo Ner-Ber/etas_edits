@@ -82,7 +82,7 @@ Maintenance rules: `.cursor/rules/code-todo.mdc`
 - **Goal:** Speed up FINE/thinning+MAGNET in two layers: (A) scaffolding reuse (done) and (B) true incremental encoder **feature** state (planned below).
 - **Context:**
   - **Phase A (done):** ``IncrementalEncoderState`` in ``etas/magnet_encoder_incremental.py`` — append-only catalog + reuse warmed ``all_encoders``; still calls upstream ``encoder.build_features`` per query. Default on (``MAGNET_INCREMENTAL_ENCODERS=1``); ``0`` = legacy ``create_altered_prediction_single_loc`` path.
-  - **Phase B (in progress / largely implemented):** Warm append-only event arrays + cheaper per-query rebuild (avoid ``build_features`` / pandas rescans). **Not** yet true sliding-window feature updates — see follow-on ``magnet-incremental-sliding-windows``.
+  - **Phase B (implemented for Hauksson/FINE encoders; switchover pending):** Warm append-only event arrays + cheaper per-query rebuild (avoid ``build_features`` / pandas rescans). Catalog columns path landed 2026-09-04. Benchmark compares ``legacy`` / ``phase_a`` / ``phase_b`` via ``runnable_code/benchmark_magnet_incremental.py --phases ...``. **Not** yet true sliding-window feature updates — see follow-on ``magnet-incremental-sliding-windows``.
   - **Do not delete** current methods; add parallel ``*_incremental`` implementations; after parity + benchmarks, rename current → ``*_old`` and promote new names.
   - Parity oracle: ``reference_raw_encoder_features`` / ``encoder.build_features`` with ``np.array_equal`` (and integration thinning parity).
 - **Phase B execution order:**
@@ -92,13 +92,13 @@ Maintenance rules: `.cursor/rules/code-todo.mdc`
   4. **Cross-call persistence** — session-level state across thinning ``predict_magnitudes`` calls (append-only catalog extension, avoid ``reset`` + ``catalog.copy`` when prefix unchanged); optional ``rate_simulation`` hook.
   5. **Catalog columns** — ``features_catalog_columns_incremental`` in ``etas/magnet_encoder_features_catalog.py`` (vectorized space-time proximity on append-only arrays; avoids ``build_features``). **Done** (parity tests in ``tests/test_magnet_encoder_features_incremental.py``).
   6. **Seismicity grid** (only if encoder enabled in a variant) — global histogram + window extract, or incremental event list + ``histogram2d`` on lookback slice.
-  7. **Switchover** — after user approval: ``features_for_example`` → ``features_for_example_old``; promote ``features_for_example_incremental``; document in ``docs/script-usage-flows.md``; benchmark ``runnable_code/benchmark_magnet_incremental.py``.
+  7. **Switchover** — after user approval: ``features_for_example`` → ``features_for_example_old``; promote ``features_for_example_incremental``; document in ``docs/script-usage-flows.md``; benchmark ``runnable_code/benchmark_magnet_incremental.py`` (legacy / Phase A / Phase B arms via ``--phases``).
 - **Acceptance (Phase A — done):**
   - ``etas/magnet_encoder_incremental.py`` + wired in ``etas/magnet_inference.py``.
   - Exact-parity tests pass (``tests/test_magnet_encoder_incremental_parity_unit.py``; integration parity when checkpoint available).
 - **Acceptance (Phase B):**
   - Each phase lands with parity tests before the next phase.
-  - Measurable speedup on continuation thinning vs Phase A (log timings in benchmark script).
+  - Measurable speedup on continuation thinning vs Phase A (log timings in benchmark script; ``--phases legacy,phase_a,phase_b``).
   - No removal of old code until user approves switchover (step 7).
 - **Key paths:**
   - ``etas/magnet_encoder_incremental.py`` (or split: ``etas/magnet_encoder_features_recent.py``, ``etas/magnet_encoder_features_seismicity.py``, ``etas/magnet_encoder_features_catalog.py``)
@@ -108,6 +108,7 @@ Maintenance rules: `.cursor/rules/code-todo.mdc`
   - ``tests/test_magnet_encoder_incremental_parity_unit.py``
   - ``tests/test_magnet_encoder_features_incremental.py`` (new, per-phase)
   - ``runnable_code/benchmark_magnet_incremental.py``
+  - ``runnable_code/debug_magnet_incremental_encoders_mock.py``
 
 ### `magnet-incremental-sliding-windows`
 - **Status:** open

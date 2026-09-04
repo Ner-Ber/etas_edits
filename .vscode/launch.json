@@ -208,6 +208,34 @@
                 "MAGNET_INCREMENTAL_FEATURE_STATE": "1",
                 "MPLBACKEND": "Agg"
             }
+        },
+        {
+            "name": "Encoder features: benchmark Phase A vs B",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/bin/python",
+            "pythonArgs": [
+                "-u"
+            ],
+            "program": "${workspaceFolder}/runnable_code/benchmark_magnet_incremental.py",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--history-size",
+                "80",
+                "--max-forecast-events",
+                "20",
+                "--seed",
+                "42",
+                "--phases",
+                "legacy,phase_a,phase_b"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/runnable_code:/a/home/cc/students/csguests/neriberman/Repos/eq_mag_prediction/eq_mag_prediction_clean",
+                "LD_LIBRARY_PATH": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/lib",
+                "MPLBACKEND": "Agg"
+            }
         }
     ]
 }
