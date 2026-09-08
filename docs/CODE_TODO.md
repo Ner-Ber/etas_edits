@@ -119,25 +119,23 @@ Maintenance rules: `.cursor/rules/code-todo.mdc`
 - **Context:**
   - Decision 2026-09-08: **Yes** — move feature-state lifecycle + window math to MAGNET; **Partial** InferenceSession later; **No** — do not move Ogata thinning.
   - Correct inference order: ``features_at(t, loc)`` (raw, history only) → pre-fit ``scaler.transform`` → ``model.predict`` → sample magnitude → ``ingest``.
-  - Current etas Phase B implementation remains the reference until Phase 1 port + parity.
   - Target checkout: ``eq_mag_prediction/eq_mag_prediction_clean`` (``branch-clean-test-FINAL``), on etas ``PYTHONPATH``.
 - **Execution phases:**
-  0. **API contract (Phase 0)** — ``FeatureState`` stub + docs + contract tests. **Done; paused for user inspection** (2026-09-08). Do not start Phase 1 without approval.
-  1. **Port Phase B** — implement ``from_catalog`` / ``reset`` / ``ingest`` / ``features_at`` / ``sync_extension``; move builders from etas ``magnet_encoder_features_*.py``; MAGNET parity tests; etas thin wrapper.
+  0. **API contract (Phase 0)** — Done (committed).
+  1. **Port Phase B** — **Done (2026-09-08):** ``FeatureState`` implemented; builders in ``forecasting/incremental_windows.py``; MAGNET parity tests; etas ``IncrementalEncoderState`` + ``magnet_encoder_features_*`` are thin wrappers/re-exports.
   2. **Phase C sliding** — true window edge-updates inside MAGNET (also ``magnet-incremental-sliding-windows``).
   3. **Optional InferenceSession** — load model/scalers/predict in MAGNET.
-  4. **Switchover / cleanup** — after user approval: etas deletes duplicated builders; docs/flags.
-- **Acceptance (Phase 0):**
-  - Module ``eq_mag_prediction/forecasting/incremental_feature_state.py`` documents ownership, call order, supported encoders.
-  - Methods ``from_catalog``, ``reset``, ``ingest``, ``features_at``, ``sync_extension`` exist and raise ``NotImplementedError`` with Phase 1 pointer.
-  - Contract tests in ``incremental_feature_state_test.py`` pass.
-- **Acceptance (later phases):** Parity vs ``encoder.build_features``; no etas duplicate window math after switchover.
+  4. **Switchover / cleanup** — after user approval: docs/flags; optional removal of etas re-export shims.
+- **Acceptance (Phase 0):** met.
+- **Acceptance (Phase 1):**
+  - ``features_at`` matches ``build_features`` (``incremental_feature_state_test.py``).
+  - etas incremental parity suite still passes via wrappers.
 - **Key paths:**
-  - ``eq_mag_prediction/eq_mag_prediction_clean/eq_mag_prediction/forecasting/incremental_feature_state.py``
-  - ``eq_mag_prediction/eq_mag_prediction_clean/eq_mag_prediction/forecasting/incremental_feature_state_test.py``
-  - (Phase 1+) ``forecasting/incremental_windows.py`` or equivalent
-  - etas reference: ``etas/magnet_encoder_incremental.py``, ``etas/magnet_encoder_features_*.py``
-  - etas client: ``etas/magnet_inference.py``, ``etas/rate_simulation.py``
+  - ``eq_mag_prediction/.../forecasting/incremental_feature_state.py``
+  - ``eq_mag_prediction/.../forecasting/incremental_windows.py``
+  - ``eq_mag_prediction/.../forecasting/incremental_feature_state_test.py``
+  - etas thin client: ``etas/magnet_encoder_incremental.py``, ``etas/magnet_encoder_features_*.py``
+  - etas thinning: ``etas/magnet_inference.py``, ``etas/rate_simulation.py``
 
 ### `magnet-incremental-sliding-windows`
 - **Status:** open
