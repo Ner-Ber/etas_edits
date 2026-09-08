@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Mock thinning run that exercises Phase B incremental encoder features end-to-end.
+"""Mock thinning run that exercises incremental encoder features end-to-end.
 
 Loads an existing MAGNET checkpoint (no training), warms a session, then runs a
 short Ogata thinning continuation so ``predict_magnitudes`` repeatedly calls:
@@ -12,6 +12,7 @@ Intended for VS Code debugging of the encoder update path (not a unit test).
 Env (set by launch config):
   MAGNET_INCREMENTAL_ENCODERS=1
   MAGNET_INCREMENTAL_FEATURE_STATE=1
+  MAGNET_INCREMENTAL_SLIDING=0|1  (0=Phase B recompute, 1=Phase C sliding)
 """
 
 from __future__ import annotations
