@@ -5,8 +5,17 @@ Import policy (``.cursor/rules/python-imports.mdc``):
 - ``eq_mag_prediction`` imports deferred inside functions that need them.
 
 Phase 1+: feature builders live in ``eq_mag_prediction.forecasting``
-(``FeatureState`` / ``incremental_windows``). This module keeps etas env flags,
-scaling helpers, and a thin ``IncrementalEncoderState`` wrapper for callers.
+(``FeatureState`` / ``incremental_windows`` / Phase C ``incremental_windows_sliding``).
+This module keeps etas env flags, scaling helpers, and a thin
+``IncrementalEncoderState`` wrapper for callers.
+
+Env flags
+---------
+* ``MAGNET_INCREMENTAL_ENCODERS`` — Phase A warm path (default on).
+* ``MAGNET_INCREMENTAL_FEATURE_STATE`` — Phase B/C ``features_at`` vs
+  ``build_features`` (default off).
+* ``MAGNET_INCREMENTAL_SLIDING`` — Phase C vs Phase B builders when feature
+  state is on (default off = Phase B legacy).
 """
 
 from __future__ import annotations
@@ -19,6 +28,7 @@ import pandas as pd
 
 _INCREMENTAL_ENV = "MAGNET_INCREMENTAL_ENCODERS"
 _INCREMENTAL_FEATURE_STATE_ENV = "MAGNET_INCREMENTAL_FEATURE_STATE"
+_INCREMENTAL_SLIDING_ENV = "MAGNET_INCREMENTAL_SLIDING"
 _SUPPORTED_ENCODER_NAMES = frozenset(
     {
         "catalog_earthquakes",
@@ -37,6 +47,12 @@ def incremental_encoders_enabled() -> bool:
 def incremental_feature_state_enabled() -> bool:
     """True when ``MAGNET_INCREMENTAL_FEATURE_STATE=1`` (default off until switchover)."""
     raw = os.environ.get(_INCREMENTAL_FEATURE_STATE_ENV, "0").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def incremental_sliding_enabled() -> bool:
+    """True when ``MAGNET_INCREMENTAL_SLIDING=1`` (Phase C; default Phase B)."""
+    raw = os.environ.get(_INCREMENTAL_SLIDING_ENV, "0").strip().lower()
     return raw in ("1", "true", "yes", "on")
 
 
@@ -237,8 +253,11 @@ class IncrementalEncoderState:
 
     def __init__(self, all_encoders: dict[str, Any]) -> None:
         ifs = _magnet_feature_state()
-        self._fs = ifs.FeatureState(all_encoders)
+        self._fs = ifs.FeatureState(
+            all_encoders, sliding=incremental_sliding_enabled()
+        )
         self.all_encoders = self._fs.all_encoders
+        self.sliding = self._fs.sliding
 
     @property
     def recent_buffer(self):
