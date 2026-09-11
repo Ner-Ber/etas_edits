@@ -237,6 +237,8 @@
                 "MAGNET_INCREMENTAL_ENCODERS": "1",
                 "MAGNET_INCREMENTAL_FEATURE_STATE": "1",
                 "MAGNET_INCREMENTAL_SLIDING": "1",
+                "MAGNET_INCREMENTAL_TRACE": "1",
+                "MAGNET_INCREMENTAL_TRACE_LOG": "${workspaceFolder}/outputs/magnet_incremental_trace_phase_c.log",
                 "MPLBACKEND": "Agg"
             }
         },

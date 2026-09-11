@@ -252,6 +252,15 @@ class MagnetInferenceSession:
                 self._incremental_state.sync_catalog_extension(base_history)
             else:
                 self._incremental_state.reset(base_history)
+            # MAGNET_INC_TRACE
+            from eq_mag_prediction.forecasting import incremental_trace as _inc_trace
+
+            _inc_trace.log(
+                "MagnetSession.predict_magnitudes.start_incremental",
+                n_events=n_events,
+                n_history=len(self._incremental_state.catalog),
+                sliding=self._incremental_state.sliding,
+            )
             event_iter = tqdm(
                 zip(sorted_indices, sorted_times, sorted_locations),
                 total=n_events,
@@ -300,6 +309,15 @@ class MagnetInferenceSession:
                             ).reshape(-1),
                         }
                     )
+                # MAGNET_INC_TRACE
+                _inc_trace.log(
+                    "MagnetSession.predict_step",
+                    event_index=int(orig_i),
+                    t=int(time_value),
+                    lng=lng,
+                    lat=lat,
+                    sampled_mag=float(sampled_magnitude),
+                )
                 self._incremental_state.append_row(
                     {
                         "time": pd.to_datetime(int(time_value), unit="s"),
