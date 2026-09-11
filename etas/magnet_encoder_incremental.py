@@ -16,6 +16,7 @@ Env flags
   ``build_features`` (default off).
 * ``MAGNET_INCREMENTAL_SLIDING`` — Phase C vs Phase B builders when feature
   state is on (default off = Phase B legacy).
+* ``MAGNET_INCREMENTAL_TRACE`` — temporary debug logs (grep ``MAGNET_INC_TRACE``).
 """
 
 from __future__ import annotations
@@ -54,6 +55,13 @@ def incremental_sliding_enabled() -> bool:
     """True when ``MAGNET_INCREMENTAL_SLIDING=1`` (Phase C; default Phase B)."""
     raw = os.environ.get(_INCREMENTAL_SLIDING_ENV, "0").strip().lower()
     return raw in ("1", "true", "yes", "on")
+
+
+def _magnet_incremental_trace():
+    # MAGNET_INC_TRACE
+    from eq_mag_prediction.forecasting import incremental_trace as _trace
+
+    return _trace
 
 
 def _magnet_feature_state():
@@ -258,6 +266,13 @@ class IncrementalEncoderState:
         )
         self.all_encoders = self._fs.all_encoders
         self.sliding = self._fs.sliding
+        # MAGNET_INC_TRACE
+        _magnet_incremental_trace().log(
+            "IncrementalEncoderState.__init__",
+            sliding=self.sliding,
+            encoders=sorted(self.all_encoders),
+            feature_state=incremental_feature_state_enabled(),
+        )
 
     @property
     def recent_buffer(self):
@@ -281,6 +296,14 @@ class IncrementalEncoderState:
 
     def append_row(self, row: dict[str, Any]) -> None:
         """Append one committed event (time-sorted) after magnitude assignment."""
+        # MAGNET_INC_TRACE
+        _magnet_incremental_trace().log(
+            "IncrementalEncoderState.append_row",
+            t=row.get("time"),
+            lon=row.get("longitude"),
+            lat=row.get("latitude"),
+            mag=row.get("magnitude"),
+        )
         self._fs.ingest(row)
 
     def altered_catalog(self, evaluation_time: int) -> pd.DataFrame:
@@ -310,8 +333,21 @@ class IncrementalEncoderState:
     ) -> dict[str, np.ndarray]:
         """Dispatch raw features: incremental state when env enabled, else oracle."""
         if incremental_feature_state_enabled():
-            return self.features_for_example_incremental(evaluation_time, loc)
-        return self.features_for_example_via_build_features(evaluation_time, loc)
+            raw = self.features_for_example_incremental(evaluation_time, loc)
+            path = "incremental"
+        else:
+            raw = self.features_for_example_via_build_features(evaluation_time, loc)
+            path = "build_features"
+        # MAGNET_INC_TRACE
+        _magnet_incremental_trace().log(
+            "IncrementalEncoderState.features_for_example",
+            path=path,
+            t=int(evaluation_time),
+            lng=getattr(loc, "lng", None),
+            lat=getattr(loc, "lat", None),
+            features=_magnet_incremental_trace().summarize_features(raw),
+        )
+        return raw
 
 
 def predict_model_output_from_features(
