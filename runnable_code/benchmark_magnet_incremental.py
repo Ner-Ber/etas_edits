@@ -4,12 +4,19 @@
 Arms:
   legacy   — MAGNET_INCREMENTAL_ENCODERS=0 (create_altered_prediction_single_loc)
   phase_a  — ENCODERS=1, FEATURE_STATE=0 (warm state + build_features)
-  phase_b  — ENCODERS=1, FEATURE_STATE=1 (warm state + incremental feature builders)
+  phase_b  — ENCODERS=1, FEATURE_STATE=1, SLIDING=0 (Phase B feature state)
+  phase_c  — ENCODERS=1, FEATURE_STATE=1, SLIDING=1 (Phase C sliding)
+
+Example (5 realizations, 100-day forecast window):
+  python runnable_code/benchmark_magnet_incremental.py \\
+    --phases legacy,phase_b,phase_c --n-runs 5 --forecast-days 100 \\
+    --max-forecast-events 0 --out outputs/magnet_incremental_phase_timing.json
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import time
 from pathlib import Path
@@ -33,16 +40,22 @@ from tests.test_magnet_etas_integration_smoke import (
 _PHASE_LABELS = {
     "legacy": "Legacy (INCREMENTAL_ENCODERS=0)",
     "phase_a": "Phase A (warm + build_features)",
-    "phase_b": "Phase B (warm + feature state)",
+    "phase_b": "Phase B (feature state recompute)",
+    "phase_c": "Phase C (sliding / spatial hash)",
 }
 
 
-def _thinning_kwargs(catalog: pd.DataFrame, *, max_forecast_events: int) -> dict:
+def _thinning_kwargs(
+    catalog: pd.DataFrame,
+    *,
+    forecast_days: float,
+    max_forecast_events: int | None,
+) -> dict:
     auxiliary_end = catalog["time"].max()
     return dict(
         auxiliary_catalog=catalog,
         auxiliary_end=auxiliary_end,
-        simulation_end=auxiliary_end + pd.Timedelta(days=60),
+        simulation_end=auxiliary_end + pd.Timedelta(days=forecast_days),
         polygon=Polygon([(33, -122), (33, -117), (37, -117), (37, -122)]),
         parameters={
             "log10_mu": -5.0,
@@ -67,12 +80,19 @@ def _set_phase_env(phase: str) -> None:
     if phase == "legacy":
         os.environ["MAGNET_INCREMENTAL_ENCODERS"] = "0"
         os.environ["MAGNET_INCREMENTAL_FEATURE_STATE"] = "0"
+        os.environ["MAGNET_INCREMENTAL_SLIDING"] = "0"
     elif phase == "phase_a":
         os.environ["MAGNET_INCREMENTAL_ENCODERS"] = "1"
         os.environ["MAGNET_INCREMENTAL_FEATURE_STATE"] = "0"
+        os.environ["MAGNET_INCREMENTAL_SLIDING"] = "0"
     elif phase == "phase_b":
         os.environ["MAGNET_INCREMENTAL_ENCODERS"] = "1"
         os.environ["MAGNET_INCREMENTAL_FEATURE_STATE"] = "1"
+        os.environ["MAGNET_INCREMENTAL_SLIDING"] = "0"
+    elif phase == "phase_c":
+        os.environ["MAGNET_INCREMENTAL_ENCODERS"] = "1"
+        os.environ["MAGNET_INCREMENTAL_FEATURE_STATE"] = "1"
+        os.environ["MAGNET_INCREMENTAL_SLIDING"] = "1"
     else:
         raise ValueError(f"unknown phase: {phase!r}")
 
@@ -84,7 +104,8 @@ def _run_thinning(
     *,
     phase: str,
     seed: int,
-    max_forecast_events: int,
+    forecast_days: float,
+    max_forecast_events: int | None,
 ) -> tuple[float, pd.DataFrame, list[np.ndarray]]:
     _set_phase_env(phase)
     magnet_inference.clear_magnet_sessions()
@@ -96,7 +117,11 @@ def _run_thinning(
     utility_functions.seed_forecast_rng(seed)
     t0 = time.perf_counter()
     result = rate_simulation.simulate_catalog_continuation_thinning(
-        **_thinning_kwargs(catalog, max_forecast_events=max_forecast_events),
+        **_thinning_kwargs(
+            catalog,
+            forecast_days=forecast_days,
+            max_forecast_events=max_forecast_events,
+        ),
         magnitude_generator=generator,
     )
     elapsed = time.perf_counter() - t0
@@ -112,8 +137,10 @@ def _checkpoint_parity(session, catalog: pd.DataFrame) -> None:
     from eq_mag_prediction.utilities import geometry
 
     prev_flag = os.environ.get("MAGNET_INCREMENTAL_FEATURE_STATE")
+    prev_slide = os.environ.get("MAGNET_INCREMENTAL_SLIDING")
     try:
         os.environ["MAGNET_INCREMENTAL_FEATURE_STATE"] = "0"
+        os.environ["MAGNET_INCREMENTAL_SLIDING"] = "0"
         state = magnet_encoder_incremental.IncrementalEncoderState(session.all_encoders)
         state.reset(catalog)
         event = {
@@ -176,6 +203,10 @@ def _checkpoint_parity(session, catalog: pd.DataFrame) -> None:
             os.environ.pop("MAGNET_INCREMENTAL_FEATURE_STATE", None)
         else:
             os.environ["MAGNET_INCREMENTAL_FEATURE_STATE"] = prev_flag
+        if prev_slide is None:
+            os.environ.pop("MAGNET_INCREMENTAL_SLIDING", None)
+        else:
+            os.environ["MAGNET_INCREMENTAL_SLIDING"] = prev_slide
 
 
 def _identity_report(
@@ -202,12 +233,30 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-dir", type=Path, default=None)
     parser.add_argument("--history-size", type=int, default=80)
-    parser.add_argument("--max-forecast-events", type=int, default=20)
+    parser.add_argument(
+        "--max-forecast-events",
+        type=int,
+        default=20,
+        help="Hard event cap; use 0 for uncapped (run until forecast-days).",
+    )
+    parser.add_argument("--forecast-days", type=float, default=60.0)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--n-runs", type=int, default=1, help="Realizations per phase.")
     parser.add_argument(
         "--phases",
         default="legacy,phase_a,phase_b",
-        help="Comma-separated subset of: legacy,phase_a,phase_b",
+        help="Comma-separated: legacy,phase_a,phase_b,phase_c",
+    )
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="Write timing JSON (default: outputs/magnet_incremental_phase_timing.json).",
+    )
+    parser.add_argument(
+        "--skip-parity",
+        action="store_true",
+        help="Skip one-shot checkpoint feature/model parity check.",
     )
     args = parser.parse_args()
 
@@ -215,74 +264,138 @@ def main() -> None:
     unknown = set(phases) - set(_PHASE_LABELS)
     if unknown:
         raise SystemExit(f"Unknown phases: {sorted(unknown)}")
+    if args.n_runs < 1:
+        raise SystemExit("--n-runs must be >= 1")
+
+    max_events = None if args.max_forecast_events <= 0 else int(args.max_forecast_events)
 
     repo_root = Path(__file__).resolve().parents[1]
     model_dir = args.model_dir or resolve_magnet_smoke_model_dir(repo_root)
     cache_dir = repo_root / "outputs" / "_incremental_benchmark_cache"
+    out_path = args.out or (
+        repo_root / "outputs" / "magnet_incremental_phase_timing.json"
+    )
     catalog = short_history_catalog(repo_root, n=args.history_size)
 
-    magnet_inference.clear_magnet_sessions()
-    warmed = magnet_inference.warm_magnet_session(model_dir, feature_cache_dir=cache_dir)
-    _checkpoint_parity(warmed.session, catalog)
-    magnet_inference.clear_magnet_sessions()
-
+    if not args.skip_parity:
+        magnet_inference.clear_magnet_sessions()
+        warmed = magnet_inference.warm_magnet_session(
+            model_dir, feature_cache_dir=cache_dir
+        )
+        _checkpoint_parity(warmed.session, catalog)
+        magnet_inference.clear_magnet_sessions()
+        print("Checkpoint parity (oracle / Phase A / Phase B): PASS")
     print(f"Model: {model_dir}")
-    print(f"History: {len(catalog)} events | forecast cap: {args.max_forecast_events}")
-    print("Checkpoint parity (oracle / Phase A / Phase B): PASS")
+    print(
+        f"History: {len(catalog)} events | forecast_days={args.forecast_days} | "
+        f"max_forecast_events={max_events} | n_runs={args.n_runs}"
+    )
     print()
 
-    results: dict[str, tuple[float, pd.DataFrame, list[np.ndarray]]] = {}
-    for phase in phases:
-        elapsed, res, preds = _run_thinning(
-            model_dir,
-            cache_dir,
-            catalog,
-            phase=phase,
-            seed=args.seed,
-            max_forecast_events=args.max_forecast_events,
-        )
-        results[phase] = (elapsed, res, preds)
+    payload = {
+        "model_dir": str(model_dir),
+        "history_size": len(catalog),
+        "forecast_days": float(args.forecast_days),
+        "max_forecast_events": max_events,
+        "base_seed": int(args.seed),
+        "n_runs": int(args.n_runs),
+        "phases": {},
+    }
 
-    print("=== Thinning continuation timing (includes MAGNET warm per run) ===")
+    first_run_catalogs: dict[str, tuple[pd.DataFrame, list[np.ndarray]]] = {}
+
     for phase in phases:
-        elapsed, res, _preds = results[phase]
-        print(f"  {_PHASE_LABELS[phase]}: {elapsed:.2f}s  ({len(res)} events)")
-    if "legacy" in results and "phase_a" in results and results["phase_a"][0] > 0:
+        run_rows = []
+        for run_i in range(args.n_runs):
+            seed = int(args.seed) + run_i
+            print(
+                f">>> {phase} realization {run_i + 1}/{args.n_runs} (seed={seed}) …",
+                flush=True,
+            )
+            elapsed, res, preds = _run_thinning(
+                model_dir,
+                cache_dir,
+                catalog,
+                phase=phase,
+                seed=seed,
+                forecast_days=float(args.forecast_days),
+                max_forecast_events=max_events,
+            )
+            run_rows.append(
+                {
+                    "run": run_i,
+                    "seed": seed,
+                    "elapsed_s": float(elapsed),
+                    "n_events": int(len(res)),
+                }
+            )
+            print(
+                f"    {_PHASE_LABELS[phase]}: {elapsed:.2f}s  ({len(res)} events)",
+                flush=True,
+            )
+            if run_i == 0:
+                first_run_catalogs[phase] = (res, preds)
+
+        times = np.asarray([r["elapsed_s"] for r in run_rows], dtype=np.float64)
+        payload["phases"][phase] = {
+            "label": _PHASE_LABELS[phase],
+            "runs": run_rows,
+            "mean_s": float(np.mean(times)),
+            "std_s": float(np.std(times, ddof=1)) if len(times) > 1 else 0.0,
+            "min_s": float(np.min(times)),
+            "max_s": float(np.max(times)),
+        }
+
+    print()
+    print("=== Summary (mean ± std over realizations) ===")
+    for phase in phases:
+        block = payload["phases"][phase]
         print(
-            f"  Ratio legacy/phase_a: "
-            f"{results['legacy'][0] / results['phase_a'][0]:.2f}x"
+            f"  {_PHASE_LABELS[phase]}: "
+            f"{block['mean_s']:.2f} ± {block['std_s']:.2f}s "
+            f"(min={block['min_s']:.2f}, max={block['max_s']:.2f})"
         )
-    if "phase_a" in results and "phase_b" in results and results["phase_b"][0] > 0:
-        print(
-            f"  Ratio phase_a/phase_b: "
-            f"{results['phase_a'][0] / results['phase_b'][0]:.2f}x"
-        )
-    if "legacy" in results and "phase_b" in results and results["phase_b"][0] > 0:
-        print(
-            f"  Ratio legacy/phase_b: "
-            f"{results['legacy'][0] / results['phase_b'][0]:.2f}x"
-        )
+        mean_events = np.mean([r["n_events"] for r in block["runs"]])
+        print(f"    mean forecast events: {mean_events:.1f}")
+
+    if "legacy" in payload["phases"] and "phase_b" in payload["phases"]:
+        b = payload["phases"]["phase_b"]["mean_s"]
+        if b > 0:
+            print(
+                f"  Ratio legacy/phase_b (means): "
+                f"{payload['phases']['legacy']['mean_s'] / b:.2f}x"
+            )
+    if "phase_b" in payload["phases"] and "phase_c" in payload["phases"]:
+        c = payload["phases"]["phase_c"]["mean_s"]
+        if c > 0:
+            print(
+                f"  Ratio phase_b/phase_c (means): "
+                f"{payload['phases']['phase_b']['mean_s'] / c:.2f}x"
+            )
+    if "legacy" in payload["phases"] and "phase_c" in payload["phases"]:
+        c = payload["phases"]["phase_c"]["mean_s"]
+        if c > 0:
+            print(
+                f"  Ratio legacy/phase_c (means): "
+                f"{payload['phases']['legacy']['mean_s'] / c:.2f}x"
+            )
     print()
 
-    print("=== Thinning identity (same RNG seed) ===")
-    if "legacy" in results and "phase_a" in results:
+    print("=== Thinning identity (same seed, first realization) ===")
+    ordered = [p for p in phases if p in first_run_catalogs]
+    for left, right in zip(ordered, ordered[1:]):
         _identity_report(
-            "legacy",
-            results["legacy"][1],
-            results["legacy"][2],
-            "phase_a",
-            results["phase_a"][1],
-            results["phase_a"][2],
+            left,
+            first_run_catalogs[left][0],
+            first_run_catalogs[left][1],
+            right,
+            first_run_catalogs[right][0],
+            first_run_catalogs[right][1],
         )
-    if "phase_a" in results and "phase_b" in results:
-        _identity_report(
-            "phase_a",
-            results["phase_a"][1],
-            results["phase_a"][2],
-            "phase_b",
-            results["phase_b"][1],
-            results["phase_b"][2],
-        )
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    print(f"\nWrote {out_path}")
 
 
 if __name__ == "__main__":
