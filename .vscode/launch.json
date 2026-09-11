@@ -118,6 +118,216 @@
                 "LD_LIBRARY_PATH": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/lib",
                 "MPLBACKEND": "TkAgg"
             }
+        },
+        {
+            "name": "FINE debug: incremental features (short)",
+            "type": "debugpy",
+            "request": "launch",
+            "subProcess": true,
+            "python": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/bin/python",
+            "pythonArgs": [
+                "-u"
+            ],
+            "program": "${workspaceFolder}/runnable_code/run_continuation_models.py",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--config",
+                "${workspaceFolder}/config/hauksson_continuation_models_config_fine_debug.json",
+                "--methods",
+                "FINE",
+                "--force-rerun",
+                "--force-magnet-retrain",
+                "--save-magnet-predictions",
+                "--max-forecast-events",
+                "80",
+                "--n-runs",
+                "1",
+                "--log-level",
+                "DEBUG"
+            ],
+            "console": "integratedTerminal",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/runnable_code:/a/home/cc/students/csguests/neriberman/Repos/eq_mag_prediction/eq_mag_prediction_clean",
+                "LD_LIBRARY_PATH": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/lib",
+                "MAGNET_INCREMENTAL_ENCODERS": "1",
+                "MAGNET_INCREMENTAL_FEATURE_STATE": "1",
+                "MAGNET_INCREMENTAL_SLIDING": "0",
+                "MPLBACKEND": "TkAgg"
+            }
+        },
+        {
+            "name": "Encoder features: incremental path (pytest)",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/bin/python",
+            "pythonArgs": [
+                "-u"
+            ],
+            "module": "pytest",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "tests/test_magnet_encoder_features_incremental.py",
+                "-q",
+                "--tb=short",
+                "-k",
+                "incremental_matches_via_build_features or catalog_columns_incremental or recent_incremental or seismicity_incremental or sequential_sync"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/runnable_code:/a/home/cc/students/csguests/neriberman/Repos/eq_mag_prediction/eq_mag_prediction_clean",
+                "LD_LIBRARY_PATH": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/lib",
+                "MAGNET_INCREMENTAL_ENCODERS": "1",
+                "MAGNET_INCREMENTAL_FEATURE_STATE": "1",
+                "MPLBACKEND": "Agg"
+            }
+        },
+        {
+            "name": "Encoder features: mock thinning run (Phase B)",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/bin/python",
+            "pythonArgs": [
+                "-u"
+            ],
+            "program": "${workspaceFolder}/runnable_code/debug_magnet_incremental_encoders_mock.py",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--history-size",
+                "80",
+                "--max-forecast-events",
+                "30",
+                "--seed",
+                "42"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/runnable_code:/a/home/cc/students/csguests/neriberman/Repos/eq_mag_prediction/eq_mag_prediction_clean",
+                "LD_LIBRARY_PATH": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/lib",
+                "MAGNET_INCREMENTAL_ENCODERS": "1",
+                "MAGNET_INCREMENTAL_FEATURE_STATE": "1",
+                "MAGNET_INCREMENTAL_SLIDING": "0",
+                "MPLBACKEND": "Agg"
+            }
+        },
+        {
+            "name": "Encoder features: mock thinning run (Phase C sliding)",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/bin/python",
+            "pythonArgs": [
+                "-u"
+            ],
+            "program": "${workspaceFolder}/runnable_code/debug_magnet_incremental_encoders_mock.py",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--history-size",
+                "80",
+                "--max-forecast-events",
+                "30",
+                "--seed",
+                "42"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/runnable_code:/a/home/cc/students/csguests/neriberman/Repos/eq_mag_prediction/eq_mag_prediction_clean",
+                "LD_LIBRARY_PATH": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/lib",
+                "MAGNET_INCREMENTAL_ENCODERS": "1",
+                "MAGNET_INCREMENTAL_FEATURE_STATE": "1",
+                "MAGNET_INCREMENTAL_SLIDING": "1",
+                "MPLBACKEND": "Agg"
+            }
+        },
+        {
+            "name": "Encoder features: Phase C parity (MAGNET pytest)",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/bin/python",
+            "pythonArgs": [
+                "-u"
+            ],
+            "module": "pytest",
+            "cwd": "/a/home/cc/students/csguests/neriberman/Repos/eq_mag_prediction/eq_mag_prediction_clean",
+            "args": [
+                "eq_mag_prediction/forecasting/incremental_feature_state_test.py",
+                "-q",
+                "--tb=short",
+                "-k",
+                "modes or phase_b_and_phase_c or sliding"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/runnable_code:/a/home/cc/students/csguests/neriberman/Repos/eq_mag_prediction/eq_mag_prediction_clean",
+                "LD_LIBRARY_PATH": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/lib",
+                "MPLBACKEND": "Agg"
+            }
+        },
+        {
+            "name": "FINE debug: incremental features Phase C (short)",
+            "type": "debugpy",
+            "request": "launch",
+            "subProcess": true,
+            "python": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/bin/python",
+            "pythonArgs": [
+                "-u"
+            ],
+            "program": "${workspaceFolder}/runnable_code/run_continuation_models.py",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--config",
+                "${workspaceFolder}/config/hauksson_continuation_models_config_fine_debug.json",
+                "--methods",
+                "FINE",
+                "--force-rerun",
+                "--force-magnet-retrain",
+                "--save-magnet-predictions",
+                "--max-forecast-events",
+                "80",
+                "--n-runs",
+                "1",
+                "--log-level",
+                "DEBUG"
+            ],
+            "console": "integratedTerminal",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/runnable_code:/a/home/cc/students/csguests/neriberman/Repos/eq_mag_prediction/eq_mag_prediction_clean",
+                "LD_LIBRARY_PATH": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/lib",
+                "MAGNET_INCREMENTAL_ENCODERS": "1",
+                "MAGNET_INCREMENTAL_FEATURE_STATE": "1",
+                "MAGNET_INCREMENTAL_SLIDING": "1",
+                "MPLBACKEND": "TkAgg"
+            }
+        },
+        {
+            "name": "Encoder features: benchmark Phase A vs B",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/bin/python",
+            "pythonArgs": [
+                "-u"
+            ],
+            "program": "${workspaceFolder}/runnable_code/benchmark_magnet_incremental.py",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--history-size",
+                "80",
+                "--max-forecast-events",
+                "20",
+                "--seed",
+                "42",
+                "--phases",
+                "legacy,phase_a,phase_b"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}:${workspaceFolder}/runnable_code:/a/home/cc/students/csguests/neriberman/Repos/eq_mag_prediction/eq_mag_prediction_clean",
+                "LD_LIBRARY_PATH": "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/lib",
+                "MPLBACKEND": "Agg"
+            }
         }
     ]
 }
