@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import time
 from pathlib import Path
 
@@ -302,6 +303,17 @@ def main() -> None:
         "phases": {},
     }
 
+    catalog_root = out_path.parent / "magnet_incremental_phase_catalogs"
+    if catalog_root.exists():
+        # Replace previous dump for a clean notebook load.
+        shutil.rmtree(catalog_root)
+    catalog_root.mkdir(parents=True, exist_ok=True)
+    history_path = catalog_root / "history_catalog.csv"
+    catalog.to_csv(history_path, index=False)
+    payload["catalog_root"] = str(catalog_root)
+    payload["history_catalog"] = str(history_path)
+    payload["auxiliary_end"] = str(catalog["time"].max())
+
     first_run_catalogs: dict[str, tuple[pd.DataFrame, list[np.ndarray]]] = {}
 
     for phase in phases:
@@ -321,12 +333,25 @@ def main() -> None:
                 forecast_days=float(args.forecast_days),
                 max_forecast_events=max_events,
             )
+            phase_seed_dir = catalog_root / phase / f"seed_{seed}"
+            phase_seed_dir.mkdir(parents=True, exist_ok=True)
+            forecast_path = phase_seed_dir / "forecast_catalog.csv"
+            # Normalize columns for notebook loaders (time, lat, lon, magnitude).
+            out_cat = res.copy()
+            if "magnitude" not in out_cat.columns and "m" in out_cat.columns:
+                out_cat["magnitude"] = out_cat["m"]
+            if "longitude" not in out_cat.columns and "x" in out_cat.columns:
+                out_cat["longitude"] = out_cat["x"]
+            if "latitude" not in out_cat.columns and "y" in out_cat.columns:
+                out_cat["latitude"] = out_cat["y"]
+            out_cat.to_csv(forecast_path, index=False)
             run_rows.append(
                 {
                     "run": run_i,
                     "seed": seed,
                     "elapsed_s": float(elapsed),
                     "n_events": int(len(res)),
+                    "forecast_catalog": str(forecast_path),
                 }
             )
             print(
