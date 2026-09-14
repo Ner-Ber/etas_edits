@@ -13,11 +13,11 @@ job first (or pass ``--run-shared-first``). Completed realizations are skipped.
 Usage::
 
   python runnable_code/run_benchmark_fine_interleaved.py \\
-    --run-root outputs/benchmark_matrix/benchmark_full_20260726 \\
+    --run-root outputs/benchmark_matrix/benchmark_full_20260801 \\
     --catalog hauksson
 
   python runnable_code/run_benchmark_fine_interleaved.py \\
-    --run-root outputs/benchmark_matrix/benchmark_full_20260726 \\
+    --run-root outputs/benchmark_matrix/benchmark_full_20260801 \\
     --catalog hauksson --dry-run
 """
 

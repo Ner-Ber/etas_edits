@@ -6,7 +6,7 @@
 # Usage:
 #   ./scripts/launch_benchmark_catalog_parallel_tmux.sh RUN_ID
 #   ./scripts/launch_benchmark_catalog_parallel_tmux.sh RUN_ID SESSION_NAME
-#   ./scripts/launch_benchmark_catalog_parallel_tmux.sh RUN_ID SESSION_NAME --from-smoke benchmark_20260724
+#   ./scripts/launch_benchmark_catalog_parallel_tmux.sh RUN_ID SESSION_NAME --from-smoke benchmark_full_20260801
 #   ./scripts/launch_benchmark_catalog_parallel_tmux.sh RUN_ID SESSION_NAME --smoke
 #
 # Attach: tmux attach -t SESSION_NAME
@@ -17,7 +17,7 @@ RUN_ID="${1:?Usage: launch_benchmark_catalog_parallel_tmux.sh RUN_ID [SESSION_NA
 shift || true
 
 SESSION_NAME="${RUN_ID}"
-SMOKE_SOURCE="benchmark_20260724"
+SMOKE_SOURCE="benchmark_full_20260801"
 PROFILE="full"
 
 while [[ $# -gt 0 ]]; do
