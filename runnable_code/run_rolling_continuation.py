@@ -35,6 +35,7 @@ import rolling_continuation as rolling
 import run_continuation_models as runner
 
 _DEFAULT_CONFIG = "config/continuation_models_config_short.json"
+_DEFAULT_OUTPUT_ROOT = "outputs/rolling_continuation"
 
 _VARIANT_SETTINGS: dict[str, dict[str, Any]] = {
     "all_depth": {"encoder_filter": "all_events", "use_depth_as_feature": True},
@@ -53,6 +54,21 @@ def parse_horizons(raw: str) -> list[float]:
     if any(h <= 0 for h in horizons):
         raise ValueError(f"All horizons must be positive: {horizons}")
     return sorted(horizons)
+
+
+def resolve_rolling_output_root(
+    *,
+    cli_output_root: pathlib.Path | None,
+    cfg: dict[str, Any],
+    repo_root: pathlib.Path,
+) -> pathlib.Path:
+    """CLI ``--output-root`` wins; else JSON ``output_root``; else the default dir."""
+    if cli_output_root is not None:
+        return cli_output_root.expanduser().resolve()
+    raw = cfg.get("output_root")
+    if raw:
+        return compare._resolve_path(repo_root, raw)
+    return (repo_root / _DEFAULT_OUTPUT_ROOT).resolve()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -104,7 +120,10 @@ def main(argv: list[str] | None = None) -> int:
         "--output-root",
         type=pathlib.Path,
         default=None,
-        help="Root output directory (defaults to outputs/rolling_continuation).",
+        help=(
+            "Root output directory. Overrides JSON output_root. "
+            f"If both omitted, {_DEFAULT_OUTPUT_ROOT}."
+        ),
     )
     parser.add_argument(
         "--magnet-model-dir",
@@ -166,10 +185,10 @@ def main(argv: list[str] | None = None) -> int:
         cfg["magnet"]["encoder_filter"] = variant_opts["encoder_filter"]
         cfg["magnet"]["use_depth_as_feature"] = variant_opts["use_depth_as_feature"]
 
-    output_root = (
-        args.output_root.resolve()
-        if args.output_root is not None
-        else (repo_root / "outputs" / "rolling_continuation").resolve()
+    output_root = resolve_rolling_output_root(
+        cli_output_root=args.output_root,
+        cfg=cfg,
+        repo_root=repo_root,
     )
 
     # Resolve MAGNET model directory if needed
