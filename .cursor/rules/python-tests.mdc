@@ -52,7 +52,7 @@ Tab-only edits may not trigger hooks. If hooks did not run, run pytest yourself 
 |-------------|------------------|---------|
 | `tests/test_*.py` | that file | `test_file` |
 | `etas/simulation.py` | `tests/test_simulation_seed_and_kernels.py` | `explicit` |
-| `etas/rate_simulation.py` | `tests/test_continuation_compare.py`, `tests/test_magnet_inference.py`, `tests/test_magnet_etas_integration_smoke.py` | `explicit` + `integration` |
+| `etas/rate_simulation.py` | `tests/test_ah_resolution.py`, `tests/test_continuation_compare.py`, `tests/test_magnet_inference.py`, `tests/test_magnet_etas_integration_smoke.py` | `explicit` + `integration` |
 | `etas/utility_functions.py` | `tests/test_simulation_seed_and_kernels.py` | `explicit` |
 | `etas/magnet_inference.py` | `tests/test_magnet_inference.py`, `tests/test_magnet_etas_integration_smoke.py` | `explicit` + `integration` |
 | `etas/magnet_inference_cache.py` | `tests/test_magnet_inference.py`, `tests/test_magnet_etas_integration_smoke.py` | `explicit` + `integration` |

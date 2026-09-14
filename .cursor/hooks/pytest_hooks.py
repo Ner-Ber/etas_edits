@@ -45,6 +45,7 @@ INTEGRATION_TEST_FILES = frozenset(
 MODULE_TO_TESTS: dict[str, list[str]] = {
     "etas/simulation.py": ["tests/test_simulation_seed_and_kernels.py"],
     "etas/rate_simulation.py": [
+        "tests/test_ah_resolution.py",
         "tests/test_continuation_compare.py",
         "tests/test_magnet_inference.py",
         "tests/test_magnet_etas_integration_smoke.py",
