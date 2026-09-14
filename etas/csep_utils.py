@@ -188,11 +188,13 @@ def run_csep_catalog_tests(
     s_delta1, s_delta2 = s_result.quantile
     simulated_ll = np.asarray(l_result.test_distribution, dtype=float)
     observed_ll = float(l_result.observed_statistic)
+    l_status = getattr(l_result, "status", None)
 
     return {
         "L_delta1": float(l_delta1),
         "L_delta2": float(l_delta2),
         "L_quantile": float(l_delta2),
+        "L_status": l_status,
         "N_delta1": float(n_delta1),
         "N_delta2": float(n_delta2),
         "N_pass": bool(n_delta1 > 0.05 and n_delta2 > 0.05),
@@ -216,9 +218,16 @@ def plot_l_test(
     alpha: float = 0.025,
     *,
     title: str | None = None,
+    reference_lines: dict[str, float] | None = None,
+    delta1: float | None = None,
 ) -> plt.Figure:
-    """Two-panel L-test diagnostic figure: simulated-LL histogram and empirical CDF."""
+    """Two-panel L-test diagnostic figure: simulated-LL histogram and empirical CDF.
+
+    ``gamma`` is CSEP δ₂ = P(X ≤ x). Optional ``delta1`` is δ₁ = P(X ≥ x).
+    ``reference_lines`` draws extra vertical markers if provided.
+    """
     simulated_ll = np.asarray(simulated_ll, dtype=float)
+    simulated_ll = simulated_ll[np.isfinite(simulated_ll)]
     observed_ll = float(observed_ll)
     gamma = float(gamma)
     alpha_level = float(alpha)
@@ -226,31 +235,53 @@ def plot_l_test(
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
 
     ax_hist = axes[0]
-    ax_hist.hist(
-        simulated_ll, bins="auto", color="steelblue", edgecolor="white", alpha=0.85
-    )
-    ax_hist.axvline(observed_ll, color="black", ls="--", lw=1.5)
+    n_sim = int(simulated_ll.size)
+    hist_bins: int | str = "auto" if n_sim >= 15 else max(n_sim, 1)
+    if n_sim:
+        ax_hist.hist(
+            simulated_ll,
+            bins=hist_bins,
+            color="steelblue",
+            edgecolor="white",
+            alpha=0.85,
+        )
+    ax_hist.axvline(observed_ll, color="black", ls="--", lw=1.5, label="observed")
+    _REF_STYLES = {
+        "mean": dict(color="C1", ls=":", lw=1.6),
+        "median": dict(color="C2", ls="-.", lw=1.6),
+    }
+    if reference_lines:
+        for name, value in reference_lines.items():
+            kw = dict(_REF_STYLES.get(str(name).lower(), dict(color="0.35", ls="-", lw=1.4)))
+            ax_hist.axvline(float(value), label=str(name), **kw)
+    ax_hist.legend(fontsize=8, loc="upper left")
     ax_hist.set_xlabel(r"Simulated log-likelihood $\hat{L}$")
     ax_hist.set_ylabel("number of occurrences")
 
     ax_cdf = axes[1]
-    x_sorted = np.sort(simulated_ll)
-    ecdf = np.arange(1, x_sorted.size + 1, dtype=float) / x_sorted.size
-    ax_cdf.plot(x_sorted, ecdf, color="steelblue", lw=1.5)
-
-    x_min = float(simulated_ll.min())
-    x_alpha = float(np.quantile(simulated_ll, alpha_level))
-    ax_cdf.add_patch(
-        Rectangle(
-            (x_min, 0.0),
-            x_alpha - x_min,
-            alpha_level,
-            facecolor="gray",
-            alpha=0.25,
-            linewidth=0,
-            zorder=1,
+    if n_sim:
+        x_sorted = np.sort(simulated_ll)
+        ecdf = np.arange(1, x_sorted.size + 1, dtype=float) / x_sorted.size
+        ax_cdf.step(x_sorted, ecdf, where="post", color="steelblue", lw=1.5)
+        x_min = float(x_sorted.min())
+        x_max = float(x_sorted.max())
+        x_alpha = float(np.quantile(x_sorted, alpha_level))
+        ax_cdf.add_patch(
+            Rectangle(
+                (x_min, 0.0),
+                x_alpha - x_min,
+                alpha_level,
+                facecolor="gray",
+                alpha=0.25,
+                linewidth=0,
+                zorder=1,
+            )
         )
-    )
+        pad = 0.05 * max(x_max - x_min, abs(observed_ll - x_min), 1.0)
+        ax_cdf.set_xlim(x_min - pad, max(x_max, observed_ll) + pad)
+        ax_hist.set_xlim(x_min - pad, max(x_max, observed_ll) + pad)
+    else:
+        x_min = observed_ll
 
     ax_cdf.plot(
         [observed_ll, observed_ll], [0.0, gamma], color="black", ls="--", lw=1.0, zorder=3
@@ -258,13 +289,25 @@ def plot_l_test(
     ax_cdf.plot(
         [x_min, observed_ll], [gamma, gamma], color="black", ls="--", lw=1.0, zorder=3
     )
+    if delta1 is None:
+        gamma_note = rf"$\gamma=\delta_2=P(X\leq x)={gamma:.2f}$"
+    else:
+        gamma_note = (
+            rf"$\delta_1=P(X\geq x)={float(delta1):.2f}$"
+            "\n"
+            rf"$\gamma=\delta_2=P(X\leq x)={gamma:.2f}$"
+        )
     ax_cdf.annotate(
-        rf"$\gamma = {100 * gamma:.0f}\%$",
+        gamma_note,
         xy=(observed_ll, gamma),
         xytext=(8, 8),
         textcoords="offset points",
-        fontsize=10,
+        fontsize=9,
     )
+    if reference_lines:
+        for name, value in reference_lines.items():
+            kw = dict(_REF_STYLES.get(str(name).lower(), dict(color="0.35", ls="-", lw=1.4)))
+            ax_cdf.axvline(float(value), label=str(name), **kw)
     ax_cdf.set_xlabel(r"Simulated log-likelihood $\hat{L}$")
     ax_cdf.set_ylabel("Empirical cumulative probability")
     ax_cdf.set_ylim(-0.02, 1.02)
