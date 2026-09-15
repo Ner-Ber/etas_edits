@@ -31,4 +31,5 @@ def thinning_continuation_options_from_config(
     return etas_rate_simulation.ThinningContinuationOptions(
         a_h_resolution=int(raw.get("a_h_resolution", 500)),
         a_h_stretch=float(raw.get("a_h_stretch", 3.5)),
+        use_gpu=bool(raw.get("use_gpu", False)),
     )

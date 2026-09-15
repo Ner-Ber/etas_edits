@@ -28,6 +28,7 @@ class TestThinningContinuationOptionsFromConfig:
         )
         assert opts.a_h_resolution == 500
         assert opts.a_h_stretch == pytest.approx(3.5)
+        assert opts.use_gpu is False
 
     def test_nested_options(self, continuation_config_mod) -> None:
         opts = continuation_config_mod.thinning_continuation_options_from_config(
@@ -35,11 +36,13 @@ class TestThinningContinuationOptionsFromConfig:
                 "thinning_continuation_options": {
                     "a_h_resolution": 200,
                     "a_h_stretch": 2.0,
+                    "use_gpu": True,
                 },
             },
         )
         assert opts.a_h_resolution == 200
         assert opts.a_h_stretch == pytest.approx(2.0)
+        assert opts.use_gpu is True
 
     def test_thinning_continuation_options_must_be_object(
         self, continuation_config_mod

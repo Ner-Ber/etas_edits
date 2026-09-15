@@ -111,8 +111,14 @@ python runnable_code/run_continuation_models.py \
 Runs step-ahead forecasts of length $T$, advances the conditioning history by $T$ with true observed events, and repeats over the test horizon. Supports sweeping across multiple $T$s (e.g. `--horizon-days 7,14,30,90`) to evaluate forecast divergence and skill scaling.
 
 **Scheduling** (`--schedule` or JSON `"schedule"`):
-- `by_step` (default): for each time window, run all `n_runs` realizations before advancing.
-- `by_realization`: complete all windows for seed 0, then seed 1, … (full trajectory available earlier).
+- `by_step` (default): for each time window, run all `n_runs` realizations before advancing; multi-T sweeps finish each horizon for all seeds before the next T.
+- `by_realization`: for each seed, complete all windows (and, in a multi-T sweep, all horizons) before the next seed — early single-realization trajectories.
+
+**Seed-parallel compromise (wall-clock, keep mid-run inspection):** do **not** parallelize steps of one seed. Launch batches of N processes, each `--n-runs 1 --seed $i --schedule by_realization`. After each batch you have N complete walk-forwards. Inversions are already cached under `outputs/inversions/inv_<id>/` (shared across seeds for the same window); do not delete them mid-run.
+
+**FINE `A_h` GPU:** `thinning_continuation_options.use_gpu: true` or env `ETAS_FINE_AH_GPU=1`. Independent of classic ETAS `rate_computation.set_use_gpu`. Default off. When on, keep MAGNET/TensorFlow on CPU (`CUDA_VISIBLE_DEVICES=-1`) so CuPy owns the GPU.
+
+**MAGNET encoder flags (defaults on):** `MAGNET_INCREMENTAL_ENCODERS`, `MAGNET_INCREMENTAL_FEATURE_STATE`, `MAGNET_INCREMENTAL_SLIDING`. Set any to `0` to opt out.
 
 Outputs:
 ```
