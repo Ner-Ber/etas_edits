@@ -17,6 +17,42 @@ Maintenance rules: `.cursor/rules/code-todo.mdc`
 
 ## Open
 
+### `magnet-featurestate-growarray`
+- **Status:** open
+- **Added:** 2026-09-15
+- **Updated:** 2026-09-15
+- **Goal:** Add GrowArray (capacity-doubling) ingest inside MAGNET `FeatureState` / `incremental_windows*` so per-event ingest does not rebuild full timelines or require a DataFrame every step.
+- **Context:** etas already has `GrowingEventCatalog` on `feature/fine-speed-gpu-ah`. Remaining cost is MAGNET-package buffers. Work in a MAGNET worktree (e.g. `eq_mag_prediction_clean-ifs`), not the user’s live `_clean` checkout by default. Use conda env `etas_fine_speed_ifs` for verification (see `delete-conda-env-etas-fine-speed-ifs`).
+- **Acceptance:** After N sequential `ingest` calls, features match the current DataFrame/path parity tests; thinning can avoid `to_frame()` per event except at sync boundaries. Do not mark done until user approves.
+- **Key paths:** `eq_mag_prediction/forecasting/incremental_feature_state.py`, `incremental_windows.py`, `incremental_windows_sliding.py`, etas `GrowingEventCatalog` / thinning call sites in `etas/rate_simulation.py`
+
+### `fine-thinning-4bucket-timer`
+- **Status:** open
+- **Added:** 2026-09-15
+- **Updated:** 2026-09-15
+- **Goal:** Instrument one FINE thinning window with four wall-time buckets: `A_h` miss (compute+cache fill), `lambda_s_total`, MAGNET (feature sync/ingest + one-mag predict), and other.
+- **Context:** After vectorized intensity and optional GPU `A_h`, next optimization needs measured fractions—not guesses. Planned on `feature/fine-speed-gpu-ah`; may reuse untracked `runnable_code/run_fine_speed_benchmark.py` / notebook if kept. No MAGNET physics change. Verify with env `etas_fine_speed_ifs`.
+- **Acceptance:** One documented run (or small config) prints/writes the four fractions for a single window; code path is opt-in (flag/env) and default-off. Do not mark done until user approves.
+- **Key paths:** `etas/rate_simulation.py`, optional `runnable_code/run_fine_speed_benchmark.py`, `docs/CODE_TODO.md`
+
+### `magnet-featurestate-snapshot-per-seed`
+- **Status:** open
+- **Added:** 2026-09-15
+- **Updated:** 2026-09-15
+- **Goal:** At `forecast_start`, warm FeatureState once from truth history and clone/snapshot per seed; for rolling step \(k+1\), ingest observed events from window \(k\) into the shared truth tip instead of full `reset_thinning_session` + re-warm every time.
+- **Context:** Today `reset_thinning_session()` is required so process-global `_SESSIONS` do not leak simulated tails across seeds/windows. Correct but expensive. Needs a FeatureState clone/copy API in MAGNET (`eq_mag_prediction_clean-ifs` or successor) plus etas wiring. Keep causality: seed A’s simulated events never appear in seed B.
+- **Acceptance:** Multi-seed and multi-window tests show no cross-seed leakage; wall time to start seed \(>1\) drops vs full reset (documented); semantics match reset-every-time for magnitudes given same RNG. Do not mark done until user approves.
+- **Key paths:** MAGNET `incremental_feature_state.py`, `etas/magnet_inference.py` (`reset_thinning_session`), `etas/rate_simulation.py`, rolling continuation entrypoints
+
+### `delete-conda-env-etas-fine-speed-ifs`
+- **Status:** open
+- **Added:** 2026-09-15
+- **Updated:** 2026-09-15
+- **Goal:** After this FINE-speed / FeatureState work is merged or abandoned, delete temporary conda env `etas_fine_speed_ifs` to free disk (~3.2G) and avoid pointing at the wrong trees.
+- **Context:** Created 2026-09-15 as a **byte-copy** of `etas_remote` (not `conda create --clone`, which re-resolved NumPy 2.x and broke TF/`ml_dtypes`). Editable installs: `etas` → `/home/neriberman/Repos/etas-fine-speed-gpu`, `eq_mag_prediction` → `/home/neriberman/Repos/eq_mag_prediction/eq_mag_prediction_clean-ifs`. Workspace interpreter: `.vscode/settings.json`. Do not use as long-term default; leave `etas_remote` on `_clean` + rolling etas.
+- **Acceptance:** Remove env after user confirms (`rm -rf …/envs/etas_fine_speed_ifs` or `conda env remove -n etas_fine_speed_ifs -y`); clear workspace Python path if still set. Do not mark done until user approves removal.
+- **Key paths:** `/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_fine_speed_ifs`; `.vscode/settings.json`
+
 ### `sequential-walk-forward-fine-etas`
 - **Status:** in_progress
 - **Added:** 2026-08-28
@@ -262,6 +298,38 @@ Maintenance rules: `.cursor/rules/code-todo.mdc`
 ---
 
 ## Done (keep until user asks to prune)
+
+### `thinning-lambda-vectorize`
+- **Status:** done
+- **Added:** 2026-09-14
+- **Updated:** 2026-09-15
+- **Closed:** 2026-09-15 — user approved; `_g_vector` + `_POLYGON_AREA_CACHE` on `feature/fine-speed-gpu-ah`; parity in `tests/test_ah_gpu_parity.py`.
+- **Goal:** Vectorize Ogata `lambda_s_total` / `parent_weights` and cache polygon area so intensity proposals are NumPy reductions, not a Python loop of `g(t,H)`.
+- **Key paths:** `etas/rate_simulation.py`, `tests/test_ah_gpu_parity.py`
+
+### `magnet-predict-one-fastpath`
+- **Status:** done
+- **Added:** 2026-09-14
+- **Updated:** 2026-09-15
+- **Closed:** 2026-09-15 — user approved; warm FeatureState skips sync for n=1; `tf.function` predict; `reset_thinning_session` at thinning start; FeatureState/sliding default on.
+- **Goal:** After FeatureState is warm in one thinning run, skip full-catalog `sync_extension`; use `model(..., training=False)` via `tf.function`; reset FeatureState at each thinning/rolling start.
+- **Key paths:** `etas/magnet_inference.py`, `etas/magnet_encoder_incremental.py`, `etas/rate_simulation.py`
+
+### `fine-ah-gpu`
+- **Status:** done
+- **Added:** 2026-09-14
+- **Updated:** 2026-09-15
+- **Closed:** 2026-09-15 — user approved; CuPy `A_h` + CPU mask; GR microbench ~1.3× and thinning/FINE wall ~1.17–1.25× on `20260914_speed`; event counts match.
+- **Goal:** CuPy `A_h` kernel (mask stays CPU) with identity tests vs NumPy and no-CuPy fallback. Flag `ThinningContinuationOptions.use_gpu` / `ETAS_FINE_AH_GPU`.
+- **Key paths:** `etas/rate_simulation.py`, `runnable_code/continuation_config.py`, `etas/simulation.py`, `tests/test_ah_gpu_parity.py`
+
+### `magnet-thinning-catalog-plumbing`
+- **Status:** done
+- **Added:** 2026-09-14
+- **Updated:** 2026-09-15
+- **Closed:** 2026-09-15 — user approved; `GrowingEventCatalog` on etas thinning path. MAGNET GrowArray remains open (`magnet-featurestate-growarray`).
+- **Goal:** Stop per-event `pd.concat` of MAGNET-visible thinning history.
+- **Key paths:** `etas/rate_simulation.py`, `tests/test_continuation_compare.py`
 
 ### `magnet-projection-from-region`
 - **Status:** done

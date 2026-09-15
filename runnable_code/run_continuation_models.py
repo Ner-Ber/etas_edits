@@ -37,6 +37,7 @@ from shapely.geometry import Polygon
 
 import etas.utility_functions as utility_functions
 
+import continuation_config
 import continuation_ensemble as ens
 import continuation_compare as compare
 
@@ -1054,6 +1055,8 @@ def main(argv: list[str] | None = None) -> int:
     seed_start = int(cfg.get("seed", 0))
     n_runs = int(cfg.get("n_runs", 1))
     a_h_resolution = int(cfg.get("a_h_resolution", 500))
+    thinning_opts = continuation_config.thinning_continuation_options_from_config(cfg)
+    a_h_use_gpu = bool(thinning_opts.use_gpu)
     force_inversion = bool(cfg.get("force_inversion", False))
     store_pij = bool(cfg.get("store_pij", True))
     store_distances = bool(cfg.get("store_distances", True))
@@ -1063,6 +1066,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Config: {config_path}", flush=True)
     print(f"Methods: {', '.join(methods)}", flush=True)
     print(f"Output root: {output_root}", flush=True)
+    print(f"FINE A_h GPU (JSON use_gpu): {a_h_use_gpu}", flush=True)
 
     magnet_model_dir = resolve_magnet_model_dir(
         cfg=cfg,
@@ -1235,6 +1239,7 @@ def main(argv: list[str] | None = None) -> int:
                 thinning_magnitude_generator=thinning_mag_gen,
                 methods=forecast_methods,
                 max_forecast_events=max_forecast_events,
+                a_h_use_gpu=a_h_use_gpu,
             )
             forecast_catalog = ens.pick_forecast_catalog(
                 etas_catalog, thinning_catalog, method

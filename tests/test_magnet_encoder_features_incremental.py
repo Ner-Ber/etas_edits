@@ -95,15 +95,24 @@ def _catalog_dt(catalog: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def test_incremental_feature_state_enabled_default_off(monkeypatch) -> None:
+def test_incremental_feature_state_enabled_default_on(monkeypatch) -> None:
     import etas.magnet_encoder_incremental as magnet_encoder_incremental
 
     monkeypatch.delenv("MAGNET_INCREMENTAL_FEATURE_STATE", raising=False)
-    assert not magnet_encoder_incremental.incremental_feature_state_enabled()
-    monkeypatch.setenv("MAGNET_INCREMENTAL_FEATURE_STATE", "1")
     assert magnet_encoder_incremental.incremental_feature_state_enabled()
     monkeypatch.setenv("MAGNET_INCREMENTAL_FEATURE_STATE", "0")
     assert not magnet_encoder_incremental.incremental_feature_state_enabled()
+    monkeypatch.setenv("MAGNET_INCREMENTAL_FEATURE_STATE", "1")
+    assert magnet_encoder_incremental.incremental_feature_state_enabled()
+
+
+def test_incremental_sliding_enabled_default_on(monkeypatch) -> None:
+    import etas.magnet_encoder_incremental as magnet_encoder_incremental
+
+    monkeypatch.delenv("MAGNET_INCREMENTAL_SLIDING", raising=False)
+    assert magnet_encoder_incremental.incremental_sliding_enabled()
+    monkeypatch.setenv("MAGNET_INCREMENTAL_SLIDING", "0")
+    assert not magnet_encoder_incremental.incremental_sliding_enabled()
 
 
 def test_features_for_example_matches_via_build_features_when_flag_off(
@@ -113,7 +122,7 @@ def test_features_for_example_matches_via_build_features_when_flag_off(
 
     import etas.magnet_encoder_incremental as magnet_encoder_incremental
 
-    monkeypatch.delenv("MAGNET_INCREMENTAL_FEATURE_STATE", raising=False)
+    monkeypatch.setenv("MAGNET_INCREMENTAL_FEATURE_STATE", "0")
     all_encoders, catalog = hauksson_encoders
     state = magnet_encoder_incremental.IncrementalEncoderState(all_encoders)
     state.reset(_catalog_dt(catalog))
@@ -133,6 +142,7 @@ def test_features_for_example_incremental_delegates_to_via_build_features(
     import etas.magnet_encoder_incremental as magnet_encoder_incremental
 
     monkeypatch.setenv("MAGNET_INCREMENTAL_FEATURE_STATE", "1")
+    monkeypatch.setenv("MAGNET_INCREMENTAL_SLIDING", "0")
     all_encoders, catalog = hauksson_encoders
     state = magnet_encoder_incremental.IncrementalEncoderState(all_encoders)
     state.reset(_catalog_dt(catalog))
@@ -332,12 +342,14 @@ def test_recent_ring_buffer_respects_max_earthquakes(hauksson_encoders) -> None:
 
 
 def test_recent_incremental_matches_build_features_single_step(
-    hauksson_encoders,
+    hauksson_encoders, monkeypatch
 ) -> None:
     from eq_mag_prediction.utilities import geometry
 
     import etas.magnet_encoder_features_recent as magnet_encoder_features_recent
     import etas.magnet_encoder_incremental as magnet_encoder_incremental
+
+    monkeypatch.setenv("MAGNET_INCREMENTAL_SLIDING", "0")
 
     all_encoders, catalog = hauksson_encoders
     encoder = all_encoders["recent_earthquakes"]
@@ -358,12 +370,14 @@ def test_recent_incremental_matches_build_features_single_step(
 
 
 def test_recent_incremental_matches_build_features_sequential(
-    hauksson_encoders,
+    hauksson_encoders, monkeypatch
 ) -> None:
     from eq_mag_prediction.utilities import geometry
 
     import etas.magnet_encoder_features_recent as magnet_encoder_features_recent
     import etas.magnet_encoder_incremental as magnet_encoder_incremental
+
+    monkeypatch.setenv("MAGNET_INCREMENTAL_SLIDING", "0")
 
     all_encoders, catalog = hauksson_encoders
     encoder = all_encoders["recent_earthquakes"]

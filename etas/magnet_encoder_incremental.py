@@ -13,9 +13,9 @@ Env flags
 ---------
 * ``MAGNET_INCREMENTAL_ENCODERS`` — Phase A warm path (default on).
 * ``MAGNET_INCREMENTAL_FEATURE_STATE`` — Phase B/C ``features_at`` vs
-  ``build_features`` (default off).
+  ``build_features`` (default on; set ``0`` for oracle ``build_features``).
 * ``MAGNET_INCREMENTAL_SLIDING`` — Phase C vs Phase B builders when feature
-  state is on (default off = Phase B legacy).
+  state is on (default on; set ``0`` for Phase B window recompute).
 """
 
 from __future__ import annotations
@@ -45,15 +45,15 @@ def incremental_encoders_enabled() -> bool:
 
 
 def incremental_feature_state_enabled() -> bool:
-    """True when ``MAGNET_INCREMENTAL_FEATURE_STATE=1`` (default off until switchover)."""
-    raw = os.environ.get(_INCREMENTAL_FEATURE_STATE_ENV, "0").strip().lower()
-    return raw in ("1", "true", "yes", "on")
+    """True unless ``MAGNET_INCREMENTAL_FEATURE_STATE=0``."""
+    raw = os.environ.get(_INCREMENTAL_FEATURE_STATE_ENV, "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
 
 
 def incremental_sliding_enabled() -> bool:
-    """True when ``MAGNET_INCREMENTAL_SLIDING=1`` (Phase C; default Phase B)."""
-    raw = os.environ.get(_INCREMENTAL_SLIDING_ENV, "0").strip().lower()
-    return raw in ("1", "true", "yes", "on")
+    """True unless ``MAGNET_INCREMENTAL_SLIDING=0`` (Phase C default)."""
+    raw = os.environ.get(_INCREMENTAL_SLIDING_ENV, "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
 
 
 def _magnet_feature_state():
