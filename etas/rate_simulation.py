@@ -4,6 +4,7 @@ import functools
 import logging
 import os
 import sys
+import time
 import types
 from dataclasses import dataclass
 
@@ -16,6 +17,7 @@ from shapely import geometry
 from shapely.geometry import Point, Polygon
 from tqdm import tqdm
 
+import etas.magnet_encoder_incremental as magnet_encoder_incremental
 import etas.rate_computation as rc
 import etas.utility_functions as utility_functions
 from etas.utility_functions import expand_theta_log10
@@ -75,6 +77,63 @@ class ThinningContinuationOptions:
 
 
 _A_H_CACHE: dict = {}
+_THINNING_TIMER_ENV = "ETAS_FINE_THINNING_TIMERS"
+
+
+@dataclass
+class ThinningTimers:
+    """Optional wall-time buckets for one thinning window (default off)."""
+
+    a_h_miss: float = 0.0
+    lambda_s: float = 0.0
+    magnet: float = 0.0
+    other: float = 0.0
+
+    def as_dict(self) -> dict[str, float]:
+        total = self.a_h_miss + self.lambda_s + self.magnet + self.other
+        out = {
+            "a_h_miss": self.a_h_miss,
+            "lambda_s_total": self.lambda_s,
+            "magnet": self.magnet,
+            "other": self.other,
+            "total": total,
+        }
+        if total > 0:
+            out["frac_a_h_miss"] = self.a_h_miss / total
+            out["frac_lambda_s_total"] = self.lambda_s / total
+            out["frac_magnet"] = self.magnet / total
+            out["frac_other"] = self.other / total
+        return out
+
+
+_THINNING_TIMERS: ThinningTimers | None = None
+
+
+def thinning_timers_enabled() -> bool:
+    raw = os.environ.get(_THINNING_TIMER_ENV, "0").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def begin_thinning_timers() -> ThinningTimers | None:
+    """Start collecting four wall-time buckets when ``ETAS_FINE_THINNING_TIMERS=1``."""
+    global _THINNING_TIMERS
+    if not thinning_timers_enabled():
+        _THINNING_TIMERS = None
+        return None
+    _THINNING_TIMERS = ThinningTimers()
+    return _THINNING_TIMERS
+
+
+def end_thinning_timers() -> dict[str, float] | None:
+    """Return and clear the active thinning timer summary."""
+    global _THINNING_TIMERS
+    timers = _THINNING_TIMERS
+    _THINNING_TIMERS = None
+    return None if timers is None else timers.as_dict()
+
+
+def get_thinning_timers() -> ThinningTimers | None:
+    return _THINNING_TIMERS
 
 
 def ah_gpu_requested(override: bool | None = None) -> bool:
@@ -231,6 +290,7 @@ def A_h(
     if cached is not None:
         return cached
 
+    t0 = time.perf_counter() if _THINNING_TIMERS is not None else None
     LAT, LON, dA_km2, mask = _a_h_geometry(poly, H, resolution, stretch)
     xp = cp if _ah_use_gpu(use_gpu) else np
     if xp is np:
@@ -244,6 +304,8 @@ def A_h(
     else:
         val = _a_h_kernel_sum(xp, LAT, LON, dA_km2, mask, H, params)
     _A_H_CACHE[key] = val
+    if t0 is not None and _THINNING_TIMERS is not None:
+        _THINNING_TIMERS.a_h_miss += time.perf_counter() - t0
     return val
 
 
@@ -281,20 +343,31 @@ def lambda_s_total(
     *,
     use_gpu: bool | None = None,
 ) -> float:
+    timers = _THINNING_TIMERS
+    t0 = time.perf_counter() if timers is not None else None
+    miss_before = timers.a_h_miss if timers is not None else 0.0
     rate = params["mu"] * _polygon_area_km2(poly)
     n = len(events)
     if n == 0:
+        if t0 is not None and timers is not None:
+            timers.lambda_s += time.perf_counter() - t0
         return rate
     t_i = np.fromiter((H["t"] for H in events), dtype=np.float64, count=n)
     mask = t_i <= t
     if not np.any(mask):
+        if t0 is not None and timers is not None:
+            timers.lambda_s += time.perf_counter() - t0
         return rate
     ah = np.zeros(n, dtype=np.float64)
     for i, H in enumerate(events):
         if mask[i]:
             ah[i] = A_h(poly, H, params, resolution, stretch, use_gpu=use_gpu)
     gvals = _g_vector(t, t_i[mask], params)
-    return rate + float(np.dot(ah[mask], gvals))
+    out = rate + float(np.dot(ah[mask], gvals))
+    if t0 is not None and timers is not None:
+        elapsed = time.perf_counter() - t0
+        timers.lambda_s += elapsed - (timers.a_h_miss - miss_before)
+    return out
 
 
 def parent_weights(
@@ -489,8 +562,6 @@ def _magnet_catalog_for_thinning(catalog):
     """Return catalog for MAGNET; skip copy when incremental feature state is enabled."""
     if catalog is None:
         return None
-    import etas.magnet_encoder_incremental as magnet_encoder_incremental
-
     if magnet_encoder_incremental.incremental_feature_state_enabled():
         return catalog
     return catalog.copy()
@@ -584,6 +655,8 @@ def simulate_catalog_continuation_thinning(
     reset_session = getattr(magnitude_generator, "reset_thinning_session", None)
     if callable(reset_session):
         reset_session()
+    timers = begin_thinning_timers()
+    loop_t0 = time.perf_counter() if timers is not None else None
     params = expand_theta_log10(dict(parameters))
     params["m_c"] = float(mc)
 
@@ -648,16 +721,29 @@ def simulate_catalog_continuation_thinning(
                 lat, lon = sample_aftershock_location(parent_H, params)
                 source = "triggered"
 
+            m_t0 = time.perf_counter() if timers is not None else None
             m = _thinning_magnitude(
                 magnitude_generator,
                 beta_main,
                 mc,
-                available_catalog.to_frame(),
+                (
+                    None
+                    if (
+                        use_magnet
+                        and magnet_encoder_incremental.incremental_feature_state_enabled()
+                        and getattr(
+                            magnitude_generator, "thinning_features_warm", False
+                        )
+                    )
+                    else available_catalog.to_frame()
+                ),
                 parent_H,
                 lat,
                 lon,
                 t_next,
             )
+            if m_t0 is not None and timers is not None:
+                timers.magnet += time.perf_counter() - m_t0
             event = {"m": m, "x": float(lon), "y": float(lat), "t": float(t_next)}
             events.append(event)
             forecast.append({**event, "event_source": source})
@@ -671,6 +757,21 @@ def simulate_catalog_continuation_thinning(
             t = t_next
             pbar.update(1)
             pbar.set_postfix(thinning_progress_postfix(t, t_end), refresh=False)
+
+    if timers is not None and loop_t0 is not None:
+        accounted = timers.a_h_miss + timers.lambda_s + timers.magnet
+        timers.other = max(0.0, time.perf_counter() - loop_t0 - accounted)
+        summary = end_thinning_timers()
+        if summary is not None:
+            print(
+                "Stage: thinning timers "
+                f"a_h_miss={summary['a_h_miss']:.3f}s "
+                f"lambda_s={summary['lambda_s_total']:.3f}s "
+                f"magnet={summary['magnet']:.3f}s "
+                f"other={summary['other']:.3f}s "
+                f"(frac magnet={summary.get('frac_magnet', float('nan')):.2f})",
+                flush=True,
+            )
 
     if not forecast:
         return pd.DataFrame(
