@@ -259,6 +259,14 @@ class IncrementalEncoderState:
         self.all_encoders = self._fs.all_encoders
         self.sliding = self._fs.sliding
 
+    def copy(self) -> "IncrementalEncoderState":
+        """Deep-copy FeatureState for per-seed thinning snapshots."""
+        other = IncrementalEncoderState.__new__(IncrementalEncoderState)
+        other._fs = self._fs.copy()
+        other.all_encoders = other._fs.all_encoders
+        other.sliding = other._fs.sliding
+        return other
+
     @property
     def recent_buffer(self):
         return self._fs.recent_buffer

@@ -18,31 +18,31 @@ Maintenance rules: `.cursor/rules/code-todo.mdc`
 ## Open
 
 ### `magnet-featurestate-growarray`
-- **Status:** open
+- **Status:** in_progress
 - **Added:** 2026-09-15
 - **Updated:** 2026-09-15
 - **Goal:** Add GrowArray (capacity-doubling) ingest inside MAGNET `FeatureState` / `incremental_windows*` so per-event ingest does not rebuild full timelines or require a DataFrame every step.
-- **Context:** etas already has `GrowingEventCatalog` on `feature/fine-speed-gpu-ah`. Remaining cost is MAGNET-package buffers. Work in a MAGNET worktree (e.g. `eq_mag_prediction_clean-ifs`), not the user’s live `_clean` checkout by default. Use conda env `etas_fine_speed_ifs` for verification (see `delete-conda-env-etas-fine-speed-ifs`).
-- **Acceptance:** After N sequential `ingest` calls, features match the current DataFrame/path parity tests; thinning can avoid `to_frame()` per event except at sync boundaries. Do not mark done until user approves.
-- **Key paths:** `eq_mag_prediction/forecasting/incremental_feature_state.py`, `incremental_windows.py`, `incremental_windows_sliding.py`, etas `GrowingEventCatalog` / thinning call sites in `etas/rate_simulation.py`
+- **Context:** Implemented on MAGNET branch `feature/magnet-featurestate-growarray` @ `f5d6e09` (`grow_array.py`, FeatureState + Phase B/C windows). etas warm path skips `to_frame()` after FeatureState is warm. Verify with `etas_fine_speed_ifs`. Do not mark done until user approves.
+- **Acceptance:** After N sequential `ingest` calls, features match the current DataFrame/path parity tests; thinning can avoid `to_frame()` per event except at sync boundaries.
+- **Key paths:** `eq_mag_prediction/forecasting/grow_array.py`, `incremental_feature_state.py`, `incremental_windows.py`, `incremental_windows_sliding.py`, etas `rate_simulation.py` / `magnet_inference.py`
 
 ### `fine-thinning-4bucket-timer`
-- **Status:** open
+- **Status:** in_progress
 - **Added:** 2026-09-15
 - **Updated:** 2026-09-15
 - **Goal:** Instrument one FINE thinning window with four wall-time buckets: `A_h` miss (compute+cache fill), `lambda_s_total`, MAGNET (feature sync/ingest + one-mag predict), and other.
-- **Context:** After vectorized intensity and optional GPU `A_h`, next optimization needs measured fractions—not guesses. Planned on `feature/fine-speed-gpu-ah`; may reuse untracked `runnable_code/run_fine_speed_benchmark.py` / notebook if kept. No MAGNET physics change. Verify with env `etas_fine_speed_ifs`.
-- **Acceptance:** One documented run (or small config) prints/writes the four fractions for a single window; code path is opt-in (flag/env) and default-off. Do not mark done until user approves.
-- **Key paths:** `etas/rate_simulation.py`, optional `runnable_code/run_fine_speed_benchmark.py`, `docs/CODE_TODO.md`
+- **Context:** Opt-in via env `ETAS_FINE_THINNING_TIMERS=1` (`begin_thinning_timers` / printed summary at end of `simulate_catalog_continuation_thinning`). Default off.
+- **Acceptance:** One documented run prints/writes the four fractions for a single window; code path is opt-in and default-off. Do not mark done until user approves.
+- **Key paths:** `etas/rate_simulation.py`
 
 ### `magnet-featurestate-snapshot-per-seed`
-- **Status:** open
+- **Status:** in_progress
 - **Added:** 2026-09-15
 - **Updated:** 2026-09-15
 - **Goal:** At `forecast_start`, warm FeatureState once from truth history and clone/snapshot per seed; for rolling step \(k+1\), ingest observed events from window \(k\) into the shared truth tip instead of full `reset_thinning_session` + re-warm every time.
-- **Context:** Today `reset_thinning_session()` is required so process-global `_SESSIONS` do not leak simulated tails across seeds/windows. Correct but expensive. Needs a FeatureState clone/copy API in MAGNET (`eq_mag_prediction_clean-ifs` or successor) plus etas wiring. Keep causality: seed A’s simulated events never appear in seed B.
-- **Acceptance:** Multi-seed and multi-window tests show no cross-seed leakage; wall time to start seed \(>1\) drops vs full reset (documented); semantics match reset-every-time for magnitudes given same RNG. Do not mark done until user approves.
-- **Key paths:** MAGNET `incremental_feature_state.py`, `etas/magnet_inference.py` (`reset_thinning_session`), `etas/rate_simulation.py`, rolling continuation entrypoints
+- **Context:** `FeatureState.copy` + `IncrementalEncoderState.copy`; session auto-captures truth tip after first sync (`_thinning_snapshot`); `reset_thinning_session` restores from snapshot. Rolling should call `clear_thinning_snapshot` / refresh when truth advances. Do not mark done until user approves.
+- **Acceptance:** Multi-seed and multi-window tests show no cross-seed leakage; wall time to start seed \(>1\) drops vs full reset (documented); semantics match reset-every-time for magnitudes given same RNG.
+- **Key paths:** MAGNET `incremental_feature_state.py`, `etas/magnet_inference.py`, `etas/magnet_encoder_incremental.py`
 
 ### `delete-conda-env-etas-fine-speed-ifs`
 - **Status:** open
