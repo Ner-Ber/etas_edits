@@ -1,12 +1,14 @@
 
 import datetime as dt
 import functools
+import json
 import logging
 import os
 import sys
 import time
 import types
 from dataclasses import dataclass
+from pathlib import Path
 
 import geopandas as gpd
 import numpy as np
@@ -125,11 +127,22 @@ def begin_thinning_timers() -> ThinningTimers | None:
 
 
 def end_thinning_timers() -> dict[str, float] | None:
-    """Return and clear the active thinning timer summary."""
+    """Return and clear the active thinning timer summary.
+
+    When ``ETAS_FINE_THINNING_TIMERS_JSON`` is set, also write that JSON file.
+    """
     global _THINNING_TIMERS
     timers = _THINNING_TIMERS
     _THINNING_TIMERS = None
-    return None if timers is None else timers.as_dict()
+    if timers is None:
+        return None
+    summary = timers.as_dict()
+    out = os.environ.get("ETAS_FINE_THINNING_TIMERS_JSON", "").strip()
+    if out:
+        path = Path(out)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    return summary
 
 
 def get_thinning_timers() -> ThinningTimers | None:
@@ -672,11 +685,12 @@ def simulate_catalog_continuation_thinning(
             events = [_catalog_row_to_history(row) for _, row in history.iterrows()]
     available_catalog = GrowingEventCatalog(history)
 
-    t_start = (
-        float(max(H["t"] for H in events))
-        if events
-        else float((auxiliary_end - _EPOCH) / pd.Timedelta("1D"))
-    )
+    # Continue over (auxiliary_end, simulation_end]. History may end earlier than
+    # auxiliary_end; starting at max(history.t) wastes max_forecast_events on
+    # pre-window bursts that continuation_compare then filters out.
+    t_aux = float((auxiliary_end - _EPOCH) / pd.Timedelta("1D"))
+    t_hist = float(max(H["t"] for H in events)) if events else t_aux
+    t_start = max(t_aux, t_hist)
     t_end = float((simulation_end - _EPOCH) / pd.Timedelta("1D"))
 
     forecast = []
