@@ -17,30 +17,39 @@ Maintenance rules: `.cursor/rules/code-todo.mdc`
 
 ## Open
 
+### `fine-ensemble-parallel-cpu-defaults`
+- **Status:** in_progress
+- **Added:** 2026-09-21
+- **Updated:** 2026-09-21
+- **Goal:** Shared-cluster defaults for multi-realization FINE: new FeatureState path, CPU `A_h`, parallel seed subprocesses (`--max-workers` default 6), start thinning at `auxiliary_end`.
+- **Context:** On hanamel (192 CPU, no reliable GPU on node), parallel CPU seeds beat GPU `A_h` for ensembles. Implemented in `run_etas_thinning_fine_fast_tracks.py`, `run_fine_speed_benchmark.py` (`--with-fine` → `FINE_cpu` only), `etas/rate_simulation.py` `t_start` fix. Handoff: `docs/FINE_SPEED_MERGE_HANDOFF.md`.
+- **Acceptance:** Defaults documented; 10-seed FINE non-empty; worker pool aborts on exit≠0 or n_events=0; GPU/legacy remain opt-in. Do not mark done until user approves close.
+- **Key paths:** `runnable_code/run_etas_thinning_fine_fast_tracks.py`, `runnable_code/run_fine_speed_benchmark.py`, `etas/rate_simulation.py`, `notebooks/compare_etas_thinning_fine_fast_tracks.ipynb`, `docs/FINE_SPEED_MERGE_HANDOFF.md`
+
 ### `magnet-featurestate-growarray`
 - **Status:** in_progress
 - **Added:** 2026-09-15
-- **Updated:** 2026-09-15
+- **Updated:** 2026-09-21
 - **Goal:** Add GrowArray (capacity-doubling) ingest inside MAGNET `FeatureState` / `incremental_windows*` so per-event ingest does not rebuild full timelines or require a DataFrame every step.
-- **Context:** Implemented on MAGNET branch `feature/magnet-featurestate-growarray` @ `f5d6e09` (`grow_array.py`, FeatureState + Phase B/C windows). etas warm path skips `to_frame()` after FeatureState is warm. Verify with `etas_fine_speed_ifs`. Do not mark done until user approves.
+- **Context:** Implemented on MAGNET branch `feature/magnet-featurestate-growarray` @ `f5d6e09` (`grow_array.py`, FeatureState + Phase B/C windows). etas warm path skips `to_frame()` after FeatureState is warm. Verify with `etas_fine_speed_ifs`. **2026-09-21:** user approved **new FINE** (FeatureState+sliding) as default for ensembles; merge handoff in `docs/FINE_SPEED_MERGE_HANDOFF.md`. Do not mark done until user approves close.
 - **Acceptance:** After N sequential `ingest` calls, features match the current DataFrame/path parity tests; thinning can avoid `to_frame()` per event except at sync boundaries.
 - **Key paths:** `eq_mag_prediction/forecasting/grow_array.py`, `incremental_feature_state.py`, `incremental_windows.py`, `incremental_windows_sliding.py`, etas `rate_simulation.py` / `magnet_inference.py`
 
 ### `fine-thinning-4bucket-timer`
 - **Status:** in_progress
 - **Added:** 2026-09-15
-- **Updated:** 2026-09-15
+- **Updated:** 2026-09-21
 - **Goal:** Instrument one FINE thinning window with four wall-time buckets: `A_h` miss (compute+cache fill), `lambda_s_total`, MAGNET (feature sync/ingest + one-mag predict), and other.
-- **Context:** Opt-in via env `ETAS_FINE_THINNING_TIMERS=1` (`begin_thinning_timers` / printed summary at end of `simulate_catalog_continuation_thinning`). Default off.
-- **Acceptance:** One documented run prints/writes the four fractions for a single window; code path is opt-in and default-off. Do not mark done until user approves.
+- **Context:** Opt-in via env `ETAS_FINE_THINNING_TIMERS=1` (`begin_thinning_timers` / printed summary at end of `simulate_catalog_continuation_thinning`). Optional JSON dump via `ETAS_FINE_THINNING_TIMERS_JSON`. Default off. Used by `run_fine_speed_benchmark.py`. Do not mark done until user approves close.
+- **Acceptance:** One documented run prints/writes the four fractions for a single window; code path is opt-in and default-off.
 - **Key paths:** `etas/rate_simulation.py`
 
 ### `magnet-featurestate-snapshot-per-seed`
 - **Status:** in_progress
 - **Added:** 2026-09-15
-- **Updated:** 2026-09-15
+- **Updated:** 2026-09-21
 - **Goal:** At `forecast_start`, warm FeatureState once from truth history and clone/snapshot per seed; for rolling step \(k+1\), ingest observed events from window \(k\) into the shared truth tip instead of full `reset_thinning_session` + re-warm every time.
-- **Context:** `FeatureState.copy` + `IncrementalEncoderState.copy`; session auto-captures truth tip after first sync (`_thinning_snapshot`); `reset_thinning_session` restores from snapshot. Rolling should call `clear_thinning_snapshot` / refresh when truth advances. Do not mark done until user approves.
+- **Context:** `FeatureState.copy` + `IncrementalEncoderState.copy`; session auto-captures truth tip after first sync (`_thinning_snapshot`); `reset_thinning_session` restores from snapshot. **2026-09-21:** multi-seed FINE ensembles use **one process per seed** + `--max-workers` (default 6) in `run_etas_thinning_fine_fast_tracks.py` to avoid in-process MAGNET leakage; snapshot still matters for in-process / rolling. Do not mark done until user approves close.
 - **Acceptance:** Multi-seed and multi-window tests show no cross-seed leakage; wall time to start seed \(>1\) drops vs full reset (documented); semantics match reset-every-time for magnitudes given same RNG.
 - **Key paths:** MAGNET `incremental_feature_state.py`, `etas/magnet_inference.py`, `etas/magnet_encoder_incremental.py`
 
@@ -216,12 +225,12 @@ Maintenance rules: `.cursor/rules/code-todo.mdc`
 ### `magnet-incremental-sliding-windows`
 - **Status:** in_progress
 - **Added:** 2026-09-04
-- **Updated:** 2026-09-08
+- **Updated:** 2026-09-21
 - **Goal:** Replace Phase B’s per-query **window recompute** with true **sliding / edge-update** feature state so moving-window encoders advance cheaply as history grows and evaluation time moves.
 - **Context:**
-  - Lives in MAGNET after ``magnet-feature-state-in-magnet`` Phase 1. Phase B (``incremental_windows``) kept as legacy default.
-  - **Phase C (2026-09-08):** ``incremental_windows_sliding.py`` + ``FeatureState(sliding=…)`` / env ``MAGNET_INCREMENTAL_SLIDING`` (default ``0`` = Phase B). Recent: cache time-independent feature columns; on query refresh only Δt / inv / log columns and assemble ``max_earthquakes`` window (params from gin). Seismicity: spatial hash by ``grid_side_deg`` cells, gather overlapping cells then exact box + prefix sums (same-loc temporal slide not targeted — locs rarely repeat). Catalog columns stay Phase B search.
-  - Remaining: benchmark Phase C vs B on thinning; optional further edge-update optimizations; user-approved default switchover later.
+  - Lives in MAGNET after ``magnet-feature-state-in-magnet`` Phase 1. Phase B (``incremental_windows``) kept as kill-switch.
+  - **Phase C (2026-09-08):** ``incremental_windows_sliding.py`` + ``FeatureState(sliding=…)`` / env ``MAGNET_INCREMENTAL_SLIDING`` (**default on** as of etas client; set ``0`` for Phase B). Recent: cache time-independent feature columns; on query refresh only Δt / inv / log columns and assemble ``max_earthquakes`` window (params from gin). Seismicity: spatial hash by ``grid_side_deg`` cells, gather overlapping cells then exact box + prefix sums (same-loc temporal slide not targeted — locs rarely repeat). Catalog columns stay Phase B search.
+  - **2026-09-21:** user approved new FINE (FeatureState+sliding) as ensemble default; legacy via ``FEATURE_STATE=0`` / ``--series FINE_legacy``. Remaining: longer-window Phase C vs B benchmark; optional further edge-update optimizations.
   - ``encoder.build_features`` remains the parity oracle; keep Phase B until user-approved deletion.
 - **Acceptance:**
   - **Recent (Phase C):** Cached static cols + Δt refresh; parity vs ``build_features`` — **implemented**; mock-pad residual rebuild for incomplete windows documented in code.

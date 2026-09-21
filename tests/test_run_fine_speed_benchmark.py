@@ -31,8 +31,41 @@ def test_parse_arms_with_fine(bench_mod) -> None:
         "thinning_cpu",
         "thinning_gpu",
         "FINE_cpu",
-        "FINE_gpu",
     ]
+
+
+def test_parse_arms_fine_gpu_opt_in(bench_mod) -> None:
+    arms = bench_mod.parse_arms("FINE_cpu,FINE_gpu", with_fine=False)
+    assert [arm.name for arm in arms] == ["FINE_cpu", "FINE_gpu"]
+    assert arms[1].use_gpu is True
+
+
+def test_parse_arms_legacy_compare(bench_mod) -> None:
+    arms = bench_mod.parse_arms(
+        "FINE_legacy_cpu,FINE_new_cpu,FINE_new_gpu", with_fine=False
+    )
+    assert [arm.name for arm in arms] == [
+        "FINE_legacy_cpu",
+        "FINE_new_cpu",
+        "FINE_new_gpu",
+    ]
+    assert arms[0].profile == "legacy"
+    assert arms[1].profile == "new"
+
+
+def test_arm_env_legacy_disables_feature_state(bench_mod, tmp_path: Path) -> None:
+    env = bench_mod.arm_env(repo_root=tmp_path, use_gpu=False, profile="legacy")
+    assert env["MAGNET_INCREMENTAL_FEATURE_STATE"] == "0"
+    assert env["ETAS_FINE_AH_GPU"] == "0"
+    new = bench_mod.arm_env(
+        repo_root=tmp_path,
+        use_gpu=True,
+        profile="new",
+        timers_json=tmp_path / "t.json",
+    )
+    assert new["MAGNET_INCREMENTAL_FEATURE_STATE"] == "1"
+    assert new["ETAS_FINE_THINNING_TIMERS"] == "1"
+    assert new["ETAS_FINE_THINNING_TIMERS_JSON"] == str(tmp_path / "t.json")
 
 
 def test_arm_env_sets_gpu_flag_and_pythonpath(bench_mod, tmp_path: Path) -> None:

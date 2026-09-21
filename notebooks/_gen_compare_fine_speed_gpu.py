@@ -71,42 +71,60 @@ Do **not** set `CUDA_VISIBLE_DEVICES=-1` for GPU `A_h` arms: that hides the devi
     md(
         """## Commands (run in a terminal)
 
-Python: `/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/bin/python`
+Use conda env **`etas_fine_speed_ifs`** (etas worktree + MAGNET `eq_mag_prediction_clean-ifs`).
 
 ```bash
 cd /home/neriberman/Repos/etas-fine-speed-gpu
 export PYTHONPATH="/home/neriberman/Repos/etas-fine-speed-gpu:${PYTHONPATH:-}"
-PYTHON=/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/bin/python
+PYTHON=/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_fine_speed_ifs/bin/python
+MAGNET=/home/neriberman/Repos/eq_mag_prediction/eq_mag_prediction_clean-ifs
 
-# Preview argv + write empty timing rows
-$PYTHON runnable_code/run_fine_speed_benchmark.py --run-id 20260914_speed --dry-run
+# --- A) Legacy vs new FINE (recommended next measurement) ---
+# legacy = MAGNET_INCREMENTAL_FEATURE_STATE=0 (build_features each event)
+# new    = FeatureState + GrowArray + sliding; writes 4-bucket timer JSON
+$PYTHON runnable_code/run_fine_speed_benchmark.py \\
+  --run-id 20260915_legacy_vs_new \\
+  --python "$PYTHON" --magnet-root "$MAGNET" \\
+  --compare-legacy
 
-# Recommended first measurement: GR thinning CPU vs GPU (cap 500 events)
-$PYTHON runnable_code/run_fine_speed_benchmark.py --run-id 20260914_speed
+# Same, but explicit arms (drop GPU if no CUDA for A_h):
+# $PYTHON runnable_code/run_fine_speed_benchmark.py --run-id 20260915_legacy_vs_new \\
+#   --python "$PYTHON" --magnet-root "$MAGNET" \\
+#   --arms FINE_legacy_cpu,FINE_new_cpu,FINE_new_gpu
 
-# FINE only, append to the same run (MAGNET IFS worktree; does not touch
-# the dirty eq_mag_prediction_clean checkout). MAGNET train once, then FINE CPU/GPU.
-$PYTHON runnable_code/run_fine_speed_benchmark.py --run-id 20260914_speed \
-  --with-fine --arms FINE_cpu,FINE_gpu
+# --- B) Faster: reuse MAGNET+inversion from 20260914_speed ---
+# mkdir -p outputs/fine_speed_benchmark/20260915_legacy_vs_new
+# cp -a outputs/fine_speed_benchmark/20260914_speed/shared \\
+#   outputs/fine_speed_benchmark/20260915_legacy_vs_new/
+# $PYTHON runnable_code/run_fine_speed_benchmark.py --run-id 20260915_legacy_vs_new \\
+#   --python "$PYTHON" --magnet-root "$MAGNET" --compare-legacy --skip-prepare
 
-# Full 1-year window (drop the 500-event cap)
-$PYTHON runnable_code/run_fine_speed_benchmark.py --run-id 20260914_speed_full \\
-  --max-forecast-events 999999
+# Or append compare arms into the existing baseline run folder:
+# $PYTHON runnable_code/run_fine_speed_benchmark.py --run-id 20260914_speed \\
+#   --python "$PYTHON" --magnet-root "$MAGNET" --compare-legacy --skip-prepare
+# (then set RUN_ID="20260914_speed" in the notebook)
+
+# --- C) Original GPU A_h thinning + FINE arms (baseline folder) ---
+# $PYTHON runnable_code/run_fine_speed_benchmark.py --run-id 20260914_speed \\
+#   --python "$PYTHON" --magnet-root "$MAGNET"
+# $PYTHON runnable_code/run_fine_speed_benchmark.py --run-id 20260914_speed \\
+#   --python "$PYTHON" --magnet-root "$MAGNET" --with-fine --arms FINE_cpu,FINE_gpu
 ```
 
 Outputs:
 
 ```
 outputs/fine_speed_benchmark/<RUN_ID>/
-  timing_summary.jsonl
+  timing_summary.jsonl   # wall clock + optional timer_* columns
   timing_summary.csv
   logs/<arm>.log
+  logs/<arm>_timers.json # 4-bucket summary for profile=new
   configs/<arm>.json
-  shared/inversions/          # reused
-  arms/<arm>/<method>/inv_*/seed_*/forecast_catalog.csv
+  shared/inversions/     # reused
+  arms/<arm>/...
 ```
 
-Then set `RUN_ID` in the next cell to that folder name."""
+Then set `RUN_ID` / `BASELINE_RUN_ID` in the next cell."""
     ),
     code(
         r'''%matplotlib inline
@@ -140,8 +158,10 @@ if str(REPO_ROOT / "runnable_code") not in sys.path:
 
 os.environ.setdefault("PYTHONPATH", str(REPO_ROOT))
 
-# Set this after the terminal jobs finish. None → latest folder with timing_summary.jsonl.
-RUN_ID = "20260914_speed"
+# Primary run to inspect (legacy vs new). None → latest with timing_summary.jsonl.
+RUN_ID = "20260915_legacy_vs_new"
+# Optional prior GPU A_h baseline for wall-clock overlay.
+BASELINE_RUN_ID = "20260914_speed"
 RUN_AH_MICROBENCH = True
 AH_RESOLUTIONS = (200, 500)
 AH_REPEATS = 5
@@ -170,6 +190,7 @@ display(Markdown(f"Repo root: `{REPO_ROOT}`"))
 
 resolved_run_id = RUN_ID or latest_run_id(BENCH_ROOT)
 RUN_ROOT = (BENCH_ROOT / resolved_run_id) if resolved_run_id else None
+BASELINE_ROOT = (BENCH_ROOT / BASELINE_RUN_ID) if BASELINE_RUN_ID else None
 if RUN_ROOT is None:
     display(Markdown(
         "**No continuation timings yet.** Run the terminal command, then re-execute this cell. "
@@ -177,6 +198,8 @@ if RUN_ROOT is None:
     ))
 else:
     display(Markdown(f"**Run root:** `{RUN_ROOT}`"))
+if BASELINE_ROOT is not None and BASELINE_ROOT.is_dir():
+    display(Markdown(f"**Baseline root:** `{BASELINE_ROOT}`"))
 '''
     ),
     md("## MAGNET incremental files (FINE blocker)"),
@@ -344,7 +367,17 @@ else:
     plt.show()
 '''
     ),
-    md("## Continuation wall-clock (after terminal jobs)"),
+    md(
+        """## Legacy vs new FINE
+
+| Arm | Meaning |
+|-----|---------|
+| `FINE_legacy_cpu` | `MAGNET_INCREMENTAL_FEATURE_STATE=0` (oracle `build_features` each event), CPU `A_h` |
+| `FINE_new_cpu` | FeatureState + GrowArray + sliding, CPU `A_h`, 4-bucket timers |
+| `FINE_new_gpu` | Same as new + CuPy `A_h` |
+
+Expect **new ≪ legacy** on wall clock when MAGNET features dominate. Event counts need not match across profiles (different feature path → different sampled mags), but should be stable seed-to-seed within a profile."""
+    ),
     code(
         r'''def load_timing(run_root: Path | None) -> pd.DataFrame:
     if run_root is None:
@@ -356,64 +389,171 @@ else:
     return pd.DataFrame(rows)
 
 
+def last_timed(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    timed = df.loc[df["timed"] == True].copy() if "timed" in df.columns else df.copy()
+    return timed.drop_duplicates(subset=["arm"], keep="last")
+
+
 timing = load_timing(RUN_ROOT)
+baseline_timing = load_timing(BASELINE_ROOT)
+timed = last_timed(timing)
+baseline_timed = last_timed(baseline_timing)
+
 if timing.empty:
-    display(Markdown("No `timing_summary.jsonl` yet. Launch `run_fine_speed_benchmark.py` and re-run."))
+    display(Markdown("No `timing_summary.jsonl` yet. Launch `--compare-legacy` and re-run."))
 else:
-    timed = timing.loc[timing["timed"] == True].copy() if "timed" in timing.columns else timing.copy()
     display(Markdown("### All recorded rows (including prepare)"))
     display(timing)
-    display(Markdown("### Timed forecast arms"))
+    display(Markdown("### Timed forecast arms (last row per arm)"))
     display(timed)
+
+compare_arms = [a for a in ("FINE_legacy_cpu", "FINE_new_cpu", "FINE_new_gpu") if a in set(timed.get("arm", []))]
+if len(compare_arms) >= 2:
+    sub = timed.set_index("arm").loc[compare_arms]
+    display(Markdown("### Legacy vs new wall clock"))
+    show_cols = [c for c in ["profile", "use_gpu", "wall_seconds", "n_events", "exit_code",
+                             "timer_a_h_miss", "timer_lambda_s", "timer_magnet", "timer_other",
+                             "timer_frac_magnet"] if c in sub.columns]
+    display(sub[show_cols].reset_index())
+    fig, ax = plt.subplots(figsize=(7.2, 3.6))
+    ax.bar(compare_arms, sub["wall_seconds"].astype(float), color=["#9e9e9e", "#4c78a8", "#f58518"][: len(compare_arms)])
+    ax.set_ylabel("wall seconds (forecast)")
+    ax.set_title(f"FINE legacy vs new — {resolved_run_id}")
+    for i, arm in enumerate(compare_arms):
+        sec = float(sub.loc[arm, "wall_seconds"])
+        n_ev = sub.loc[arm, "n_events"] if "n_events" in sub.columns else None
+        ax.text(i, sec, f"  {sec:.1f}s\nn={n_ev}", ha="center", va="bottom", fontsize=8)
+    fig.tight_layout()
+    fig.savefig(FIGURE_DIR / f"legacy_vs_new_{resolved_run_id}.png", dpi=140)
+    plt.show()
+    if "FINE_legacy_cpu" in sub.index and "FINE_new_cpu" in sub.index:
+        leg = float(sub.loc["FINE_legacy_cpu", "wall_seconds"])
+        new = float(sub.loc["FINE_new_cpu", "wall_seconds"])
+        display(Markdown(f"**Speedup legacy/new (CPU):** {leg / new:.2f}×" if new else "n/a"))
+elif not timed.empty:
+    display(Markdown("No `FINE_legacy_*` / `FINE_new_*` arms in this run yet — only GPU A_h arms or thinning."))
 '''
+    ),
+    md(
+        """## 4-bucket timers (new profile only)
+
+Filled when `ETAS_FINE_THINNING_TIMERS=1` (automatic for `FINE_new_*` arms). Buckets: `A_h` miss / `lambda_s_total` / MAGNET / other."""
+    ),
+    code(
+        r'''timer_arms = timed.loc[timed["arm"].astype(str).str.contains("new")].copy() if not timed.empty and "arm" in timed.columns else pd.DataFrame()
+if timer_arms.empty or "timer_magnet" not in timer_arms.columns or timer_arms["timer_magnet"].isna().all():
+    display(Markdown("No timer JSON columns yet. Re-run with `--compare-legacy` (new arms write `logs/<arm>_timers.json`)."))
+else:
+    rows = []
+    for _, r in timer_arms.iterrows():
+        rows.append({
+            "arm": r["arm"],
+            "a_h_miss": r.get("timer_a_h_miss"),
+            "lambda_s": r.get("timer_lambda_s"),
+            "magnet": r.get("timer_magnet"),
+            "other": r.get("timer_other"),
+            "frac_magnet": r.get("timer_frac_magnet"),
+            "wall_seconds": r.get("wall_seconds"),
+        })
+    tdf = pd.DataFrame(rows)
+    display(tdf)
+    fig, ax = plt.subplots(figsize=(7.5, 3.8))
+    buckets = ["a_h_miss", "lambda_s", "magnet", "other"]
+    x = np.arange(len(tdf))
+    bottom = np.zeros(len(tdf))
+    colors = ["#4c78a8", "#72b7b2", "#f58518", "#bdbdbd"]
+    for bucket, color in zip(buckets, colors):
+        vals = tdf[bucket].fillna(0).to_numpy(dtype=float)
+        ax.bar(x, vals, bottom=bottom, label=bucket, color=color)
+        bottom = bottom + vals
+    ax.set_xticks(x, tdf["arm"].astype(str).tolist(), rotation=15, ha="right")
+    ax.set_ylabel("seconds")
+    ax.set_title(f"4-bucket thinning timers — {resolved_run_id}")
+    ax.legend(loc="upper right")
+    fig.tight_layout()
+    fig.savefig(FIGURE_DIR / f"timers_{resolved_run_id}.png", dpi=140)
+    plt.show()
+'''
+    ),
+    md(
+        """## Continuation wall-clock (GPU A_h arms + baseline overlay)"""
     ),
     code(
         r'''if "timed" in globals() and not timed.empty:
-    fig, ax = plt.subplots(figsize=(7.5, 3.8))
+    fig, ax = plt.subplots(figsize=(8.0, 3.8))
     labels = timed["arm"].astype(str).tolist()
     values = timed["wall_seconds"].astype(float).tolist()
-    colors = ["#4c78a8" if not gpu else "#f58518" for gpu in timed["use_gpu"].tolist()]
+    colors = []
+    for _, row in timed.iterrows():
+        if "legacy" in str(row["arm"]):
+            colors.append("#9e9e9e")
+        elif bool(row.get("use_gpu", False)):
+            colors.append("#f58518")
+        else:
+            colors.append("#4c78a8")
     ax.bar(labels, values, color=colors)
     ax.set_ylabel("wall seconds (forecast, force-rerun)")
     ax.set_title(f"Continuation timing — {resolved_run_id}")
+    plt.xticks(rotation=20, ha="right")
     for i, (sec, n_ev) in enumerate(zip(values, timed.get("n_events", [None] * len(values)))):
         ax.text(i, sec, f"  {sec:.1f}s\nn={n_ev}", ha="center", va="bottom", fontsize=8)
+    if not baseline_timed.empty:
+        base_map = baseline_timed.drop_duplicates("arm", keep="last").set_index("arm")["wall_seconds"]
+        for i, arm in enumerate(labels):
+            if arm in base_map.index:
+                ax.plot([i - 0.35, i + 0.35], [float(base_map.loc[arm])] * 2, color="k", lw=2, label="baseline" if i == 0 else None)
+        ax.legend()
     fig.tight_layout()
     fig.savefig(FIGURE_DIR / f"continuation_wall_{resolved_run_id}.png", dpi=140)
     plt.show()
 
     speedup_rows = []
     for method, group in timed.groupby("method"):
-        cpu = group.loc[group["use_gpu"] == False]
-        gpu = group.loc[group["use_gpu"] == True]
-        if cpu.empty or gpu.empty:
-            continue
-        cpu_s = float(cpu["wall_seconds"].iloc[0])
-        gpu_s = float(gpu["wall_seconds"].iloc[0])
-        speedup_rows.append(
-            {
+        if "profile" in group.columns:
+            for profile, pg in group.groupby("profile"):
+                c = pg.loc[pg["use_gpu"] == False]
+                g = pg.loc[pg["use_gpu"] == True]
+                if c.empty or g.empty:
+                    continue
+                cpu_s = float(c["wall_seconds"].iloc[0])
+                gpu_s = float(g["wall_seconds"].iloc[0])
+                speedup_rows.append({
+                    "method": method,
+                    "profile": profile,
+                    "cpu_seconds": cpu_s,
+                    "gpu_seconds": gpu_s,
+                    "speedup_cpu_over_gpu": cpu_s / gpu_s if gpu_s else np.nan,
+                    "cpu_n_events": c["n_events"].iloc[0],
+                    "gpu_n_events": g["n_events"].iloc[0],
+                })
+        else:
+            cpu = group.loc[group["use_gpu"] == False]
+            gpu = group.loc[group["use_gpu"] == True]
+            if cpu.empty or gpu.empty:
+                continue
+            cpu_s = float(cpu["wall_seconds"].iloc[0])
+            gpu_s = float(gpu["wall_seconds"].iloc[0])
+            speedup_rows.append({
                 "method": method,
                 "cpu_seconds": cpu_s,
                 "gpu_seconds": gpu_s,
                 "speedup_cpu_over_gpu": cpu_s / gpu_s if gpu_s else np.nan,
                 "cpu_n_events": cpu["n_events"].iloc[0],
                 "gpu_n_events": gpu["n_events"].iloc[0],
-                "cpu_exit": cpu["exit_code"].iloc[0],
-                "gpu_exit": gpu["exit_code"].iloc[0],
-            }
-        )
+            })
     if speedup_rows:
-        speedup_df = pd.DataFrame(speedup_rows)
         display(Markdown("GPU helps **once per new parent**. After `A_h` cache is warm, do not expect Ogata proposals themselves to speed up."))
-        display(speedup_df)
+        display(pd.DataFrame(speedup_rows))
 else:
     display(Markdown("Waiting for timed continuation rows."))
 '''
     ),
     md(
-        """## Catalog sanity (CPU vs GPU, same seed)
+        """## Catalog sanity (CPU vs GPU / legacy vs new)
 
-GPU `A_h` is `allclose`, not bit-identical. Event counts should be close; GR thinning with the same seed should match if `A_h` values stay within the thinning accept/reject path. Large count diffs are a red flag, not a speedup."""
+GPU `A_h` is `allclose`, not bit-identical. **Legacy vs new** can differ in magnitudes (different feature path). Within one profile + seed, CPU vs GPU counts should stay close."""
     ),
     code(
         r'''def load_arm_catalog(run_root: Path, arm: str, method: str) -> pd.DataFrame | None:
@@ -426,16 +566,21 @@ GPU `A_h` is `allclose`, not bit-identical. Event counts should be close; GR thi
 if RUN_ROOT is None:
     display(Markdown("No run root — skip catalog compare."))
 else:
-    pairs = [("thinning_cpu", "thinning_gpu", "thinning"), ("FINE_cpu", "FINE_gpu", "FINE")]
+    pairs = [
+        ("thinning_cpu", "thinning_gpu", "thinning"),
+        ("FINE_cpu", "FINE_gpu", "FINE"),
+        ("FINE_new_cpu", "FINE_new_gpu", "FINE"),
+        ("FINE_legacy_cpu", "FINE_new_cpu", "FINE"),
+    ]
     for cpu_arm, gpu_arm, method in pairs:
         cpu_cat = load_arm_catalog(RUN_ROOT, cpu_arm, method)
         gpu_cat = load_arm_catalog(RUN_ROOT, gpu_arm, method)
         if cpu_cat is None and gpu_cat is None:
             continue
-        display(Markdown(f"### `{method}`"))
+        display(Markdown(f"### `{cpu_arm}` vs `{gpu_arm}`"))
         n_cpu = 0 if cpu_cat is None else len(cpu_cat)
         n_gpu = 0 if gpu_cat is None else len(gpu_cat)
-        display(Markdown(f"CPU events={n_cpu}, GPU events={n_gpu}"))
+        display(Markdown(f"Left events={n_cpu}, right events={n_gpu}"))
         if cpu_cat is None or gpu_cat is None or cpu_cat.empty or gpu_cat.empty:
             continue
         mag_col = "magnitude" if "magnitude" in cpu_cat.columns else "m"
@@ -445,18 +590,23 @@ else:
         axes[0].set_xlabel("magnitude")
         axes[0].set_ylabel("count")
         axes[0].legend()
-        t_col = "dt_days" if "dt_days" in cpu_cat.columns else None
-        if t_col:
+        t_col = "time" if "time" in cpu_cat.columns else ("dt_days" if "dt_days" in cpu_cat.columns else None)
+        if t_col == "time":
+            axes[1].plot(np.sort(pd.to_datetime(cpu_cat[t_col]).astype(np.int64)), np.arange(1, n_cpu + 1), label=cpu_arm)
+            axes[1].plot(np.sort(pd.to_datetime(gpu_cat[t_col]).astype(np.int64)), np.arange(1, n_gpu + 1), label=gpu_arm)
+            axes[1].set_xlabel("time (ns sort key)")
+        elif t_col:
             axes[1].plot(np.sort(cpu_cat[t_col]), np.arange(1, n_cpu + 1), label=cpu_arm)
             axes[1].plot(np.sort(gpu_cat[t_col]), np.arange(1, n_gpu + 1), label=gpu_arm)
-            axes[1].set_xlabel("dt_days")
+            axes[1].set_xlabel(t_col)
+        if t_col:
             axes[1].set_ylabel("cumulative events")
             axes[1].legend()
         else:
             axes[1].axis("off")
-        fig.suptitle(f"{method} CPU vs GPU catalogs")
+        fig.suptitle(f"{cpu_arm} vs {gpu_arm}")
         fig.tight_layout()
-        fig.savefig(FIGURE_DIR / f"catalog_{method}_{resolved_run_id}.png", dpi=140)
+        fig.savefig(FIGURE_DIR / f"catalog_{cpu_arm}_vs_{gpu_arm}_{resolved_run_id}.png", dpi=140)
         plt.show()
 '''
     ),
@@ -465,7 +615,7 @@ else:
 
 If an arm failed, open `logs/<arm>.log` under the run root. Prepare rows (`timed=false`) include inversion and MAGNET train and should **not** be used as speedup denominators.
 
-The 4-bucket in-loop timer (`A_h` miss / `lambda_s_total` / MAGNET / other) is not implemented yet; this notebook is wall-clock + kernel microbench only."""
+New-profile arms also write `logs/<arm>_timers.json` (4-bucket summary)."""
     ),
 ]
 
