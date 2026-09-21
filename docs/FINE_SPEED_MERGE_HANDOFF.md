@@ -10,7 +10,7 @@
 | | |
 |--|--|
 | **Path** | `/home/neriberman/Repos/etas-fine-speed-gpu` |
-| **Branch** | `feature/fine-speed-gpu-ah` |
+| **Branch** | `feature/fine-speed-gpu-ah` (pushed to `personal-origin`; history rewritten 2026-09-21 to drop `input_data/etas_converted_jma.csv` >100 MB so GitHub accepts the push — local regenerable catalog, now gitignored) |
 | **Remote to push/pull** | `personal-origin` → `https://github.com/Ner-Ber/etas_edits.git` (not upstream `lmizrahi/etas` unless asked) |
 | **Related older tip** | `feature/magnet-incremental-feature-state` @ worktree `…/etas_magnet-incremental` |
 | **Likely merge target** | Personal rolling tip: `feature/rolling-fine-etas-forecasts` (worktree `…/Repos/etas`) **or** `etas-neri-branch` — confirm with user before merging to `origin/main` |
