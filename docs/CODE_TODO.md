@@ -17,6 +17,51 @@ Maintenance rules: `.cursor/rules/code-todo.mdc`
 
 ## Open
 
+### `fine-ensemble-parallel-cpu-defaults`
+- **Status:** in_progress
+- **Added:** 2026-09-21
+- **Updated:** 2026-09-21
+- **Goal:** Shared-cluster defaults for multi-realization FINE: new FeatureState path, CPU `A_h`, parallel seed subprocesses (`--max-workers` default 6), start thinning at `auxiliary_end`.
+- **Context:** On hanamel (192 CPU, no reliable GPU on node), parallel CPU seeds beat GPU `A_h` for ensembles. Implemented in `run_etas_thinning_fine_fast_tracks.py`, `run_fine_speed_benchmark.py` (`--with-fine` → `FINE_cpu` only), `etas/rate_simulation.py` `t_start` fix. Handoff: `docs/FINE_SPEED_MERGE_HANDOFF.md`.
+- **Acceptance:** Defaults documented; 10-seed FINE non-empty; worker pool aborts on exit≠0 or n_events=0; GPU/legacy remain opt-in. Do not mark done until user approves close.
+- **Key paths:** `runnable_code/run_etas_thinning_fine_fast_tracks.py`, `runnable_code/run_fine_speed_benchmark.py`, `etas/rate_simulation.py`, `notebooks/compare_etas_thinning_fine_fast_tracks.ipynb`, `docs/FINE_SPEED_MERGE_HANDOFF.md`
+
+### `magnet-featurestate-growarray`
+- **Status:** in_progress
+- **Added:** 2026-09-15
+- **Updated:** 2026-09-21
+- **Goal:** Add GrowArray (capacity-doubling) ingest inside MAGNET `FeatureState` / `incremental_windows*` so per-event ingest does not rebuild full timelines or require a DataFrame every step.
+- **Context:** Implemented on MAGNET branch `feature/magnet-featurestate-growarray` @ `f5d6e09` (`grow_array.py`, FeatureState + Phase B/C windows). etas warm path skips `to_frame()` after FeatureState is warm. Verify with `etas_fine_speed_ifs`. **2026-09-21:** user approved **new FINE** (FeatureState+sliding) as default for ensembles; merge handoff in `docs/FINE_SPEED_MERGE_HANDOFF.md`. Do not mark done until user approves close.
+- **Acceptance:** After N sequential `ingest` calls, features match the current DataFrame/path parity tests; thinning can avoid `to_frame()` per event except at sync boundaries.
+- **Key paths:** `eq_mag_prediction/forecasting/grow_array.py`, `incremental_feature_state.py`, `incremental_windows.py`, `incremental_windows_sliding.py`, etas `rate_simulation.py` / `magnet_inference.py`
+
+### `fine-thinning-4bucket-timer`
+- **Status:** in_progress
+- **Added:** 2026-09-15
+- **Updated:** 2026-09-21
+- **Goal:** Instrument one FINE thinning window with four wall-time buckets: `A_h` miss (compute+cache fill), `lambda_s_total`, MAGNET (feature sync/ingest + one-mag predict), and other.
+- **Context:** Opt-in via env `ETAS_FINE_THINNING_TIMERS=1` (`begin_thinning_timers` / printed summary at end of `simulate_catalog_continuation_thinning`). Optional JSON dump via `ETAS_FINE_THINNING_TIMERS_JSON`. Default off. Used by `run_fine_speed_benchmark.py`. Do not mark done until user approves close.
+- **Acceptance:** One documented run prints/writes the four fractions for a single window; code path is opt-in and default-off.
+- **Key paths:** `etas/rate_simulation.py`
+
+### `magnet-featurestate-snapshot-per-seed`
+- **Status:** in_progress
+- **Added:** 2026-09-15
+- **Updated:** 2026-09-21
+- **Goal:** At `forecast_start`, warm FeatureState once from truth history and clone/snapshot per seed; for rolling step \(k+1\), ingest observed events from window \(k\) into the shared truth tip instead of full `reset_thinning_session` + re-warm every time.
+- **Context:** `FeatureState.copy` + `IncrementalEncoderState.copy`; session auto-captures truth tip after first sync (`_thinning_snapshot`); `reset_thinning_session` restores from snapshot. **2026-09-21:** multi-seed FINE ensembles use **one process per seed** + `--max-workers` (default 6) in `run_etas_thinning_fine_fast_tracks.py` to avoid in-process MAGNET leakage; snapshot still matters for in-process / rolling. Do not mark done until user approves close.
+- **Acceptance:** Multi-seed and multi-window tests show no cross-seed leakage; wall time to start seed \(>1\) drops vs full reset (documented); semantics match reset-every-time for magnitudes given same RNG.
+- **Key paths:** MAGNET `incremental_feature_state.py`, `etas/magnet_inference.py`, `etas/magnet_encoder_incremental.py`
+
+### `delete-conda-env-etas-fine-speed-ifs`
+- **Status:** open
+- **Added:** 2026-09-15
+- **Updated:** 2026-09-15
+- **Goal:** After this FINE-speed / FeatureState work is merged or abandoned, delete temporary conda env `etas_fine_speed_ifs` to free disk (~3.2G) and avoid pointing at the wrong trees.
+- **Context:** Created 2026-09-15 as a **byte-copy** of `etas_remote` (not `conda create --clone`, which re-resolved NumPy 2.x and broke TF/`ml_dtypes`). Editable installs: `etas` → `/home/neriberman/Repos/etas-fine-speed-gpu`, `eq_mag_prediction` → `/home/neriberman/Repos/eq_mag_prediction/eq_mag_prediction_clean-ifs`. Workspace interpreter: `.vscode/settings.json`. Do not use as long-term default; leave `etas_remote` on `_clean` + rolling etas.
+- **Acceptance:** Remove env after user confirms (`rm -rf …/envs/etas_fine_speed_ifs` or `conda env remove -n etas_fine_speed_ifs -y`); clear workspace Python path if still set. Do not mark done until user approves removal.
+- **Key paths:** `/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_fine_speed_ifs`; `.vscode/settings.json`
+
 ### `sequential-walk-forward-fine-etas`
 - **Status:** in_progress
 - **Added:** 2026-08-28
@@ -180,12 +225,12 @@ Maintenance rules: `.cursor/rules/code-todo.mdc`
 ### `magnet-incremental-sliding-windows`
 - **Status:** in_progress
 - **Added:** 2026-09-04
-- **Updated:** 2026-09-08
+- **Updated:** 2026-09-21
 - **Goal:** Replace Phase B’s per-query **window recompute** with true **sliding / edge-update** feature state so moving-window encoders advance cheaply as history grows and evaluation time moves.
 - **Context:**
-  - Lives in MAGNET after ``magnet-feature-state-in-magnet`` Phase 1. Phase B (``incremental_windows``) kept as legacy default.
-  - **Phase C (2026-09-08):** ``incremental_windows_sliding.py`` + ``FeatureState(sliding=…)`` / env ``MAGNET_INCREMENTAL_SLIDING`` (default ``0`` = Phase B). Recent: cache time-independent feature columns; on query refresh only Δt / inv / log columns and assemble ``max_earthquakes`` window (params from gin). Seismicity: spatial hash by ``grid_side_deg`` cells, gather overlapping cells then exact box + prefix sums (same-loc temporal slide not targeted — locs rarely repeat). Catalog columns stay Phase B search.
-  - Remaining: benchmark Phase C vs B on thinning; optional further edge-update optimizations; user-approved default switchover later.
+  - Lives in MAGNET after ``magnet-feature-state-in-magnet`` Phase 1. Phase B (``incremental_windows``) kept as kill-switch.
+  - **Phase C (2026-09-08):** ``incremental_windows_sliding.py`` + ``FeatureState(sliding=…)`` / env ``MAGNET_INCREMENTAL_SLIDING`` (**default on** as of etas client; set ``0`` for Phase B). Recent: cache time-independent feature columns; on query refresh only Δt / inv / log columns and assemble ``max_earthquakes`` window (params from gin). Seismicity: spatial hash by ``grid_side_deg`` cells, gather overlapping cells then exact box + prefix sums (same-loc temporal slide not targeted — locs rarely repeat). Catalog columns stay Phase B search.
+  - **2026-09-21:** user approved new FINE (FeatureState+sliding) as ensemble default; legacy via ``FEATURE_STATE=0`` / ``--series FINE_legacy``. Remaining: longer-window Phase C vs B benchmark; optional further edge-update optimizations.
   - ``encoder.build_features`` remains the parity oracle; keep Phase B until user-approved deletion.
 - **Acceptance:**
   - **Recent (Phase C):** Cached static cols + Δt refresh; parity vs ``build_features`` — **implemented**; mock-pad residual rebuild for incomplete windows documented in code.
@@ -262,6 +307,38 @@ Maintenance rules: `.cursor/rules/code-todo.mdc`
 ---
 
 ## Done (keep until user asks to prune)
+
+### `thinning-lambda-vectorize`
+- **Status:** done
+- **Added:** 2026-09-14
+- **Updated:** 2026-09-15
+- **Closed:** 2026-09-15 — user approved; `_g_vector` + `_POLYGON_AREA_CACHE` on `feature/fine-speed-gpu-ah`; parity in `tests/test_ah_gpu_parity.py`.
+- **Goal:** Vectorize Ogata `lambda_s_total` / `parent_weights` and cache polygon area so intensity proposals are NumPy reductions, not a Python loop of `g(t,H)`.
+- **Key paths:** `etas/rate_simulation.py`, `tests/test_ah_gpu_parity.py`
+
+### `magnet-predict-one-fastpath`
+- **Status:** done
+- **Added:** 2026-09-14
+- **Updated:** 2026-09-15
+- **Closed:** 2026-09-15 — user approved; warm FeatureState skips sync for n=1; `tf.function` predict; `reset_thinning_session` at thinning start; FeatureState/sliding default on.
+- **Goal:** After FeatureState is warm in one thinning run, skip full-catalog `sync_extension`; use `model(..., training=False)` via `tf.function`; reset FeatureState at each thinning/rolling start.
+- **Key paths:** `etas/magnet_inference.py`, `etas/magnet_encoder_incremental.py`, `etas/rate_simulation.py`
+
+### `fine-ah-gpu`
+- **Status:** done
+- **Added:** 2026-09-14
+- **Updated:** 2026-09-15
+- **Closed:** 2026-09-15 — user approved; CuPy `A_h` + CPU mask; GR microbench ~1.3× and thinning/FINE wall ~1.17–1.25× on `20260914_speed`; event counts match.
+- **Goal:** CuPy `A_h` kernel (mask stays CPU) with identity tests vs NumPy and no-CuPy fallback. Flag `ThinningContinuationOptions.use_gpu` / `ETAS_FINE_AH_GPU`.
+- **Key paths:** `etas/rate_simulation.py`, `runnable_code/continuation_config.py`, `etas/simulation.py`, `tests/test_ah_gpu_parity.py`
+
+### `magnet-thinning-catalog-plumbing`
+- **Status:** done
+- **Added:** 2026-09-14
+- **Updated:** 2026-09-15
+- **Closed:** 2026-09-15 — user approved; `GrowingEventCatalog` on etas thinning path. MAGNET GrowArray remains open (`magnet-featurestate-growarray`).
+- **Goal:** Stop per-event `pd.concat` of MAGNET-visible thinning history.
+- **Key paths:** `etas/rate_simulation.py`, `tests/test_continuation_compare.py`
 
 ### `magnet-projection-from-region`
 - **Status:** done

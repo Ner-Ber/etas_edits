@@ -1,10 +1,14 @@
 
 import datetime as dt
 import functools
+import json
 import logging
+import os
 import sys
+import time
 import types
 from dataclasses import dataclass
+from pathlib import Path
 
 import geopandas as gpd
 import numpy as np
@@ -15,14 +19,24 @@ from shapely import geometry
 from shapely.geometry import Point, Polygon
 from tqdm import tqdm
 
+import etas.magnet_encoder_incremental as magnet_encoder_incremental
 import etas.rate_computation as rc
 import etas.utility_functions as utility_functions
 from etas.utility_functions import expand_theta_log10
 
 logger = logging.getLogger(__name__)
 
+try:
+    import cupy as cp
+except ImportError:
+    cp = None
+
 _EPOCH = pd.Timestamp("1970-01-01")
 _UNSET_MAGNITUDE_GENERATOR = object()
+_AH_GPU_ENV = "ETAS_FINE_AH_GPU"
+_A_H_USE_GPU = False
+_UNIT_GRID_CACHE: dict = {}
+_POLYGON_AREA_CACHE: dict = {}
 
 
 def _mc_b_est_module():
@@ -54,13 +68,174 @@ class ThinningContinuationOptions:
     ``a_h_resolution``: nodes per axis in the parent-centered grid.
     ``a_h_stretch``: exponent packing nodes toward the parent (``>1`` concentrates
     samples where the spatial kernel is peaked; default 3.5 matches the notebook).
+    ``use_gpu``: CuPy ``A_h`` kernel (default off). Independent of
+    ``etas.rate_computation.set_use_gpu``. Env ``ETAS_FINE_AH_GPU=1`` also enables
+    it. Keep MAGNET/TensorFlow on CPU when this is on.
     """
 
     a_h_resolution: int = 500
     a_h_stretch: float = 3.5
+    use_gpu: bool = False
 
 
 _A_H_CACHE: dict = {}
+_THINNING_TIMER_ENV = "ETAS_FINE_THINNING_TIMERS"
+
+
+@dataclass
+class ThinningTimers:
+    """Optional wall-time buckets for one thinning window (default off)."""
+
+    a_h_miss: float = 0.0
+    lambda_s: float = 0.0
+    magnet: float = 0.0
+    other: float = 0.0
+
+    def as_dict(self) -> dict[str, float]:
+        total = self.a_h_miss + self.lambda_s + self.magnet + self.other
+        out = {
+            "a_h_miss": self.a_h_miss,
+            "lambda_s_total": self.lambda_s,
+            "magnet": self.magnet,
+            "other": self.other,
+            "total": total,
+        }
+        if total > 0:
+            out["frac_a_h_miss"] = self.a_h_miss / total
+            out["frac_lambda_s_total"] = self.lambda_s / total
+            out["frac_magnet"] = self.magnet / total
+            out["frac_other"] = self.other / total
+        return out
+
+
+_THINNING_TIMERS: ThinningTimers | None = None
+
+
+def thinning_timers_enabled() -> bool:
+    raw = os.environ.get(_THINNING_TIMER_ENV, "0").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def begin_thinning_timers() -> ThinningTimers | None:
+    """Start collecting four wall-time buckets when ``ETAS_FINE_THINNING_TIMERS=1``."""
+    global _THINNING_TIMERS
+    if not thinning_timers_enabled():
+        _THINNING_TIMERS = None
+        return None
+    _THINNING_TIMERS = ThinningTimers()
+    return _THINNING_TIMERS
+
+
+def end_thinning_timers() -> dict[str, float] | None:
+    """Return and clear the active thinning timer summary.
+
+    When ``ETAS_FINE_THINNING_TIMERS_JSON`` is set, also write that JSON file.
+    """
+    global _THINNING_TIMERS
+    timers = _THINNING_TIMERS
+    _THINNING_TIMERS = None
+    if timers is None:
+        return None
+    summary = timers.as_dict()
+    out = os.environ.get("ETAS_FINE_THINNING_TIMERS_JSON", "").strip()
+    if out:
+        path = Path(out)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    return summary
+
+
+def get_thinning_timers() -> ThinningTimers | None:
+    return _THINNING_TIMERS
+
+
+def ah_gpu_requested(override: bool | None = None) -> bool:
+    """True when FINE ``A_h`` should use CuPy. Default off; env ``ETAS_FINE_AH_GPU=1``."""
+    if override is not None:
+        return bool(override)
+    raw = os.environ.get(_AH_GPU_ENV, "0").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def set_ah_use_gpu(use_gpu: bool) -> bool:
+    """Enable CuPy ``A_h`` for this process. Falls back to NumPy if CUDA is missing."""
+    global _A_H_USE_GPU
+    want = bool(use_gpu)
+    if want and (cp is None or not cp.cuda.is_available()):
+        logger.warning(
+            "FINE A_h GPU requested but CuPy/CUDA unavailable; using NumPy"
+        )
+        _A_H_USE_GPU = False
+        return False
+    _A_H_USE_GPU = want
+    return _A_H_USE_GPU
+
+
+def _ah_use_gpu(override: bool | None = None) -> bool:
+    if override is False:
+        return False
+    want = True if override is True else bool(_A_H_USE_GPU or ah_gpu_requested())
+    return bool(want and cp is not None and cp.cuda.is_available())
+
+
+def _unit_stretched_axis(resolution: int, stretch: float):
+    key = (int(resolution), float(stretch))
+    cached = _UNIT_GRID_CACHE.get(key)
+    if cached is not None:
+        return cached
+    u = np.linspace(-1.0, 1.0, int(resolution))
+    s = np.sign(u) * np.abs(u) ** float(stretch)
+    ds = np.gradient(s)
+    _UNIT_GRID_CACHE[key] = (s, ds)
+    return s, ds
+
+
+def _a_h_geometry(poly: Polygon, H: dict, resolution: int, stretch: float):
+    """Parent-centered stretched grid, area weights, and CPU polygon mask."""
+    min_lat, min_lon, max_lat, max_lon = poly.bounds
+    lat0, lon0 = H["y"], H["x"]
+    km_per_lat, km_per_lon = utility_functions.km_per_degree_at_latitude(lat0)
+    ext_y = max(abs(max_lat - lat0), abs(lat0 - min_lat)) * km_per_lat
+    ext_x = max(abs(max_lon - lon0), abs(lon0 - min_lon)) * km_per_lon
+    s, ds = _unit_stretched_axis(resolution, stretch)
+    SX, SY = np.meshgrid(s * ext_x, s * ext_y)
+    WX, WY = np.meshgrid(ds * ext_x, ds * ext_y)
+    dA_km2 = np.abs(WX * WY)
+    LAT = lat0 + SY / km_per_lat
+    LON = lon0 + SX / km_per_lon
+    mask = MplPath(poly.exterior.coords).contains_points(
+        np.column_stack((LAT.ravel(), LON.ravel()))
+    ).reshape(LAT.shape)
+    return LAT, LON, dA_km2, mask
+
+
+def _haversine_sq_km2_xp(xp, lat_deg, lon_deg, lat_k_deg, lon_k_deg):
+    """Squared great-circle distance; ``xp`` is numpy or cupy."""
+    lat_rad = xp.radians(lat_deg)
+    lon_rad = xp.radians(lon_deg)
+    lat_k = xp.radians(xp.asarray(lat_k_deg, dtype=xp.float64))
+    lon_k = xp.radians(xp.asarray(lon_k_deg, dtype=xp.float64))
+    hav = xp.square(xp.sin((lat_k - lat_rad) / 2.0)) + xp.cos(lat_k) * xp.cos(
+        lat_rad
+    ) * xp.square(xp.sin((lon_k - lon_rad) / 2.0))
+    dist = 2.0 * utility_functions.EARTH_RADIUS_KM * xp.arcsin(xp.sqrt(hav))
+    return xp.square(dist)
+
+
+def _a_h_kernel_sum(xp, LAT, LON, dA_km2, mask, H: dict, params: dict) -> float:
+    K = params["k0"] * float(np.exp(params["a"] * (H["m"] - params["m_c"])))
+    C = params["d"] * float(np.exp(params["gamma"] * (H["m"] - params["m_c"])))
+    rho = float(params["rho"])
+    lat = xp.asarray(LAT.ravel(), dtype=xp.float64)
+    lon = xp.asarray(LON.ravel(), dtype=xp.float64)
+    dA = xp.asarray(dA_km2.ravel(), dtype=xp.float64)
+    msk = xp.asarray(mask.ravel(), dtype=xp.float64)
+    dist_sq = _haversine_sq_km2_xp(xp, lat, lon, H["y"], H["x"])
+    kernel = K / (dist_sq + C) ** (1.0 + rho)
+    total = xp.sum(kernel * dA * msk)
+    if hasattr(total, "get"):
+        return float(total.get())
+    return float(total)
 
 
 def _catalog_row_to_history(row) -> dict:
@@ -103,6 +278,8 @@ def A_h(
     params: dict,
     resolution: int = 500,
     stretch: float = 3.5,
+    *,
+    use_gpu: bool | None = None,
 ) -> float:
     min_lat, min_lon, max_lat, max_lon = poly.bounds
     if min_lat == max_lat or min_lon == max_lon:
@@ -126,49 +303,47 @@ def A_h(
     if cached is not None:
         return cached
 
-    lat0, lon0 = H["y"], H["x"]
-    km_per_lat, km_per_lon = utility_functions.km_per_degree_at_latitude(lat0)
-
-    ext_y = max(abs(max_lat - lat0), abs(lat0 - min_lat)) * km_per_lat
-    ext_x = max(abs(max_lon - lon0), abs(lon0 - min_lon)) * km_per_lon
-
-    u = np.linspace(-1.0, 1.0, resolution)
-    sx = np.sign(u) * np.abs(u) ** stretch * ext_x
-    sy = np.sign(u) * np.abs(u) ** stretch * ext_y
-    SX, SY = np.meshgrid(sx, sy)
-    WX, WY = np.meshgrid(np.gradient(sx), np.gradient(sy))
-    dA_km2 = np.abs(WX * WY)
-
-    LAT = lat0 + SY / km_per_lat
-    LON = lon0 + SX / km_per_lon
-
-    mask = MplPath(poly.exterior.coords).contains_points(
-        np.column_stack((LAT.ravel(), LON.ravel()))
-    ).reshape(LAT.shape)
-
-    K = params["k0"] * np.exp(params["a"] * (H["m"] - params["m_c"]))
-    C = params["d"] * np.exp(params["gamma"] * (H["m"] - params["m_c"]))
-    dist_sq_km2 = utility_functions.spatial_distance_squared_km2(
-        LAT.ravel(), LON.ravel(), H["y"], H["x"]
-    ).reshape(LAT.shape)
-    kernel = K / (dist_sq_km2 + C) ** (1 + params["rho"])
-
-    val = float(np.sum((kernel * dA_km2)[mask]))
+    t0 = time.perf_counter() if _THINNING_TIMERS is not None else None
+    LAT, LON, dA_km2, mask = _a_h_geometry(poly, H, resolution, stretch)
+    xp = cp if _ah_use_gpu(use_gpu) else np
+    if xp is np:
+        dist_sq_km2 = utility_functions.spatial_distance_squared_km2(
+            LAT.ravel(), LON.ravel(), H["y"], H["x"]
+        ).reshape(LAT.shape)
+        K = params["k0"] * np.exp(params["a"] * (H["m"] - params["m_c"]))
+        C = params["d"] * np.exp(params["gamma"] * (H["m"] - params["m_c"]))
+        kernel = K / (dist_sq_km2 + C) ** (1 + params["rho"])
+        val = float(np.sum((kernel * dA_km2)[mask]))
+    else:
+        val = _a_h_kernel_sum(xp, LAT, LON, dA_km2, mask, H, params)
     _A_H_CACHE[key] = val
+    if t0 is not None and _THINNING_TIMERS is not None:
+        _THINNING_TIMERS.a_h_miss += time.perf_counter() - t0
     return val
 
 
 def _polygon_area_km2(polygon: Polygon) -> float:
+    key = polygon.wkt
+    cached = _POLYGON_AREA_CACHE.get(key)
+    if cached is not None:
+        return cached
     geod = pyproj.Geod(ellps="WGS84")
     lon_lat = Polygon([(lon, lat) for lat, lon in polygon.exterior.coords])
     area_m2, _ = geod.geometry_area_perimeter(lon_lat)
-    return abs(area_m2) / 1e6
+    val = abs(area_m2) / 1e6
+    _POLYGON_AREA_CACHE[key] = val
+    return val
 
 
 def g(t: float, H: dict, params: dict) -> float:
     return np.exp(-(t - H["t"]) / params["tau"]) / (t - H["t"] + params["c"]) ** (
         1 + params["omega"]
     )
+
+
+def _g_vector(t, event_times: np.ndarray, params: dict) -> np.ndarray:
+    dt = np.asarray(t, dtype=np.float64) - event_times
+    return np.exp(-dt / params["tau"]) / (dt + params["c"]) ** (1.0 + params["omega"])
 
 
 def lambda_s_total(
@@ -178,26 +353,61 @@ def lambda_s_total(
     params,
     resolution: int,
     stretch: float = 3.5,
+    *,
+    use_gpu: bool | None = None,
 ) -> float:
+    timers = _THINNING_TIMERS
+    t0 = time.perf_counter() if timers is not None else None
+    miss_before = timers.a_h_miss if timers is not None else 0.0
     rate = params["mu"] * _polygon_area_km2(poly)
-    for H in events:
-        if H["t"] <= t:
-            rate += A_h(poly, H, params, resolution, stretch) * g(t, H, params)
-    return rate
+    n = len(events)
+    if n == 0:
+        if t0 is not None and timers is not None:
+            timers.lambda_s += time.perf_counter() - t0
+        return rate
+    t_i = np.fromiter((H["t"] for H in events), dtype=np.float64, count=n)
+    mask = t_i <= t
+    if not np.any(mask):
+        if t0 is not None and timers is not None:
+            timers.lambda_s += time.perf_counter() - t0
+        return rate
+    ah = np.zeros(n, dtype=np.float64)
+    for i, H in enumerate(events):
+        if mask[i]:
+            ah[i] = A_h(poly, H, params, resolution, stretch, use_gpu=use_gpu)
+    gvals = _g_vector(t, t_i[mask], params)
+    out = rate + float(np.dot(ah[mask], gvals))
+    if t0 is not None and timers is not None:
+        elapsed = time.perf_counter() - t0
+        timers.lambda_s += elapsed - (timers.a_h_miss - miss_before)
+    return out
 
 
 def parent_weights(
-    t, events, poly, params, resolution: int, stretch: float = 3.5
+    t,
+    events,
+    poly,
+    params,
+    resolution: int,
+    stretch: float = 3.5,
+    *,
+    use_gpu: bool | None = None,
 ):
-    contribs = [
-        (A_h(poly, H, params, resolution, stretch) * g(t, H, params))
-        if H["t"] < t
-        else 0.0
-        for H in events
-    ]
-    contribs.append(params["mu"] * _polygon_area_km2(poly))
-    w = np.asarray(contribs, dtype=float)
-    return w / w.sum()
+    n = len(events)
+    bg = params["mu"] * _polygon_area_km2(poly)
+    if n == 0:
+        return np.array([1.0], dtype=float)
+    t_i = np.fromiter((H["t"] for H in events), dtype=np.float64, count=n)
+    mask = t_i < t
+    ah = np.zeros(n, dtype=np.float64)
+    for i, H in enumerate(events):
+        if mask[i]:
+            ah[i] = A_h(poly, H, params, resolution, stretch, use_gpu=use_gpu)
+    contribs = np.zeros(n + 1, dtype=float)
+    if np.any(mask):
+        contribs[:-1][mask] = ah[mask] * _g_vector(t, t_i[mask], params)
+    contribs[-1] = bg
+    return contribs / contribs.sum()
 
 
 def sample_background_location(poly: Polygon):
@@ -262,6 +472,84 @@ def thinning_next_event_time(intensity_fn, t0, t_end):
         bound = cand
 
 
+class GrowingEventCatalog:
+    """Capacity-doubling MAGNET-visible history for Ogata thinning.
+
+    Avoids ``pd.concat`` of a one-row frame on every accepted event. ``to_frame``
+    copies current rows into a DataFrame (cached until the next append).
+    """
+
+    def __init__(self, df: pd.DataFrame):
+        df = df.reset_index(drop=True)
+        n = len(df)
+        cap = max(8, n)
+        self._n = n
+        self._lat = np.empty(cap, dtype=np.float64)
+        self._lon = np.empty(cap, dtype=np.float64)
+        self._time = np.empty(cap, dtype="datetime64[ns]")
+        self._mag = np.empty(cap, dtype=np.float64)
+        self._bg = np.empty(cap, dtype=bool)
+        if n:
+            self._lat[:n] = df["latitude"].to_numpy(dtype=np.float64)
+            self._lon[:n] = df["longitude"].to_numpy(dtype=np.float64)
+            self._time[:n] = pd.to_datetime(df["time"]).to_numpy(dtype="datetime64[ns]")
+            self._mag[:n] = df["magnitude"].to_numpy(dtype=np.float64)
+            if "is_background" in df.columns:
+                self._bg[:n] = np.asarray(df["is_background"], dtype=bool)
+            else:
+                self._bg[:n] = False
+        self._frame: pd.DataFrame | None = None
+
+    def __len__(self) -> int:
+        return self._n
+
+    def _grow(self) -> None:
+        cap = max(8, self._n * 2)
+
+        def _expand(arr: np.ndarray) -> np.ndarray:
+            out = np.empty(cap, dtype=arr.dtype)
+            out[: self._n] = arr[: self._n]
+            return out
+
+        self._lat = _expand(self._lat)
+        self._lon = _expand(self._lon)
+        self._time = _expand(self._time)
+        self._mag = _expand(self._mag)
+        self._bg = _expand(self._bg)
+
+    def append(
+        self,
+        *,
+        lat: float,
+        lon: float,
+        t_days: float,
+        magnitude: float,
+        is_background: bool,
+    ) -> None:
+        if self._n == self._lat.size:
+            self._grow()
+        self._lat[self._n] = float(lat)
+        self._lon[self._n] = float(lon)
+        self._time[self._n] = (_EPOCH + pd.Timedelta(days=t_days)).to_datetime64()
+        self._mag[self._n] = float(magnitude)
+        self._bg[self._n] = bool(is_background)
+        self._n += 1
+        self._frame = None
+
+    def to_frame(self) -> pd.DataFrame:
+        if self._frame is None:
+            self._frame = pd.DataFrame(
+                {
+                    "latitude": np.array(self._lat[: self._n], copy=True),
+                    "longitude": np.array(self._lon[: self._n], copy=True),
+                    "time": pd.DatetimeIndex(self._time[: self._n].copy()),
+                    "magnitude": np.array(self._mag[: self._n], copy=True),
+                    "is_background": np.array(self._bg[: self._n], copy=True),
+                }
+            )
+        return self._frame
+
+
 def _append_event_to_available_catalog(
     catalog_df: pd.DataFrame,
     *,
@@ -271,25 +559,22 @@ def _append_event_to_available_catalog(
     magnitude: float,
     is_background: bool,
 ) -> pd.DataFrame:
-    """Append one simulated event to the MAGNET-visible history catalog."""
-    row = pd.DataFrame(
-        {
-            "latitude": [lat],
-            "longitude": [lon],
-            "time": [_EPOCH + pd.Timedelta(days=t_days)],
-            "magnitude": [magnitude],
-            "is_background": [is_background],
-        }
+    """Append one simulated event (legacy DataFrame path)."""
+    grown = GrowingEventCatalog(catalog_df)
+    grown.append(
+        lat=lat,
+        lon=lon,
+        t_days=t_days,
+        magnitude=magnitude,
+        is_background=is_background,
     )
-    return pd.concat([catalog_df, row], ignore_index=True)
+    return grown.to_frame()
 
 
 def _magnet_catalog_for_thinning(catalog):
     """Return catalog for MAGNET; skip copy when incremental feature state is enabled."""
     if catalog is None:
         return None
-    import etas.magnet_encoder_incremental as magnet_encoder_incremental
-
     if magnet_encoder_incremental.incremental_feature_state_enabled():
         return catalog
     return catalog.copy()
@@ -366,6 +651,7 @@ def simulate_catalog_continuation_thinning(
     magnitude_generator=_UNSET_MAGNITUDE_GENERATOR,
     a_h_resolution=500,
     a_h_stretch=3.5,
+    a_h_use_gpu=False,
     max_forecast_events=None,
     catalog=None,
 ) -> pd.DataFrame:
@@ -378,6 +664,12 @@ def simulate_catalog_continuation_thinning(
     """
     if magnitude_generator is _UNSET_MAGNITUDE_GENERATOR:
         magnitude_generator = _default_magnitude_generator()
+    set_ah_use_gpu(bool(a_h_use_gpu))
+    reset_session = getattr(magnitude_generator, "reset_thinning_session", None)
+    if callable(reset_session):
+        reset_session()
+    timers = begin_thinning_timers()
+    loop_t0 = time.perf_counter() if timers is not None else None
     params = expand_theta_log10(dict(parameters))
     params["m_c"] = float(mc)
 
@@ -386,19 +678,19 @@ def simulate_catalog_continuation_thinning(
     ].copy()
     history = history.sort_values("time").reset_index(drop=True)
     events = [_catalog_row_to_history(row) for _, row in history.iterrows()]
-    available_catalog = history.copy()
     if catalog is not None:
         catalog_upto_aux = catalog.loc[catalog["time"] <= auxiliary_end].copy()
-        if len(catalog_upto_aux) > len(available_catalog):
-            available_catalog = catalog_upto_aux.sort_values("time").reset_index(
-                drop=True
-            )
+        if len(catalog_upto_aux) > len(history):
+            history = catalog_upto_aux.sort_values("time").reset_index(drop=True)
+            events = [_catalog_row_to_history(row) for _, row in history.iterrows()]
+    available_catalog = GrowingEventCatalog(history)
 
-    t_start = (
-        float(max(H["t"] for H in events))
-        if events
-        else float((auxiliary_end - _EPOCH) / pd.Timedelta("1D"))
-    )
+    # Continue over (auxiliary_end, simulation_end]. History may end earlier than
+    # auxiliary_end; starting at max(history.t) wastes max_forecast_events on
+    # pre-window bursts that continuation_compare then filters out.
+    t_aux = float((auxiliary_end - _EPOCH) / pd.Timedelta("1D"))
+    t_hist = float(max(H["t"] for H in events)) if events else t_aux
+    t_start = max(t_aux, t_hist)
     t_end = float((simulation_end - _EPOCH) / pd.Timedelta("1D"))
 
     forecast = []
@@ -443,21 +735,33 @@ def simulate_catalog_continuation_thinning(
                 lat, lon = sample_aftershock_location(parent_H, params)
                 source = "triggered"
 
+            m_t0 = time.perf_counter() if timers is not None else None
             m = _thinning_magnitude(
                 magnitude_generator,
                 beta_main,
                 mc,
-                available_catalog,
+                (
+                    None
+                    if (
+                        use_magnet
+                        and magnet_encoder_incremental.incremental_feature_state_enabled()
+                        and getattr(
+                            magnitude_generator, "thinning_features_warm", False
+                        )
+                    )
+                    else available_catalog.to_frame()
+                ),
                 parent_H,
                 lat,
                 lon,
                 t_next,
             )
+            if m_t0 is not None and timers is not None:
+                timers.magnet += time.perf_counter() - m_t0
             event = {"m": m, "x": float(lon), "y": float(lat), "t": float(t_next)}
             events.append(event)
             forecast.append({**event, "event_source": source})
-            available_catalog = _append_event_to_available_catalog(
-                available_catalog,
+            available_catalog.append(
                 lat=lat,
                 lon=lon,
                 t_days=t_next,
@@ -467,6 +771,21 @@ def simulate_catalog_continuation_thinning(
             t = t_next
             pbar.update(1)
             pbar.set_postfix(thinning_progress_postfix(t, t_end), refresh=False)
+
+    if timers is not None and loop_t0 is not None:
+        accounted = timers.a_h_miss + timers.lambda_s + timers.magnet
+        timers.other = max(0.0, time.perf_counter() - loop_t0 - accounted)
+        summary = end_thinning_timers()
+        if summary is not None:
+            print(
+                "Stage: thinning timers "
+                f"a_h_miss={summary['a_h_miss']:.3f}s "
+                f"lambda_s={summary['lambda_s_total']:.3f}s "
+                f"magnet={summary['magnet']:.3f}s "
+                f"other={summary['other']:.3f}s "
+                f"(frac magnet={summary.get('frac_magnet', float('nan')):.2f})",
+                flush=True,
+            )
 
     if not forecast:
         return pd.DataFrame(

@@ -37,6 +37,57 @@ def test_ensemble_module_imports_and_uses_rate_simulation() -> None:
     assert theta["mu"] > 0
 
 
+def test_growing_event_catalog_append_matches_legacy_concat() -> None:
+    import etas.rate_simulation as rate_simulation
+    import pandas as pd
+
+    epoch = rate_simulation._EPOCH
+    seed = pd.DataFrame(
+        {
+            "latitude": [34.0, 34.1],
+            "longitude": [-118.0, -118.1],
+            "time": [
+                epoch + pd.Timedelta(days=1),
+                epoch + pd.Timedelta(days=2),
+            ],
+            "magnitude": [3.0, 4.0],
+            "is_background": [True, False],
+        }
+    )
+    grown = rate_simulation.GrowingEventCatalog(seed)
+    grown.append(
+        lat=34.2,
+        lon=-118.2,
+        t_days=3.0,
+        magnitude=5.0,
+        is_background=False,
+    )
+    frame = grown.to_frame()
+    assert len(grown) == 3
+    assert list(frame["magnitude"]) == pytest.approx([3.0, 4.0, 5.0])
+    assert frame["time"].iloc[-1] == epoch + pd.Timedelta(days=3)
+    assert frame is grown.to_frame()
+    grown.append(
+        lat=34.3,
+        lon=-118.3,
+        t_days=4.0,
+        magnitude=2.5,
+        is_background=True,
+    )
+    assert grown.to_frame() is not frame
+    assert len(grown.to_frame()) == 4
+
+    via_helper = rate_simulation._append_event_to_available_catalog(
+        seed,
+        lat=34.2,
+        lon=-118.2,
+        t_days=3.0,
+        magnitude=5.0,
+        is_background=False,
+    )
+    pd.testing.assert_frame_equal(via_helper, frame, check_dtype=False)
+
+
 def test_thinning_progress_postfix_last_and_remaining() -> None:
     import etas.rate_simulation as rate_simulation
     import pandas as pd

@@ -1336,6 +1336,7 @@ class ETASSimulation:
                     magnitude_generator=magnitude_generator,
                     a_h_resolution=topts.a_h_resolution,
                     a_h_stretch=topts.a_h_stretch,
+                    a_h_use_gpu=bool(getattr(topts, "use_gpu", False)),
                     max_forecast_events=max_forecast_events,
                     catalog=self.catalog,
                 )

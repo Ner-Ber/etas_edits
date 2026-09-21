@@ -798,6 +798,7 @@ def run_forecasts(
     thinning_magnitude_generator=None,
     methods: tuple[str, ...] = ("etas", "thinning"),
     max_forecast_events: int | None = None,
+    a_h_use_gpu: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     import etas.mc_b_est as mc_b_est
     import etas.simulation as simulation
@@ -900,6 +901,7 @@ def run_forecasts(
             filter_polygon=True,
             magnitude_generator=thinning_magnitude_generator,
             a_h_resolution=a_h_resolution,
+            a_h_use_gpu=bool(a_h_use_gpu),
             max_forecast_events=max_forecast_events,
         )
         thinning_cont["time"] = pd.to_datetime(

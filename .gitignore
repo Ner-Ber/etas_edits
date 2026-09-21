@@ -142,3 +142,4 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+input_data/etas_converted_jma.csv

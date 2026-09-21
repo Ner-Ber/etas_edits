@@ -107,9 +107,53 @@ class MagnetInferenceSession:
         self._incremental_state: magnet_encoder_incremental.IncrementalEncoderState | None = (
             None
         )
+        self._thinning_features_warm = False
+        self._thinning_snapshot: magnet_encoder_incremental.IncrementalEncoderState | None = (
+            None
+        )
+        self._tf_predict = None
 
     def clear_prediction_buffer(self) -> None:
         self._prediction_buffer.clear()
+
+    def clear_thinning_snapshot(self) -> None:
+        """Drop the truth-tip FeatureState snapshot (full re-warm next time)."""
+        self._thinning_snapshot = None
+        self._incremental_state = None
+        self._thinning_features_warm = False
+
+    def capture_thinning_snapshot(self) -> None:
+        """Store a copy of the current FeatureState as the per-seed restore point."""
+        if self._incremental_state is None:
+            return
+        self._thinning_snapshot = self._incremental_state.copy()
+        self._thinning_features_warm = True
+
+    def reset_thinning_session(self) -> None:
+        """Restore FeatureState from the truth-tip snapshot, or clear if none.
+
+        Call at the start of each thinning simulation / rolling step so simulated
+        history from the previous seed/window does not leak. When a snapshot was
+        captured after warming on truth history, this avoids a full re-sync.
+        """
+        if self._thinning_snapshot is not None:
+            self._incremental_state = self._thinning_snapshot.copy()
+            self._thinning_features_warm = True
+        else:
+            self._incremental_state = None
+            self._thinning_features_warm = False
+
+    def _model_forward(self, model_inputs):
+        """Keras call (tf.function) instead of ``model.predict`` for batch-1."""
+        if self._tf_predict is None:
+            model = self.loaded_model
+
+            @tf.function(reduce_retracing=True)
+            def _call(inputs):
+                return model(inputs, training=False)
+
+            self._tf_predict = _call
+        return self._tf_predict(model_inputs)
 
     def flush_prediction_buffer(self, dest: str | Path) -> Path | None:
         """Write buffered predictions to ``dest`` (``.npz``) and clear the buffer."""
@@ -249,7 +293,25 @@ class MagnetInferenceSession:
                 )
             base_history = catalog if catalog is not None else pd.DataFrame()
             if magnet_encoder_incremental.incremental_feature_state_enabled():
-                self._incremental_state.sync_catalog_extension(base_history)
+                catalog_shrank = (
+                    self._thinning_features_warm
+                    and catalog is not None
+                    and self._incremental_state is not None
+                    and len(catalog) < len(self._incremental_state.catalog)
+                )
+                skip_sync = (
+                    self._thinning_features_warm
+                    and n_events == 1
+                    and not catalog_shrank
+                )
+                if not skip_sync:
+                    self._incremental_state.sync_catalog_extension(base_history)
+                    self._thinning_features_warm = True
+                    if (
+                        self._thinning_snapshot is None
+                        and magnet_encoder_incremental.incremental_feature_state_enabled()
+                    ):
+                        self._thinning_snapshot = self._incremental_state.copy()
             else:
                 self._incremental_state.reset(base_history)
             event_iter = tqdm(
@@ -276,7 +338,7 @@ class MagnetInferenceSession:
                     self.location_scalers,
                     examples,
                 )
-                model_prediction = self.loaded_model.predict(model_inputs, verbose=0)
+                model_prediction = self._model_forward(model_inputs)
                 sampled_magnitude = _sample_from_model_prediction(
                     model_prediction,
                     shift=self.magnitude_shift,
@@ -374,6 +436,20 @@ class MagnetMagnitudeGenerator:
 
     def __init__(self, session: MagnetInferenceSession):
         self.session = session
+
+    def reset_thinning_session(self) -> None:
+        self.session.reset_thinning_session()
+
+    def clear_thinning_snapshot(self) -> None:
+        self.session.clear_thinning_snapshot()
+
+    def capture_thinning_snapshot(self) -> None:
+        self.session.capture_thinning_snapshot()
+
+    @property
+    def thinning_features_warm(self) -> bool:
+        """True after FeatureState has been synced at least once this session."""
+        return bool(getattr(self.session, "_thinning_features_warm", False))
 
     def __call__(
         self,

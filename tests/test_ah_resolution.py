@@ -55,10 +55,10 @@ class TestAhTinyPolygonKnownValues:
         params = _params()
         parent = {"m": 4.0, "x": -118.1, "y": 34.1, "t": 0.0}
         ah_16 = rate_simulation.A_h(
-            poly, parent, params, resolution=16, stretch=_STRETCH
+            poly, parent, params, resolution=16, stretch=_STRETCH, use_gpu=False
         )
         ah_500 = rate_simulation.A_h(
-            poly, parent, params, resolution=500, stretch=_STRETCH
+            poly, parent, params, resolution=500, stretch=_STRETCH, use_gpu=False
         )
         assert ah_16 == pytest.approx(_AH_INTERIOR_RES16, rel=1e-9, abs=1e-14)
         assert ah_500 == pytest.approx(_AH_INTERIOR_RES500, rel=1e-9, abs=1e-14)
@@ -68,7 +68,7 @@ class TestAhTinyPolygonKnownValues:
         params = _params()
         parent = {"m": 4.0, "x": -118.005, "y": 34.1, "t": 0.0}
         ah_500 = rate_simulation.A_h(
-            poly, parent, params, resolution=500, stretch=_STRETCH
+            poly, parent, params, resolution=500, stretch=_STRETCH, use_gpu=False
         )
         assert ah_500 == pytest.approx(_AH_EDGE_RES500, rel=1e-9, abs=1e-14)
 
@@ -76,3 +76,4 @@ class TestAhTinyPolygonKnownValues:
         opts = rate_simulation.ThinningContinuationOptions()
         assert opts.a_h_resolution == 500
         assert opts.a_h_stretch == pytest.approx(3.5)
+        assert opts.use_gpu is False
