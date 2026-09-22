@@ -95,3 +95,157 @@ def test_csep_utils_helpers():
     filtered = csep_utils.filter_to_study_domain(df, m_ref=3.5, study_poly=poly)
     assert len(filtered) == 1
     assert filtered.iloc[0]["magnitude"] == 4.0
+
+
+def test_dataframe_to_csep_catalog_empty():
+    """Empty observed windows must not hit PyCSEP from_dataframe iloc[0]."""
+    pytest.importorskip("csep")
+
+    # Small study square in [lat, lon] ETAS convention around Tokyo-ish
+    shape = np.array(
+        [
+            [35.0, 139.0],
+            [35.0, 140.0],
+            [36.0, 140.0],
+            [36.0, 139.0],
+            [35.0, 139.0],
+        ]
+    )
+    region = csep_utils.csep_region_from_shape_coords(
+        shape, magnitudes=np.array([3.0, 3.1, 3.2]), dh=0.5, name="unit-study"
+    )
+    assert region.num_nodes >= 1
+    empty = pd.DataFrame(columns=["time", "latitude", "longitude", "magnitude"])
+    cat = csep_utils.dataframe_to_csep_catalog(empty, catalog_id=0, region=region)
+    assert cat.event_count == 0
+    assert cat.catalog_id == 0
+
+
+def test_csep_region_from_shape_coords_covers_polygon():
+    pytest.importorskip("csep")
+    shape = np.array(
+        [
+            [34.5, -118.5],
+            [34.5, -117.5],
+            [35.5, -117.5],
+            [35.5, -118.5],
+            [34.5, -118.5],
+        ]
+    )
+    region = csep_utils.csep_region_from_shape_coords(
+        shape, magnitudes=np.linspace(3.0, 5.0, 5), dh=0.25
+    )
+    assert region.dh == 0.25
+    assert region.num_nodes >= 1
+    # A midpoint inside the square should be unmasked
+    assert not bool(region.get_masked(np.array([-118.0]), np.array([35.0]))[0])
+    # Far away should be masked
+    assert bool(region.get_masked(np.array([0.0]), np.array([0.0]))[0])
+    poly = csep_utils.etas_study_polygon_latlon(shape)
+    assert poly.geom_type == "Polygon"
+
+
+def test_pop_csep_sim_arrays_and_plot_consistency():
+    scores = {
+        "L_obs_ll": -10.0,
+        "simulated_ll": np.array([-12.0, -11.0, -9.0]),
+        "simulated_n": np.array([1.0, 2.0, 3.0]),
+        "simulated_m": np.array([0.1, 0.2]),
+        "simulated_s": np.array([-1.0, -0.5]),
+        "N_delta1": 0.5,
+    }
+    arrays = csep_utils.pop_csep_sim_arrays(scores)
+    assert set(arrays) == {"simulated_ll", "simulated_n", "simulated_m", "simulated_s"}
+    assert "simulated_ll" not in scores
+    assert scores["L_obs_ll"] == -10.0
+
+    fig = csep_utils.plot_consistency_diagnostic(
+        arrays["simulated_n"],
+        observed=2.0,
+        gamma=0.4,
+        alpha=0.025,
+        title="unit",
+        test_name="N-test",
+        xlabel="N",
+        delta1=0.6,
+    )
+    assert fig is not None
+    plt.close(fig)
+
+    fig_l = csep_utils.plot_l_test(
+        arrays["simulated_ll"], -10.0, 0.3, title="unit L"
+    )
+    assert fig_l is not None
+    plt.close(fig_l)
+
+
+def test_plot_consistency_overlay_etas_fine():
+    series = {
+        "etas": {
+            "simulated_ll": np.array([-12.0, -11.0, -10.0, -9.0]),
+            "L_obs_ll": -10.5,
+            "L_delta2": 0.4,
+            "L_delta1": 0.7,
+        },
+        "FINE": {
+            "simulated_ll": np.array([-11.5, -10.5, -9.5, -8.5]),
+            "L_obs_ll": -9.8,
+            "L_delta2": 0.55,
+            "L_delta1": 0.6,
+        },
+    }
+    fig = csep_utils.plot_consistency_overlay(
+        series,
+        sim_key="simulated_ll",
+        obs_key="L_obs_ll",
+        delta2_key="L_delta2",
+        delta1_key="L_delta1",
+        test_name="PL-test",
+        xlabel="LL",
+        title="unit overlay",
+        colors={"etas": "seagreen", "FINE": "mediumpurple"},
+        labels={"etas": "ETAS", "FINE": "FINE"},
+    )
+    assert fig is not None
+    plt.close(fig)
+
+    figs = csep_utils.plot_csep_metric_overlays(
+        {
+            "etas": {
+                **series["etas"],
+                "simulated_n": np.array([1.0, 2.0, 3.0]),
+                "N_obs": 2.0,
+                "N_delta1": 0.5,
+                "N_delta2": 0.5,
+                "simulated_m": np.array([0.1, 0.2, 0.3]),
+                "M_obs": 0.2,
+                "M_delta1": 0.4,
+                "M_delta2": 0.4,
+                "simulated_s": np.array([-1.0, -0.5, 0.0]),
+                "S_obs": -0.4,
+                "S_delta1": 0.3,
+                "S_delta2": 0.3,
+            },
+            "FINE": {
+                **series["FINE"],
+                "simulated_n": np.array([2.0, 3.0, 4.0]),
+                "N_obs": 3.0,
+                "N_delta1": 0.4,
+                "N_delta2": 0.6,
+                "simulated_m": np.array([0.15, 0.25, 0.35]),
+                "M_obs": 0.25,
+                "M_delta1": 0.5,
+                "M_delta2": 0.5,
+                "simulated_s": np.array([-0.8, -0.3, 0.1]),
+                "S_obs": -0.2,
+                "S_delta1": 0.4,
+                "S_delta2": 0.4,
+            },
+        },
+        title="unit",
+        colors={"etas": "seagreen", "FINE": "mediumpurple"},
+        labels={"etas": "ETAS", "FINE": "FINE"},
+    )
+    assert len(figs) == 4
+    for f in figs:
+        plt.close(f)
