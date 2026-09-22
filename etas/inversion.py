@@ -841,7 +841,20 @@ class ETASParameterCalculation:
         self.i = metadata.get("n_iterations")
 
     @classmethod
-    def load_calculation(cls, metadata: dict):
+    def load_calculation(
+            cls,
+            metadata: dict,
+            *,
+            load_pij: bool = False,
+            load_distances: bool = False,
+    ):
+        """Reload a stored inversion.
+
+        By default skips ``pij`` / ``distances`` CSVs (often multi-GB lineage
+        tables). Pass ``load_pij=True`` / ``load_distances=True``, or call
+        :meth:`ensure_pij` / :meth:`ensure_distances` later, when analysis
+        needs branching structure.
+        """
         obj = cls.__new__(cls)
 
         obj.logger = logging.getLogger(__name__)
@@ -945,27 +958,64 @@ class ETASParameterCalculation:
                 obj.logger.warning("Targets could not be loaded. \
                                     Only ok to proceed in specific use cases.")
 
-        if "fn_pij" in metadata:
-            obj.pij = pd.read_csv(
-                metadata["fn_pij"],
-                index_col=["source_id", "target_id"],
-                parse_dates=["target_time"],
-            )
-        else:
-            if not obj.oef_setting:
-                obj.logger.warning("Pij could not be loaded.")
+        obj.fn_pij = metadata.get("fn_pij")
+        obj.fn_dist = metadata.get("fn_dist")
+        obj.pij = None
+        obj.distances = None
 
-        if "fn_dist" in metadata:
-            obj.distances = pd.read_csv(
-                metadata["fn_dist"],
-                index_col=["source_id", "target_id"],
-                parse_dates=["target_time"],
+        if load_pij:
+            obj.ensure_pij()
+        elif obj.fn_pij and not obj.oef_setting:
+            obj.logger.info(
+                "  skipping pij load (pass load_pij=True or call ensure_pij())"
             )
-        else:
-            if not obj.oef_setting:
-                obj.logger.warning("Distances could not be loaded.")
+        elif not obj.fn_pij and not obj.oef_setting:
+            obj.logger.warning("Pij path not in metadata; cannot load.")
+
+        if load_distances:
+            obj.ensure_distances()
+        elif obj.fn_dist and not obj.oef_setting:
+            obj.logger.info(
+                "  skipping distances load "
+                "(pass load_distances=True or call ensure_distances())"
+            )
+        elif not obj.fn_dist and not obj.oef_setting:
+            obj.logger.warning("Distances path not in metadata; cannot load.")
 
         return obj
+
+    def ensure_pij(self):
+        """Load pairwise triggering probabilities if not already in memory."""
+        if self.pij is not None:
+            return self.pij
+        if not getattr(self, "fn_pij", None):
+            raise FileNotFoundError(
+                "No fn_pij on this calculation; re-run store_results(store_pij=True)."
+            )
+        self.logger.info("  loading pij from {}...".format(self.fn_pij))
+        self.pij = pd.read_csv(
+            self.fn_pij,
+            index_col=["source_id", "target_id"],
+            parse_dates=["target_time"],
+        )
+        return self.pij
+
+    def ensure_distances(self):
+        """Load precomputed source–target distances if not already in memory."""
+        if self.distances is not None:
+            return self.distances
+        if not getattr(self, "fn_dist", None):
+            raise FileNotFoundError(
+                "No fn_dist on this calculation; "
+                "re-run store_results(store_distances=True)."
+            )
+        self.logger.info("  loading distances from {}...".format(self.fn_dist))
+        self.distances = pd.read_csv(
+            self.fn_dist,
+            index_col=["source_id", "target_id"],
+            parse_dates=["target_time"],
+        )
+        return self.distances
 
     def prepare(self):
         if self.preparation_done:

@@ -591,8 +591,17 @@ def load_intensity_context(
     meta: dict,
     seed: int,
     repo_root: pathlib.Path | None = None,
+    *,
+    load_pij: bool = False,
+    load_distances: bool = False,
 ) -> dict:
-    """Load inversion results, training history, and observed test events for an ensemble run."""
+    """Load inversion results, training history, and observed test events for an ensemble run.
+
+    Skips ``pij`` / ``distances`` by default (lineage tables). Opt in with
+    ``load_pij`` / ``load_distances``, or call ``etas_inversion.ensure_pij()``
+    later when branching analysis needs them. The loaded calculation is returned
+    as ``\"etas_inversion\"`` for that purpose.
+    """
     import geopandas as gpd
     from etas.inversion import ETASParameterCalculation
     import etas.utility_functions as utility_functions
@@ -608,7 +617,11 @@ def load_intensity_context(
     if not params_json.is_file():
         raise FileNotFoundError(params_json)
     inversion_output = json.loads(params_json.read_text(encoding="utf-8"))
-    etas_inversion = ETASParameterCalculation.load_calculation(inversion_output)
+    etas_inversion = ETASParameterCalculation.load_calculation(
+        inversion_output,
+        load_pij=load_pij,
+        load_distances=load_distances,
+    )
     mc = float(etas_inversion.m_ref - etas_inversion.delta_m / 2)
     source_events = etas_inversion.source_events.copy()
     if "xi_plus_1" not in source_events.columns:
@@ -668,6 +681,7 @@ def load_intensity_context(
         "timewindow_start": inversion_output.get("timewindow_start"),
         "timewindow_end": timewindow_end,
         "testwindow_end": testwindow_end,
+        "etas_inversion": etas_inversion,
     }
 
 
@@ -1091,7 +1105,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Stage: loading inversion results (inv_{inv_id})...", flush=True)
     from etas.inversion import ETASParameterCalculation
 
-    etas_inversion = ETASParameterCalculation.load_calculation(inversion_output)
+    etas_inversion = ETASParameterCalculation.load_calculation(
+        inversion_output,
+        load_pij=False,
+        load_distances=False,
+    )
 
     theta_0 = cat_cmp.expand_theta_log10(dict(etas_inversion.theta))
     mc = float(etas_inversion.m_ref - etas_inversion.delta_m / 2)

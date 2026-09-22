@@ -1097,7 +1097,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Stage: loading inversion results (inv_{inv_id})...", flush=True)
     from etas.inversion import ETASParameterCalculation
 
-    etas_inversion = ETASParameterCalculation.load_calculation(inversion_output)
+    etas_inversion = ETASParameterCalculation.load_calculation(
+        inversion_output,
+        load_pij=False,
+        load_distances=False,
+    )
 
     theta_0 = rate_simulation.expand_theta_log10(dict(etas_inversion.theta))
     mc = float(etas_inversion.m_ref - etas_inversion.delta_m / 2)
