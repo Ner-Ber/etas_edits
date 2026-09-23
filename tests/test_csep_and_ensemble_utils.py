@@ -145,6 +145,67 @@ def test_csep_region_from_shape_coords_covers_polygon():
     assert poly.geom_type == "Polygon"
 
 
+class _SpatialGrid:
+    def __init__(self, values: np.ndarray):
+        self._values = np.asarray(values, dtype=float)
+
+    def spatial_counts(self) -> np.ndarray:
+        return self._values
+
+
+def test_molchan_comparison_from_spatial_counts():
+    observed = _SpatialGrid(np.array([2.0, 0.0, 0.0, 0.0]))
+    forecasts = {
+        "etas": _SpatialGrid(np.array([0.8, 0.1, 0.05, 0.0])),
+        "FINE": _SpatialGrid(np.array([0.0, 0.05, 0.1, 0.8])),
+    }
+    frame, fig = csep_utils.molchan_comparison(
+        forecasts,
+        observed,
+        labels={"etas": "ETAS", "FINE": "FINE"},
+        colors={"etas": "seagreen", "FINE": "mediumpurple"},
+        title="unit molchan",
+    )
+    assert list(frame["method"]) == ["ETAS", "FINE"]
+    assert frame.loc[0, "ASS"] > frame.loc[1, "ASS"]
+    assert frame.loc[0, "area_below_diagonal"] > 0
+    assert frame.loc[0, "n_target_bins"] == 1
+    assert fig is not None
+    plt.close(fig)
+
+    with pytest.raises(ValueError, match="spatial grids differ"):
+        csep_utils.molchan_from_catalog_forecast(
+            _SpatialGrid(np.ones(2)),
+            _SpatialGrid(np.ones(3)),
+        )
+
+
+def test_poisson_l_test_matches_zechar_joint_likelihood():
+    """Zechar (2010) §4.3 example: Λ={1.2, 6.4, 3.7}, Ω={1, 6, 3}."""
+    from scipy.stats import poisson
+
+    rates = np.array([1.2, 6.4, 3.7])
+    counts = np.array([1, 6, 3])
+    expected = float(np.sum(poisson.logpmf(counts, rates)))
+    assert np.isclose(csep_utils.poisson_joint_log_likelihood(rates, counts), expected)
+
+    # An event in a zero-rate bin makes the forecast impossible.
+    impossible = csep_utils.likelihood_test(
+        np.array([1.0, 0.0]),
+        np.array([0.0, 1.0]),
+        num_simulations=20,
+        seed=0,
+    )
+    assert impossible["Ltest_obs"] == -np.inf
+    assert impossible["Ltest_gamma"] == 0.0
+    assert impossible["n_zero_rate_events"] == 1
+
+    result = csep_utils.likelihood_test(rates, counts, num_simulations=40, seed=1)
+    assert result["simulated_ltest"].shape == (40,)
+    assert 0.0 <= result["Ltest_gamma"] <= 1.0
+    assert np.isfinite(result["Ltest_obs"])
+
+
 def test_pop_csep_sim_arrays_and_plot_consistency():
     scores = {
         "L_obs_ll": -10.0,
@@ -152,10 +213,17 @@ def test_pop_csep_sim_arrays_and_plot_consistency():
         "simulated_n": np.array([1.0, 2.0, 3.0]),
         "simulated_m": np.array([0.1, 0.2]),
         "simulated_s": np.array([-1.0, -0.5]),
+        "simulated_ltest": np.array([-3.0, -2.5]),
         "N_delta1": 0.5,
     }
     arrays = csep_utils.pop_csep_sim_arrays(scores)
-    assert set(arrays) == {"simulated_ll", "simulated_n", "simulated_m", "simulated_s"}
+    assert set(arrays) == {
+        "simulated_ll",
+        "simulated_n",
+        "simulated_m",
+        "simulated_s",
+        "simulated_ltest",
+    }
     assert "simulated_ll" not in scores
     assert scores["L_obs_ll"] == -10.0
 
@@ -249,3 +317,21 @@ def test_plot_consistency_overlay_etas_fine():
     assert len(figs) == 4
     for f in figs:
         plt.close(f)
+
+    ltest_fig = csep_utils.plot_consistency_overlay(
+        {
+            "etas": {
+                "simulated_ltest": np.array([-5.0, -4.0, -3.0, -2.0]),
+                "Ltest_obs": -np.inf,
+                "Ltest_gamma": 0.0,
+            },
+        },
+        sim_key="simulated_ltest",
+        obs_key="Ltest_obs",
+        delta2_key="Ltest_gamma",
+        delta1_key=None,
+        test_name="L-test",
+        xlabel="L",
+    )
+    assert ltest_fig is not None
+    plt.close(ltest_fig)

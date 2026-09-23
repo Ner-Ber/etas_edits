@@ -1,5 +1,8 @@
 """
 CSEP catalog evaluation utilities: forecast building, spatial/region filtering, and test runners.
+
+Molchan diagrams for those same catalog forecasts live in ``etas.molchan`` and are
+exposed here via ``molchan_from_catalog_forecast`` and ``molchan_comparison``.
 """
 
 from __future__ import annotations
@@ -13,8 +16,10 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 import numpy as np
 import pandas as pd
+from scipy.special import gammaln
 from shapely.geometry import Polygon as ShapelyPolygon
 
+import etas.molchan as molchan
 from etas.inversion import ETASParameterCalculation
 
 
@@ -281,7 +286,99 @@ _SIM_ARRAY_KEYS = (
     "simulated_n",
     "simulated_m",
     "simulated_s",
+    "simulated_ltest",
 )
+
+
+def poisson_joint_log_likelihood(rates: np.ndarray, counts: np.ndarray) -> float:
+    """Joint Poisson log-likelihood of bin counts given expected rates.
+
+    Zechar (2010) eq. 14, summed over space-magnitude bins:
+
+    ``L = Σ (−λ + ω log λ − log(ω!))``.
+
+    A bin with ``ω = 0`` contributes ``−λ``. A bin with ``ω > 0`` and ``λ = 0``
+    contributes ``−∞``.
+    """
+    lam = np.asarray(rates, dtype=float).ravel()
+    omega = np.asarray(counts, dtype=float).ravel()
+    if lam.shape != omega.shape:
+        raise ValueError(
+            "rates and counts must have the same shape; "
+            f"got {np.shape(rates)} and {np.shape(counts)}"
+        )
+    if lam.size == 0:
+        raise ValueError("rates is empty")
+    if np.any(lam < 0) or np.any(omega < 0) or not np.all(np.isfinite(lam)):
+        raise ValueError("rates must be finite and non-negative; counts must be non-negative")
+    with np.errstate(divide="ignore", invalid="ignore"):
+        omega_log_lam = np.where(omega == 0.0, 0.0, omega * np.log(lam))
+    return float(np.sum(-lam + omega_log_lam - gammaln(omega + 1.0)))
+
+
+def likelihood_test(
+    rates: np.ndarray,
+    counts: np.ndarray,
+    *,
+    num_simulations: int = 1000,
+    seed: int | None = None,
+) -> dict[str, Any]:
+    """Poisson L-test (Zechar 2010, §5.2.1).
+
+    ``rates`` are the expected counts λ in each space-magnitude bin. ``counts``
+    are the observed counts ω on that same grid. Each simulation draws a catalog
+    from independent Poisson bins (total number ``N ~ Poisson(Σλ)``, then bins
+    chosen with probability proportional to λ) and scores it with
+    :func:`poisson_joint_log_likelihood`.
+
+    ``gamma`` is the fraction of simulated joint log-likelihoods that are less
+    than or equal to the observed one (Zechar eq. 17). A very small gamma means
+    the observation is inconsistent with the forecast.
+    """
+    lam = np.asarray(rates, dtype=float).ravel()
+    omega = np.asarray(counts, dtype=float).ravel()
+    if num_simulations < 1:
+        raise ValueError(f"num_simulations must be positive, got {num_simulations}")
+    total = float(lam.sum())
+    if not np.isfinite(total) or total <= 0.0:
+        raise ValueError("L-test needs a positive total expected rate")
+    observed = poisson_joint_log_likelihood(lam, omega)
+    cdf = np.cumsum(lam) / total
+    rng = np.random.default_rng(seed)
+    simulated = np.empty(num_simulations, dtype=float)
+    for i in range(num_simulations):
+        n_events = int(rng.poisson(total))
+        sim_counts = np.zeros(lam.size, dtype=float)
+        if n_events:
+            # Uniform draws are in [0, 1), so searchsorted stays inside bins with λ > 0.
+            places = np.searchsorted(cdf, rng.random(n_events), side="right")
+            np.add.at(sim_counts, places, 1.0)
+        simulated[i] = poisson_joint_log_likelihood(lam, sim_counts)
+    gamma = float(np.mean(simulated <= observed))
+    n_zero_rate_events = int(np.sum(omega[lam <= 0.0]))
+    return {
+        "Ltest_obs": observed,
+        "Ltest_gamma": gamma,
+        "n_zero_rate_events": n_zero_rate_events,
+        "simulated_ltest": simulated,
+    }
+
+
+def l_test_from_catalog_forecast(
+    forecast: Any,
+    observed_catalog: Any,
+    *,
+    num_simulations: int = 1000,
+    seed: int | None = None,
+) -> dict[str, Any]:
+    """L-test using a catalog forecast's expected space-magnitude rates."""
+    if getattr(forecast, "expected_rates", None) is None:
+        forecast.get_expected_rates()
+    rates = np.asarray(forecast.expected_rates.data, dtype=float)
+    counts = np.asarray(observed_catalog.spatial_magnitude_counts(), dtype=float)
+    return likelihood_test(
+        rates, counts, num_simulations=num_simulations, seed=seed
+    )
 
 
 def pop_csep_sim_arrays(scores: dict[str, Any]) -> dict[str, np.ndarray]:
@@ -296,11 +393,16 @@ def pop_csep_sim_arrays(scores: dict[str, Any]) -> dict[str, np.ndarray]:
 def run_csep_catalog_tests(
     forecast: Any,
     observed_catalog: Any,
+    *,
+    include_l_test: bool = False,
+    l_test_simulations: int = 1000,
+    l_test_seed: int | None = None,
 ) -> dict[str, Any]:
-    """Run L-test (pseudolikelihood), N-test, M-test, and S-test on a catalog forecast.
+    """Run PL, N, M, and S catalog tests, plus the Poisson L-test.
 
-    Returns scalar scores plus simulated distributions under keys
-    ``simulated_ll``, ``simulated_n``, ``simulated_m``, ``simulated_s``.
+    The ``L_*`` / ``simulated_ll`` keys are the spatial pseudolikelihood test
+    (PL-test). The Poisson L-test (Zechar 2010, §5.2.1) is stored as
+    ``Ltest_obs``, ``Ltest_gamma``, and ``simulated_ltest``.
     """
     from csep.core import catalog_evaluations
 
@@ -321,7 +423,7 @@ def run_csep_catalog_tests(
     observed_ll = float(l_result.observed_statistic)
     l_status = getattr(l_result, "status", None)
 
-    return {
+    scores = {
         "L_delta1": float(l_delta1),
         "L_delta2": float(l_delta2),
         "L_quantile": float(l_delta2),
@@ -354,6 +456,16 @@ def run_csep_catalog_tests(
         "simulated_m": np.asarray(m_result.test_distribution, dtype=float),
         "simulated_s": np.asarray(s_result.test_distribution, dtype=float),
     }
+    if include_l_test:
+        scores.update(
+            l_test_from_catalog_forecast(
+                forecast,
+                observed_catalog,
+                num_simulations=l_test_simulations,
+                seed=l_test_seed,
+            )
+        )
+    return scores
 
 
 def pairwise_t_test_catalog_forecasts(
@@ -514,7 +626,7 @@ def plot_l_test(
     reference_lines: dict[str, float] | None = None,
     delta1: float | None = None,
 ) -> plt.Figure:
-    """Two-panel L-test diagnostic figure: simulated-LL histogram and empirical CDF."""
+    """Two-panel PL-test diagnostic: simulated pseudolikelihood histogram and ECDF."""
     return plot_consistency_diagnostic(
         simulated_ll,
         observed_ll,
@@ -562,6 +674,14 @@ CSEP_METRIC_SPECS: tuple[tuple[str, str, str, str, str, str], ...] = (
         r"Simulated spatial statistic $\hat{S}$",
         "S-test",
     ),
+    (
+        "simulated_ltest",
+        "Ltest_obs",
+        "Ltest_gamma",
+        None,
+        r"Simulated joint log-likelihood $L$",
+        "L-test",
+    ),
 )
 
 
@@ -591,13 +711,14 @@ def plot_consistency_overlay(
         sim = sim[np.isfinite(sim)]
         obs = scores.get(obs_key)
         d2 = scores.get(delta2_key)
-        if obs is None or d2 is None or not np.isfinite(obs) or sim.size == 0:
+        if obs is None or d2 is None or not np.isfinite(d2) or sim.size == 0:
             continue
+        obs_f = float(obs) if np.isfinite(obs) else None
         d1 = scores.get(delta1_key) if delta1_key else None
         d1_f = float(d1) if d1 is not None and np.isfinite(d1) else None
         label = (labels or {}).get(method, method)
         color = (colors or {}).get(method, f"C{len(prepared)}")
-        prepared.append((method, label, color, sim, float(obs), float(d2), d1_f))
+        prepared.append((method, label, color, sim, obs_f, float(d2), d1_f))
 
     if not prepared:
         return None
@@ -606,8 +727,9 @@ def plot_consistency_overlay(
     ax_hist, ax_cdf = axes
 
     all_sim = np.concatenate([p[3] for p in prepared])
-    x_lo = float(min(all_sim.min(), min(p[4] for p in prepared)))
-    x_hi = float(max(all_sim.max(), max(p[4] for p in prepared)))
+    finite_obs = [p[4] for p in prepared if p[4] is not None]
+    x_lo = float(all_sim.min() if not finite_obs else min(all_sim.min(), min(finite_obs)))
+    x_hi = float(all_sim.max() if not finite_obs else max(all_sim.max(), max(finite_obs)))
     pad = 0.05 * max(x_hi - x_lo, 1.0)
     bins = np.histogram_bin_edges(all_sim, bins="auto" if all_sim.size >= 15 else max(all_sim.size, 1))
 
@@ -621,13 +743,29 @@ def plot_consistency_overlay(
             alpha=0.45,
             label=f"{label} sims",
         )
-        ax_hist.axvline(obs, color=color, ls="--", lw=1.8, label=f"{label} obs")
-
         x_sorted = np.sort(sim)
         ecdf = np.arange(1, x_sorted.size + 1, dtype=float) / x_sorted.size
         ax_cdf.step(x_sorted, ecdf, where="post", color=color, lw=1.8, label=label)
+        if obs is None:
+            ax_hist.plot([], [], color=color, ls="--", lw=1.8, label=f"{label} obs = −∞")
+            note = rf"obs $L=-\infty$, $\gamma={d2:.2f}$"
+            ax_cdf.annotate(
+                f"{label}: {note}",
+                xy=(0.02, 0.98 - 0.08 * i),
+                xycoords="axes fraction",
+                fontsize=8,
+                color=color,
+                va="top",
+            )
+            continue
+        ax_hist.axvline(obs, color=color, ls="--", lw=1.8, label=f"{label} obs")
         ax_cdf.axvline(obs, color=color, ls="--", lw=1.4, alpha=0.9)
-        note = rf"$\delta_2={d2:.2f}$" if d1_f is None else rf"$\delta_1={d1_f:.2f},\ \delta_2={d2:.2f}$"
+        if d1_f is None and delta1_key is None:
+            note = rf"$\gamma={d2:.2f}$"
+        elif d1_f is None:
+            note = rf"$\delta_2={d2:.2f}$"
+        else:
+            note = rf"$\delta_1={d1_f:.2f},\ \delta_2={d2:.2f}$"
         ax_cdf.annotate(
             f"{label}: {note}",
             xy=(obs, d2),
@@ -656,6 +794,72 @@ def plot_consistency_overlay(
     return fig
 
 
+def molchan_from_catalog_forecast(
+    forecast: Any,
+    observed_catalog: Any,
+) -> molchan.MolchanResult:
+    """Molchan curve from a catalog forecast's expected spatial rates.
+
+    Rates and observations are summed over magnitude, then each spatial cell
+    is marked as a target bin when it contains at least one observed event.
+    ``forecast.spatial_counts()`` uses cached expected rates when the catalog
+    tests have already been run.
+    """
+    rates = np.asarray(forecast.spatial_counts(), dtype=float).ravel()
+    observed_counts = np.asarray(observed_catalog.spatial_counts(), dtype=float).ravel()
+    if rates.shape != observed_counts.shape:
+        raise ValueError(
+            "forecast and observed catalog spatial grids differ: "
+            f"{rates.shape} vs {observed_counts.shape}"
+        )
+    return molchan.molchan_curve(rates, observed_counts > 0)
+
+
+def molchan_comparison(
+    forecasts_by_method: dict[str, Any],
+    observed_catalog: Any,
+    *,
+    labels: dict[str, str] | None = None,
+    colors: dict[str, str] | None = None,
+    title: str | None = None,
+) -> tuple[pd.DataFrame, plt.Figure | None]:
+    """Score each catalog forecast and plot the Molchan curves together.
+
+    The table reports the area skill score (area above the miss-rate curve;
+    0.5 for a uniform Poisson model) and ``area_below_diagonal`` (ASS − 0.5).
+    """
+    label_map = dict(labels or {})
+    rows: list[dict[str, Any]] = []
+    results: dict[str, molchan.MolchanResult] = {}
+    for method, forecast in forecasts_by_method.items():
+        label = label_map.get(method, method)
+        try:
+            result = molchan_from_catalog_forecast(forecast, observed_catalog)
+        except ValueError as exc:
+            rows.append({"method": label, "error": str(exc)})
+            continue
+        results[method] = result
+        rows.append(
+            {
+                "method": label,
+                "ASS": result.area_skill_score,
+                "area_below_diagonal": result.area_below_diagonal,
+                "n_bins": result.n_bins,
+                "n_target_bins": result.n_targets,
+            }
+        )
+    frame = pd.DataFrame(rows)
+    fig = None
+    if results:
+        fig = molchan.plot_molchan_diagram(
+            results,
+            title=title,
+            colors=colors,
+            labels=label_map,
+        )
+    return frame, fig
+
+
 def plot_csep_metric_overlays(
     ensemble_by_method: dict[str, dict[str, Any]],
     *,
@@ -664,7 +868,7 @@ def plot_csep_metric_overlays(
     colors: dict[str, str] | None = None,
     labels: dict[str, str] | None = None,
 ) -> list[plt.Figure]:
-    """One overlay figure per CSEP metric (L/N/M/S) for all methods present."""
+    """One overlay figure per available metric (PL, N, M, S, and L when present)."""
     figures: list[plt.Figure] = []
     for sim_key, obs_key, d2_key, d1_key, xlabel, test_name in CSEP_METRIC_SPECS:
         fig = plot_consistency_overlay(
