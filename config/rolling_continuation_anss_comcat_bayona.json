@@ -1,0 +1,45 @@
+{
+    "methods": [
+        "etas",
+        "FINE"
+    ],
+    "fn_catalog": "input_data/anss_comcat_relm_etas.csv",
+    "shape_coords": "input_data/relm_testing_polygon_latlon.npy",
+    "region": "california",
+    "output_root": "outputs/rolling_continuation_anss_comcat_bayona",
+    "auxiliary_start": "1889-01-01 00:00:00",
+    "timewindow_start": "1889-01-01 00:00:00",
+    "timewindow_end": "2007-08-01 00:00:00",
+    "testwindow_end": "2018-08-31 00:00:00",
+    "theta_0": {
+        "log10_mu": -5.8,
+        "log10_k0": -2.6,
+        "a": 1.8,
+        "log10_c": -2.5,
+        "omega": -0.02,
+        "log10_tau": 3.5,
+        "log10_d": -0.85,
+        "gamma": 1.3,
+        "rho": 0.66
+    },
+    "mc": 3.95,
+    "delta_m": 0.1,
+    "coppersmith_multiplier": 100,
+    "seed": 0,
+    "n_runs": 3,
+    "inversion_cache_leader_seed": 0,
+    "store_pij": false,
+    "store_distances": false,
+    "magnet": {
+        "mode": "load",
+        "model_dir": "outputs/rolling_continuation_anss_comcat_bayona/_base_magnet/magnet/model_906859d750f0f7fe08634c2e686d86185e1dd5d5/_repetition_0",
+        "gin_config_path": "config/magnet_anss_comcat_bayona.gin",
+        "region": "california",
+        "override_domain_times": true,
+        "encoder_filter": "above_mc",
+        "use_depth_as_feature": true,
+        "depth_source_catalog": "/data/neriberman/magnet_ingested/anss_comcat.csv",
+        "save_predictions": false,
+        "prediction_statistics": "sample"
+    }
+}

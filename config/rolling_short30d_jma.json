@@ -1,0 +1,49 @@
+{
+    "methods": [
+        "etas",
+        "FINE"
+    ],
+    "fn_catalog": "input_data/etas_converted_jma.csv",
+    "shape_coords": "input_data/jma_study_rect.npy",
+    "region": "japan",
+    "output_root": "outputs/rolling_hgx_short30d_jma",
+    "auxiliary_start": "1965-01-01 00:00:00",
+    "timewindow_start": "1999-01-01 00:00:00",
+    "timewindow_end": "2009-01-01 00:00:00",
+    "testwindow_end": "2009-01-31 00:00:00",
+    "theta_0": {
+        "log10_mu": -5.8,
+        "log10_k0": -2.6,
+        "a": 1.8,
+        "log10_c": -2.5,
+        "omega": -0.02,
+        "log10_tau": 3.5,
+        "log10_d": -0.85,
+        "gamma": 1.3,
+        "rho": 0.66
+    },
+    "mc": 3.0,
+    "delta_m": 0.1,
+    "coppersmith_multiplier": 100,
+    "seed": 0,
+    "n_runs": 5,
+    "a_h_resolution": 500,
+    "force_inversion": false,
+    "force_rerun": false,
+    "store_pij": true,
+    "store_distances": true,
+    "gof_threshold": 1.0,
+    "magnet": {
+        "mode": "load",
+        "model_dir": "outputs/benchmark_matrix/benchmark_full_20260801/jma/FINE_variants/mc_depth/magnet/model_4c80770bba876ebbd94cb54e00b666aa79a8923b/_repetition_0",
+        "gin_config_path": "config/magnet_jma_thinning_train.gin",
+        "general_gin_config_path": null,
+        "region": "japan",
+        "save_predictions": false,
+        "prediction_statistics": "sample",
+        "override_domain_times": true,
+        "encoder_filter": "above_mc",
+        "use_depth_as_feature": true,
+        "depth_source_catalog": "/data/neriberman/magnet_ingested/jma.csv"
+    }
+}

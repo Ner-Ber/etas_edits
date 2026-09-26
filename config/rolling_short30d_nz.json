@@ -1,0 +1,49 @@
+{
+    "methods": [
+        "etas",
+        "FINE"
+    ],
+    "fn_catalog": "input_data/etas_converted_nz_geonet.csv",
+    "shape_coords": "input_data/nz_study_polygon.npy",
+    "region": "nz",
+    "output_root": "outputs/rolling_hgx_short30d_nz",
+    "auxiliary_start": "1989-01-05 10:40:00",
+    "timewindow_start": "2008-01-10 21:20:00",
+    "timewindow_end": "2014-06-08 16:53:20",
+    "testwindow_end": "2014-07-08 16:53:20",
+    "theta_0": {
+        "log10_mu": -5.8,
+        "log10_k0": -2.6,
+        "a": 1.8,
+        "log10_c": -2.5,
+        "omega": -0.02,
+        "log10_tau": 3.5,
+        "log10_d": -0.85,
+        "gamma": 1.3,
+        "rho": 0.66
+    },
+    "mc": 2.5,
+    "delta_m": 0.1,
+    "coppersmith_multiplier": 100,
+    "seed": 0,
+    "n_runs": 5,
+    "a_h_resolution": 500,
+    "force_inversion": false,
+    "force_rerun": false,
+    "store_pij": true,
+    "store_distances": true,
+    "gof_threshold": 1.0,
+    "magnet": {
+        "mode": "load",
+        "model_dir": "outputs/benchmark_matrix/benchmark_full_20260801/nz/FINE_variants/mc_depth/magnet/model_a1c09fe134d997c9d07e24a46c403f0031b9851b/_repetition_0",
+        "gin_config_path": "config/magnet_nz_thinning_train.gin",
+        "general_gin_config_path": null,
+        "region": "nz",
+        "save_predictions": false,
+        "prediction_statistics": "sample",
+        "override_domain_times": true,
+        "encoder_filter": "above_mc",
+        "use_depth_as_feature": true,
+        "depth_source_catalog": "/data/neriberman/magnet_ingested/nz_geonet.csv"
+    }
+}
