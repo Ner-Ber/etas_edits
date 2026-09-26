@@ -29,6 +29,7 @@ import os
 import pathlib
 import re
 import sys
+import time
 import warnings
 
 import numpy as np
@@ -952,6 +953,120 @@ def cache_hit(run_dir: pathlib.Path, expected: dict, force_rerun: bool) -> bool:
     return ens.realization_meta_matches(run_dir, expected)
 
 
+_ACTIVE_INVERSION_NAME = "active_inversion.json"
+
+
+def publish_active_inversion(
+    step_dir: pathlib.Path,
+    inv_id: str,
+    params_json: pathlib.Path,
+) -> None:
+    """Point later windows at the inversion this step fitted or reused."""
+    payload = {
+        "inv_id": inv_id,
+        "parameters_json": str(params_json.resolve()),
+    }
+    dest = step_dir / _ACTIVE_INVERSION_NAME
+    temporary = dest.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(payload), encoding="utf-8")
+    temporary.replace(dest)
+
+
+def wait_for_reused_inversion(
+    anchor_step_dir: pathlib.Path,
+    *,
+    poll_seconds: float = 20.0,
+) -> tuple[str, pathlib.Path, dict]:
+    """Block until the anchor step has published a finished parameter file."""
+    pointer = pathlib.Path(anchor_step_dir) / _ACTIVE_INVERSION_NAME
+    print(f"Stage: reusing ETAS inversion from {pointer}", flush=True)
+    started = time.monotonic()
+    next_log = started + 60.0
+    while True:
+        if pointer.is_file():
+            try:
+                loaded = json.loads(pointer.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                loaded = None
+            if isinstance(loaded, dict) and loaded.get("parameters_json") and loaded.get("inv_id"):
+                params_json = pathlib.Path(loaded["parameters_json"])
+                inversion = compare.complete_inversion_payload(params_json)
+                if inversion is not None:
+                    waited = time.monotonic() - started
+                    print(
+                        f"Stage: reused ETAS inversion ready after {waited:.0f}s "
+                        f"({params_json})",
+                        flush=True,
+                    )
+                    return str(loaded["inv_id"]), params_json, inversion
+        now = time.monotonic()
+        if now >= next_log:
+            print(
+                f"Stage: still waiting for reused ETAS inversion "
+                f"({now - started:.0f}s) {pointer}",
+                flush=True,
+            )
+            next_log = now + 60.0
+        time.sleep(poll_seconds)
+
+
+def _forecast_auxiliary_catalog(
+    etas_inversion,
+    forecast_start_dt: pd.Timestamp,
+) -> pd.DataFrame:
+    """History for the forecast, including events after the frozen fit.
+
+    A reused inversion was fitted through an earlier origin. Events since that
+    fit still have to be parents of the new forecast, so the catalog is
+    filtered again through ``forecast_start_dt`` with the same completeness
+    and polygon as the fit.
+    """
+    fit_end = pd.to_datetime(etas_inversion.timewindow_end)
+    forecast_start_dt = pd.to_datetime(forecast_start_dt)
+    if forecast_start_dt > fit_end:
+        print(
+            f"Stage: extending inversion history from {fit_end} "
+            f"through {forecast_start_dt}",
+            flush=True,
+        )
+        etas_inversion.timewindow_end = forecast_start_dt
+        raw = pd.read_csv(
+            utility_functions.path_rel_to_file(etas_inversion.fn_catalog),
+            index_col=0,
+            parse_dates=["time"],
+            dtype={"url": str, "alert": str},
+        )
+        raw["time"] = pd.to_datetime(raw["time"], format="ISO8601")
+        etas_inversion.catalog = etas_inversion.filter_catalog(raw)
+        auxiliary_catalog = etas_inversion.catalog[
+            ["latitude", "longitude", "time", "magnitude"]
+        ].copy()
+        auxiliary_catalog["xi_plus_1"] = 1.0
+        auxiliary_catalog["time"] = pd.to_datetime(
+            auxiliary_catalog["time"],
+            utc=True,
+            format="mixed",
+        ).dt.tz_convert(None)
+        return auxiliary_catalog
+
+    source_events = etas_inversion.source_events.copy()
+    if "xi_plus_1" not in source_events.columns:
+        source_events["xi_plus_1"] = 1.0
+    auxiliary_catalog = pd.merge(
+        source_events,
+        etas_inversion.catalog[["latitude", "longitude", "time", "magnitude"]],
+        left_index=True,
+        right_index=True,
+        how="left",
+    )
+    auxiliary_catalog["time"] = pd.to_datetime(
+        auxiliary_catalog["time"],
+        utc=True,
+        format="mixed",
+    ).dt.tz_convert(None)
+    return auxiliary_catalog
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.getLogger("matplotlib").setLevel(logging.WARNING)
 
@@ -1143,15 +1258,22 @@ def main(argv: list[str] | None = None) -> int:
     defer_until_cached = (
         leader_seed is not None and int(cfg.get("seed", 0)) != int(leader_seed)
     )
-    inv_id, params_json, inversion_output = compare.run_inversion(
-        inversion_config,
-        inversion_output_dir,
-        force_inversion=force_inversion,
-        store_pij=store_pij,
-        store_distances=store_distances,
-        gof_threshold=gof_threshold,
-        defer_until_cached=defer_until_cached,
-    )
+    reuse_from = cfg.get("reuse_inversion_from_step")
+    if reuse_from and not force_inversion:
+        inv_id, params_json, inversion_output = wait_for_reused_inversion(
+            pathlib.Path(reuse_from)
+        )
+    else:
+        inv_id, params_json, inversion_output = compare.run_inversion(
+            inversion_config,
+            inversion_output_dir,
+            force_inversion=force_inversion,
+            store_pij=store_pij,
+            store_distances=store_distances,
+            gof_threshold=gof_threshold,
+            defer_until_cached=defer_until_cached,
+        )
+    publish_active_inversion(output_root, inv_id, params_json)
     print(f"Inversion id: {inv_id} ({params_json})", flush=True)
 
     from etas.inversion import ETASParameterCalculation
@@ -1163,23 +1285,8 @@ def main(argv: list[str] | None = None) -> int:
     beta_main = float(etas_inversion.beta)
     polygon = Polygon(etas_inversion.shape_coords)
 
-    source_events = etas_inversion.source_events.copy()
-    if "xi_plus_1" not in source_events.columns:
-        source_events["xi_plus_1"] = 1.0
-    auxiliary_catalog = pd.merge(
-        source_events,
-        etas_inversion.catalog[["latitude", "longitude", "time", "magnitude"]],
-        left_index=True,
-        right_index=True,
-        how="left",
-    )
-    auxiliary_catalog["time"] = pd.to_datetime(
-        auxiliary_catalog["time"],
-        utc=True,
-        format="mixed",
-    ).dt.tz_convert(None)
-
     forecast_start_dt = pd.to_datetime(cfg["timewindow_end"], utc=True).tz_convert(None)
+    auxiliary_catalog = _forecast_auxiliary_catalog(etas_inversion, forecast_start_dt)
     forecast_end_dt = pd.to_datetime(cfg["testwindow_end"], utc=True).tz_convert(None)
     history_df = auxiliary_catalog.loc[auxiliary_catalog["time"] <= forecast_start_dt].copy()
     history_df = history_df.sort_values("time").reset_index(drop=True)

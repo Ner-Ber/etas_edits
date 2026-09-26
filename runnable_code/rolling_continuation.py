@@ -79,6 +79,58 @@ def parse_timedelta_days(value: str | float | int | pd.Timedelta) -> pd.Timedelt
     return pd.Timedelta(value)
 
 
+def parse_inversion_interval(value: Any) -> pd.Timedelta | None:
+    """How long one ETAS fit is reused, or None to fit every window.
+
+    A number is a length in days. ``365`` or ``"365D"`` keeps one fit until the
+    forecast origin is more than 365 days after that fit, which is 365 daily
+    windows and 730 twelve-hour windows with no new inversion.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if text == "" or text.lower() in {"none", "null"}:
+            return None
+        try:
+            numeric = float(text)
+        except ValueError:
+            interval = pd.Timedelta(text)
+        else:
+            interval = pd.Timedelta(days=numeric)
+    else:
+        interval = parse_timedelta_days(value)
+    if interval < pd.Timedelta(0):
+        raise ValueError(
+            f"inversion_interval must be non-negative, got {value!r}"
+        )
+    return interval
+
+
+def inversion_anchor_indices(
+    steps: Sequence[RollingStepWindows],
+    interval: pd.Timedelta | None,
+) -> list[int]:
+    """Step index whose fit each window uses.
+
+    A later window keeps that fit while
+    ``forecast_start - anchor_forecast_start <= interval``. The next window
+    past that gap fits again.
+    """
+    if not steps:
+        return []
+    if interval is None:
+        return [step.step_index for step in steps]
+    anchors: list[int] = []
+    anchor_pos = 0
+    for pos, step in enumerate(steps):
+        elapsed = step.forecast_start - steps[anchor_pos].forecast_start
+        if pos == 0 or elapsed > interval:
+            anchor_pos = pos
+        anchors.append(steps[anchor_pos].step_index)
+    return anchors
+
+
 def compute_rolling_steps(
     *,
     timewindow_start: str | pd.Timestamp,
@@ -356,6 +408,7 @@ def execute_rolling_step(
     force_rerun: bool = False,
     seed: int | None = None,
     write_summary: bool = True,
+    reuse_inversion_from_step: pathlib.Path | None = None,
 ) -> dict[str, Any] | None:
     """
     Execute forecasts for a single step in the walk-forward sequence.
@@ -374,6 +427,8 @@ def execute_rolling_step(
     step_cfg["methods"] = list(methods)
     step_cfg["force_inversion"] = force_inversion
     step_cfg["force_rerun"] = force_rerun
+    if reuse_inversion_from_step is not None and not force_inversion:
+        step_cfg["reuse_inversion_from_step"] = str(reuse_inversion_from_step)
 
     if seed is not None:
         step_cfg["seed"] = int(seed)
@@ -455,11 +510,33 @@ def run_walk_forward_for_horizon(
 
     seed_start = int(base_cfg.get("seed", 0))
     n_runs = int(base_cfg.get("n_runs", 1))
+    interval = None if force_inversion else parse_inversion_interval(
+        base_cfg.get("inversion_interval")
+    )
+    anchor_of = {
+        step.step_index: anchor
+        for step, anchor in zip(
+            steps,
+            inversion_anchor_indices(steps, interval),
+        )
+    }
 
+    def reuse_dir_for(step: RollingStepWindows) -> pathlib.Path | None:
+        anchor = anchor_of[step.step_index]
+        if anchor == step.step_index:
+            return None
+        return h_dir / step_dir_name(anchor)
+
+    interval_note = (
+        f"Inversion interval: {interval}\n"
+        if interval is not None
+        else "Inversion interval: every window\n"
+    )
     print(
         f"\n========================================\n"
         f"Starting walk-forward for T = {horizon_days:g} days ({len(steps)} steps)\n"
         f"Schedule: {schedule} | realizations: {n_runs} (seeds {seed_start}..{seed_start + n_runs - 1})\n"
+        f"{interval_note}"
         f"Output: {h_dir}\n"
         f"========================================",
         flush=True,
@@ -476,11 +553,17 @@ def run_walk_forward_for_horizon(
             )
             for step in steps:
                 s_dir = h_dir / step_dir_name(step.step_index)
+                reuse_dir = reuse_dir_for(step)
+                fit_note = (
+                    "new inversion"
+                    if reuse_dir is None
+                    else f"reusing inversion from {reuse_dir.name}"
+                )
                 print(
                     f"\n--- Step {step.step_index + 1}/{len(steps)} "
                     f"(seed={seed}): "
                     f"[{step.forecast_start} → {step.forecast_end}] "
-                    f"(history through {step.train_end}) ---",
+                    f"(history through {step.train_end}; {fit_note}) ---",
                     flush=True,
                 )
                 execute_rolling_step(
@@ -494,6 +577,7 @@ def run_walk_forward_for_horizon(
                     force_rerun=force_rerun,
                     seed=seed,
                     write_summary=False,
+                    reuse_inversion_from_step=reuse_dir,
                 )
 
         for step in steps:
@@ -516,10 +600,16 @@ def run_walk_forward_for_horizon(
     else:
         for step in steps:
             s_dir = h_dir / step_dir_name(step.step_index)
+            reuse_dir = reuse_dir_for(step)
+            fit_note = (
+                "new inversion"
+                if reuse_dir is None
+                else f"reusing inversion from {reuse_dir.name}"
+            )
             print(
                 f"\n--- Step {step.step_index + 1}/{len(steps)}: "
                 f"[{step.forecast_start} → {step.forecast_end}] "
-                f"(history through {step.train_end}) ---",
+                f"(history through {step.train_end}; {fit_note}) ---",
                 flush=True,
             )
 
@@ -532,6 +622,7 @@ def run_walk_forward_for_horizon(
                 magnet_model_dir=magnet_model_dir,
                 force_inversion=force_inversion,
                 force_rerun=force_rerun,
+                reuse_inversion_from_step=reuse_dir,
             )
             assert step_meta is not None
             step_summaries.append(step_meta)
