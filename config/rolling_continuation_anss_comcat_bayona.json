@@ -28,6 +28,7 @@
     "seed": 0,
     "n_runs": 3,
     "inversion_cache_leader_seed": 0,
+    "inversion_interval": 365,
     "store_pij": false,
     "store_distances": false,
     "magnet": {
