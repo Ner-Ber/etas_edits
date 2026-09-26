@@ -2,6 +2,8 @@
 
 **Updated:** 2026-09-22 16:00 IDT (hanamel inventory + HGX session notes)
 
+**Stale for operations.** The 2026-09-23 production batch and the sbatch plan are in `docs/HGX_HANDOVER.md`. Use that file.
+
 Operational snapshot for deciding what to run next on HGX vs leave on hanamel.
 Not a code TODO — see `docs/CODE_TODO.md` for engineering backlog.
 
