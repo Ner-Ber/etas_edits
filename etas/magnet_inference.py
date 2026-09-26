@@ -185,7 +185,12 @@ class MagnetInferenceSession:
             gin.parse_config_file(str(gin_config_path), skip_unknown=True)
 
         self.magnitude_shift = float(self.original_domain.magnitude_threshold)
-        self.pdf_support_stretch = pdf_support_stretch_from_gin()
+        # gin.query_parameter misses this key unless the trainer configurable
+        # is imported. Read the saved config.gin text instead.
+        _, self.pdf_support_stretch = magnet_inference_cache.parse_magnet_shift_stretch(
+            experiment_dir,
+            fallback_mc=self.magnitude_shift,
+        )
         print(
             "  MAGNET magnitude support: "
             f"shift={self.magnitude_shift}, stretch={self.pdf_support_stretch}",

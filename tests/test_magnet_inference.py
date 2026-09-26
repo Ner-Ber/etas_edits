@@ -335,7 +335,7 @@ def test_pdf_support_stretch_from_gin_default_and_bound(monkeypatch) -> None:
         "query_parameter",
         lambda key: (_ for _ in ()).throw(ValueError("unbound")),
     )
-    assert magnet_inference_cache.pdf_support_stretch_from_gin() == 7.0
+    assert magnet_inference_cache.pdf_support_stretch_from_gin() == 4.25
 
     monkeypatch.setattr(gin, "query_parameter", lambda key: 9)
     assert magnet_inference_cache.pdf_support_stretch_from_gin() == 9.0

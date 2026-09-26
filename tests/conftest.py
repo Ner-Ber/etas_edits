@@ -19,6 +19,20 @@ if str(REPO_ROOT) not in sys.path:
 if str(RUNNABLE_CODE) not in sys.path:
     sys.path.insert(0, str(RUNNABLE_CODE))
 
+# MAGNET lives in a sibling checkout. The hook and bare pytest both need it
+# on the path before MAGNET_ETAS_pipeline is imported.
+_MAGNET_PARENT = REPO_ROOT.parent / "eq_mag_prediction"
+for _rel in (
+    "eq_mag_prediction_clean-ifs",
+    "eq_mag_prediction_clean",
+    "eq_mag_prediction",
+):
+    _candidate = _MAGNET_PARENT / _rel
+    if (_candidate / "eq_mag_prediction").is_dir():
+        if str(_candidate) not in sys.path:
+            sys.path.insert(0, str(_candidate))
+        break
+
 
 @pytest.fixture
 def repo_root() -> pathlib.Path:

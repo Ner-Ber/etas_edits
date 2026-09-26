@@ -153,3 +153,60 @@ def test_pick_forecast_catalog() -> None:
     thinning = pd.DataFrame({"m": [2.0]})
     assert len(single_ens.pick_forecast_catalog(etas, thinning, "etas")) == 1
     assert single_ens.pick_forecast_catalog(etas, thinning, "thinning").iloc[0]["m"] == 2.0
+
+
+def test_complete_inversion_payload_rejects_partial_json(tmp_path) -> None:
+    import json
+
+    import continuation_compare as cat_cmp
+
+    path = tmp_path / "parameters_partial.json"
+    path.write_text("{", encoding="utf-8")
+    assert cat_cmp.complete_inversion_payload(path) is None
+    path.write_text(json.dumps({"inversion_done": False}), encoding="utf-8")
+    assert cat_cmp.complete_inversion_payload(path) is None
+
+
+def test_run_inversion_waits_for_leader_cache(tmp_path) -> None:
+    import json
+    import threading
+
+    import continuation_compare as cat_cmp
+
+    out = tmp_path / "inversions"
+    cfg = {
+        "fn_catalog": "catalog.csv",
+        "auxiliary_start": "1889-01-01 00:00:00",
+        "timewindow_start": "1889-01-01 00:00:00",
+        "timewindow_end": "2007-08-01 00:00:00",
+        "testwindow_end": "2007-08-02 00:00:00",
+        "mc": "3.95",
+        "delta_m": "0.1",
+        "shape_coords": "poly.npy",
+    }
+    inv_id = cat_cmp.inversion_id_from_config(cfg, store_pij=False, store_distances=False)
+    params = out / f"inv_{inv_id}" / f"parameters_{inv_id}.json"
+
+    def _publish() -> None:
+        params.parent.mkdir(parents=True, exist_ok=True)
+        params.write_text("{", encoding="utf-8")
+        ready = {
+            "inversion_done": True,
+            "final_parameters": {"a": 1.8},
+        }
+        params.write_text(json.dumps(ready), encoding="utf-8")
+
+    threading.Timer(0.05, _publish).start()
+    inv_id_out, path_out, payload = cat_cmp.run_inversion(
+        cfg,
+        out,
+        force_inversion=False,
+        store_pij=False,
+        store_distances=False,
+        gof_threshold=1.0,
+        defer_until_cached=True,
+        cache_poll_seconds=0.01,
+    )
+    assert inv_id_out == inv_id
+    assert path_out == params
+    assert payload["final_parameters"]["a"] == 1.8

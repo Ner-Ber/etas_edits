@@ -135,6 +135,7 @@ def _pythonpath(repo: Path) -> str:
     parts = [str(repo), str(repo / "runnable_code")]
     magnet_parent = repo.parent / "eq_mag_prediction"
     for rel in (
+        "eq_mag_prediction_clean-ifs",
         "eq_mag_prediction_clean",
         "eq_mag_prediction/eq_mag_prediction",
         "eq_mag_prediction",
@@ -156,16 +157,38 @@ def _conda_lib_from_python(python: Path) -> Path | None:
     return lib if lib.is_dir() else None
 
 
-def _subprocess_env(repo: Path) -> dict[str, str]:
+def _pytest_python() -> Path:
+    """Interpreter that has the project dependencies.
+
+    The hook process is often base ``python3``, which does not have geopandas.
+    Prefer the etas env when it is installed on this machine.
+    """
+    override = os.environ.get("ETAS_PYTEST_PYTHON", "").strip()
+    candidates: list[Path] = []
+    if override:
+        candidates.append(Path(override))
+    candidates.extend(
+        [
+            Path("/data/neriberman/envs/etas_remote/bin/python"),
+            Path(
+                "/a/home/cc/students/csguests/neriberman/anaconda3/envs/etas_remote/bin/python"
+            ),
+            Path(
+                "/a/home/cc/students/csguests/neriberman/anaconda3/envs/"
+                "etas_fine_speed_ifs/bin/python"
+            ),
+        ]
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return Path(sys.executable)
+
+
+def _subprocess_env(repo: Path, python: Path) -> dict[str, str]:
     env = os.environ.copy()
     env["PYTHONPATH"] = _pythonpath(repo)
-    conda_lib = None
-    if env.get("CONDA_PREFIX"):
-        candidate = Path(env["CONDA_PREFIX"]) / "lib"
-        if candidate.is_dir():
-            conda_lib = candidate
-    if conda_lib is None:
-        conda_lib = _conda_lib_from_python(Path(sys.executable))
+    conda_lib = _conda_lib_from_python(python)
     if conda_lib is not None:
         ld = env.get("LD_LIBRARY_PATH", "")
         env["LD_LIBRARY_PATH"] = f"{conda_lib}{os.pathsep}{ld}" if ld else str(conda_lib)
@@ -263,8 +286,9 @@ def plan_to_pytest_args(plan: TestRunPlan) -> list[str]:
 
 def run_pytest(repo: Path, plan: TestRunPlan) -> tuple[int, str]:
     args = plan_to_pytest_args(plan)
-    cmd = [sys.executable, "-m", "pytest", *args]
-    env = _subprocess_env(repo)
+    python = _pytest_python()
+    cmd = [str(python), "-m", "pytest", *args]
+    env = _subprocess_env(repo, python)
     timeout = TIMEOUT_BY_TIER.get(plan.tier, TIMEOUT_BY_TIER["full"])
     try:
         proc = subprocess.run(
