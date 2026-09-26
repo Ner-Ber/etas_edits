@@ -11,9 +11,12 @@ import pandas as pd
 import pytest
 from shapely.geometry import Polygon
 
+import scipy.integrate
+
 import continuation_ensemble as ens
 import etas.csep_utils as csep_utils
 import etas.magnet_inference_cache as mic
+import etas.rate_simulation as rate_simulation
 import etas.utility_functions as uf
 
 pytestmark = pytest.mark.unit
@@ -335,3 +338,99 @@ def test_plot_consistency_overlay_etas_fine():
     )
     assert ltest_fig is not None
     plt.close(ltest_fig)
+
+
+def test_omori_weights_match_a_direct_integral_and_background_counts():
+    params = {
+        "mu": 0.01, "k0": 0.02, "a": 1.0, "c": 0.01, "omega": 0.1,
+        "tau": 30.0, "d": 1.0, "gamma": 0.3, "rho": 0.6, "m_c": 3.0,
+    }
+    event_time = 10.0
+    t_start, t_end = 12.0, 15.0
+    weight = rate_simulation.omori_time_weights(
+        np.array([event_time, t_end + 1.0]), t_start, t_end, params, n_quad=24,
+    )
+    direct, _err = scipy.integrate.quad(
+        lambda t: np.exp(-(t - event_time) / params["tau"])
+        / (t - event_time + params["c"]) ** (1.0 + params["omega"]),
+        t_start, t_end,
+    )
+    assert weight[0] == pytest.approx(direct, rel=1e-4)
+    assert weight[1] == 0.0
+
+    area = np.array([10.0, 12.0])
+    counts = rate_simulation.integrated_spatial_counts(
+        np.array([]), np.array([]), np.array([]), np.array([]),
+        t_start, t_end,
+        np.array([35.0, 35.2]), np.array([139.0, 139.2]), area, params,
+    )
+    assert counts == pytest.approx(params["mu"] * area * (t_end - t_start))
+
+    triggered = rate_simulation.integrated_spatial_counts(
+        np.array([35.0]), np.array([139.0]), np.array([6.0]), np.array([12.5]),
+        t_start, t_end,
+        np.array([35.0, 40.0]), np.array([139.0, 140.0]), np.array([10.0, 10.0]),
+        params, include_background=False,
+    )
+    assert triggered[0] > triggered[1] > 0.0
+
+
+def test_horizon_steps_stay_separate_and_scale_with_duration():
+    pytest.importorskip("csep")
+    shape = np.array([
+        [35.0, 139.0],
+        [35.0, 140.0],
+        [36.0, 140.0],
+        [36.0, 139.0],
+        [35.0, 139.0],
+    ])
+    region = csep_utils.csep_region_from_shape_coords(
+        shape, magnitudes=np.array([3.0, 3.1]), dh=0.5, name="horizon-unit",
+    )
+    study_poly = csep_utils.etas_study_polygon_latlon(shape)
+    theta = {
+        "log10_mu": -2.0, "log10_k0": -2.0, "a": 1.0, "log10_c": -2.0,
+        "omega": 0.1, "log10_tau": 1.5, "log10_d": 0.0, "gamma": 0.2, "rho": 0.6,
+    }
+    starts = [pd.Timestamp("2020-01-01"), pd.Timestamp("2020-01-02")]
+    ends = [pd.Timestamp("2020-01-02"), pd.Timestamp("2020-01-04")]
+    records = [
+        {
+            "step_index": index,
+            "step_dir": pathlib.Path(f"/tmp/etas-horizon-missing-{index}"),
+            "forecast_start": start,
+            "forecast_end": end,
+        }
+        for index, (start, end) in enumerate(zip(starts, ends))
+    ]
+
+    def load_forecast(step_dir, method, seed):
+        del step_dir, method, seed
+        return pd.DataFrame({
+            "time": [pd.Timestamp("2020-01-01 12:00")],
+            "latitude": [0.0],
+            "longitude": [0.0],
+            "magnitude": [1.0],
+        })
+
+    rows = csep_utils.horizon_step_intensity_grids(
+        records, [1], pd.DataFrame(columns=["time", "latitude", "longitude", "magnitude"]),
+        methods=["etas"], region=region, study_poly=study_poly, load_forecast=load_forecast,
+        fallback_theta=theta, fallback_beta=2.0, fallback_mc=2.95, fallback_m_ref=3.0,
+        example_seed=1,
+    )
+    assert [row["step_index"] for row in rows] == [0, 1]
+    totals = [float(row["rates"]["etas"].sum()) for row in rows]
+    assert totals[1] == pytest.approx(2.0 * totals[0], rel=1e-6)
+    assert totals[0] > 0.0
+    assert rows[0]["example_seed"] == 1
+    assert float(rows[0]["example_rates"]["etas"].sum()) == pytest.approx(totals[0])
+
+
+def test_gr_magnitude_probabilities_leave_out_mass_below_the_first_bin():
+    beta = 2.0
+    mc = 3.0
+    edges = np.array([3.1, 3.2, 3.3])
+    probabilities = csep_utils.gr_magnitude_probabilities(edges, beta, mc)
+    assert probabilities.sum() == pytest.approx(np.exp(-beta * (edges[0] - mc)))
+    assert np.all(probabilities > 0.0)

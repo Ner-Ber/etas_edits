@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -19,6 +21,7 @@ LON_COLUMN_ALIASES = ("longitude", "lon")
 DEPTH_COLUMN_ALIASES = ("depth", "depth_km")
 
 CSEP_MAXC_CORRECTION = 0.2
+MC_CACHE_DIRECTORY = Path(__file__).resolve().parents[1] / "outputs" / "cached_mc"
 
 
 @dataclass(frozen=True)
@@ -282,6 +285,45 @@ def compute_csep_mc_maxc(
     return float(mag_bins[max_idx]) + correction_factor
 
 
+def events_uuid(catalog: pd.DataFrame) -> str:
+    """SHA-256 of the rows passed to Mc, same scheme as hash_pandas_object."""
+    hashed_rows = pd.util.hash_pandas_object(catalog, index=True).to_numpy()
+    return hashlib.sha256(hashed_rows).hexdigest()
+
+
+def mc_calculation_uuid(catalog: pd.DataFrame, settings: Mapping[str, Any]) -> str:
+    """UUID for one Mc run: the events used, plus the estimator settings."""
+    settings_key = json.dumps(dict(settings), sort_keys=True)
+    combined = f"{events_uuid(catalog)}_{settings_key}"
+    return hashlib.sha1(combined.encode("utf-8")).hexdigest()
+
+
+def _mc_cache_path(calculation_uuid: str, cache_directory: Path) -> Path:
+    return cache_directory / f"{calculation_uuid}.json"
+
+
+def _estimates_to_jsonable(estimates: McEstimates) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for key, value in estimates.as_dict().items():
+        if isinstance(value, float) and not np.isfinite(value):
+            payload[key] = None
+        else:
+            payload[key] = value
+    return payload
+
+
+def _load_mc_estimates(path: Path) -> McEstimates:
+    with path.open("rt") as handle:
+        payload = json.load(handle)
+    return McEstimates(**payload)
+
+
+def _write_mc_estimates(path: Path, estimates: McEstimates) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wt") as handle:
+        json.dump(_estimates_to_jsonable(estimates), handle)
+
+
 def compute_all_mc(
     catalog: pd.DataFrame,
     *,
@@ -294,12 +336,38 @@ def compute_all_mc(
     include_csep: bool = True,
     include_etas: bool = True,
     parallel: bool = False,
+    force_recalculate: bool = False,
+    cache_directory: Path | None = None,
 ) -> McEstimates:
-    """Compute Mc with eq_mag_prediction, etas, seismostats, and csep."""
+    """Compute Mc with eq_mag_prediction, etas, seismostats, and csep.
+
+    A finished result is stored under ``cache_directory`` (by default
+    ``outputs/cached_mc``). The filename is a UUID of the catalog rows used
+    and of the estimator settings. A later call with the same rows and
+    settings loads that file unless ``force_recalculate`` is true.
+    """
     magnitudes = catalog["magnitude"].to_numpy(dtype=float)
     if delta_m is None:
         delta_m = infer_delta_m(magnitudes)
     delta_m = float(np.round(delta_m, 4))
+
+    cache_directory = Path(cache_directory or MC_CACHE_DIRECTORY)
+    calculation_uuid = mc_calculation_uuid(
+        catalog,
+        {
+            "delta_m": delta_m,
+            "p_pass": p_pass,
+            "seismostats_p_pass": seismostats_p_pass,
+            "n_samples": n_samples,
+            "include_seismostats": include_seismostats,
+            "include_csep": include_csep,
+            "include_etas": include_etas,
+        },
+    )
+    cache_path = _mc_cache_path(calculation_uuid, cache_directory)
+    if cache_path.is_file() and not force_recalculate:
+        print(f"Loaded cached Mc estimates {calculation_uuid}")
+        return _load_mc_estimates(cache_path)
 
     if not parallel:
         if include_etas:
@@ -358,7 +426,7 @@ def compute_all_mc(
             if include_csep:
                 csep_maxc = futures["csep"].result()
 
-    return McEstimates(
+    estimates = McEstimates(
         eq_mag_maxc=compute_eq_mag_mc(magnitudes, "MAXC"),
         eq_mag_mbs=compute_eq_mag_mc(magnitudes, "MBS"),
         etas_ks=etas_mc,
@@ -371,6 +439,9 @@ def compute_all_mc(
         seismostats_ks_p_value=seismo_p,
         csep_maxc=csep_maxc,
     )
+    _write_mc_estimates(cache_path, estimates)
+    print(f"Cached Mc estimates {calculation_uuid}")
+    return estimates
 
 
 def catalog_summary(catalog: pd.DataFrame) -> dict[str, Any]:
