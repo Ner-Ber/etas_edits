@@ -306,3 +306,140 @@ def test_run_walk_forward_by_realization_order(tmp_path: Path) -> None:
     assert (out_root / "horizon_30d" / "rolling_summary.csv").is_file()
 
 
+def _metrics_stub() -> dict:
+    return {
+        "observed_n_events": 1,
+        "observed_mag_mean": 4.0,
+        "observed_mag_max": 4.0,
+        "methods": {
+            "etas": {
+                "n_realizations": 1,
+                "mean_count": 1.0,
+                "std_count": 0.0,
+                "count_error": 0.0,
+                "rel_count_error": 0.0,
+                "wasserstein_mag_dist": 0.0,
+            }
+        },
+    }
+
+
+def test_inversion_anchor_one_year_daily_and_twelve_hour() -> None:
+    interval = pd.Timedelta(days=365)
+    daily = rolling.compute_rolling_steps(
+        timewindow_start="1889-01-01 00:00:00",
+        timewindow_end="2007-08-01 00:00:00",
+        testwindow_end="2008-08-02 00:00:00",
+        horizon_days=1,
+    )
+    daily_anchors = rolling.inversion_anchor_indices(daily, interval)
+    assert daily_anchors[0] == 0
+    assert daily_anchors[365] == 0
+    assert daily_anchors[366] == 366
+    assert daily_anchors[1:366].count(0) == 365
+
+    half_day = rolling.compute_rolling_steps(
+        timewindow_start="1889-01-01 00:00:00",
+        timewindow_end="2007-08-01 00:00:00",
+        testwindow_end="2008-08-02 00:00:00",
+        horizon_days=0.5,
+    )
+    half_anchors = rolling.inversion_anchor_indices(half_day, interval)
+    assert half_anchors[730] == 0
+    assert half_anchors[731] == 731
+    assert half_anchors[1:731].count(0) == 730
+
+
+def test_parse_inversion_interval() -> None:
+    assert rolling.parse_inversion_interval(None) is None
+    assert rolling.parse_inversion_interval("") is None
+    assert rolling.parse_inversion_interval(365) == pd.Timedelta(days=365)
+    assert rolling.parse_inversion_interval("365D") == pd.Timedelta(days=365)
+    with pytest.raises(ValueError, match="non-negative"):
+        rolling.parse_inversion_interval(-1)
+
+
+def test_walk_forward_reuses_inversion_for_interval(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    out_root = tmp_path / "interval_out"
+    cfg = {
+        "fn_catalog": "input_data/example_catalog.csv",
+        "timewindow_start": "2018-01-01 00:00:00",
+        "timewindow_end": "2018-01-01 00:00:00",
+        "testwindow_end": "2018-01-05 00:00:00",
+        "mc": 3.6,
+        "seed": 0,
+        "n_runs": 1,
+        "inversion_interval": 2,
+    }
+    reuse_by_step: dict[int, Path | None] = {}
+
+    def fake_execute_step(**kwargs):
+        step_window = kwargs["step_window"]
+        reuse_by_step[step_window.step_index] = kwargs["reuse_inversion_from_step"]
+        return {
+            "step_index": step_window.step_index,
+            "windows": step_window.to_dict(),
+            "metrics": _metrics_stub(),
+        }
+
+    with patch("rolling_continuation.execute_rolling_step", side_effect=fake_execute_step):
+        rolling.run_walk_forward_for_horizon(
+            base_cfg=cfg,
+            horizon_days=1,
+            output_root=out_root,
+            repo_root=repo_root,
+            methods=["etas"],
+        )
+
+    horizon = out_root / "horizon_1d"
+    assert reuse_by_step[0] is None
+    assert reuse_by_step[1] == horizon / "step_000"
+    assert reuse_by_step[2] == horizon / "step_000"
+    assert reuse_by_step[3] is None
+
+
+def test_execute_rolling_step_records_reuse_path(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    step_dir = tmp_path / "step_002"
+    anchor_dir = tmp_path / "step_000"
+    step_window = rolling.RollingStepWindows(
+        step_index=2,
+        train_start=pd.Timestamp("2018-01-01"),
+        train_end=pd.Timestamp("2018-01-03"),
+        forecast_start=pd.Timestamp("2018-01-03"),
+        forecast_end=pd.Timestamp("2018-01-04"),
+        horizon_days=1.0,
+    )
+
+    with patch("run_continuation_models.main", return_value=0):
+        rolling.execute_rolling_step(
+            base_cfg={"fn_catalog": "input_data/example_catalog.csv", "mc": 3.6},
+            step_window=step_window,
+            step_output_dir=step_dir,
+            repo_root=repo_root,
+            methods=["etas"],
+            write_summary=False,
+            reuse_inversion_from_step=anchor_dir,
+        )
+
+    written = json.loads((step_dir / "step_config.json").read_text(encoding="utf-8"))
+    assert written["reuse_inversion_from_step"] == str(anchor_dir)
+    assert written["timewindow_end"] == "2018-01-03 00:00:00"
+
+    with patch("run_continuation_models.main", return_value=0):
+        rolling.execute_rolling_step(
+            base_cfg={"fn_catalog": "input_data/example_catalog.csv", "mc": 3.6},
+            step_window=step_window,
+            step_output_dir=step_dir,
+            repo_root=repo_root,
+            methods=["etas"],
+            write_summary=False,
+            force_inversion=True,
+            reuse_inversion_from_step=anchor_dir,
+        )
+    forced = json.loads((step_dir / "step_config.json").read_text(encoding="utf-8"))
+    assert "reuse_inversion_from_step" not in forced
+
+
+

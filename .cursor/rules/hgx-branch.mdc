@@ -1,0 +1,12 @@
+---
+description: On HGX, edit and commit only the inversion-interval branch
+alwaysApply: true
+---
+
+# HGX branch
+
+This machine is HGX. For the etas checkout at `/data/neriberman/etas`, edit and commit only on `feature/hgx-inversion-interval`.
+
+Do not commit here to `feature/rolling-fine-etas-forecasts`, `main`, or any other branch.
+
+`/data/neriberman/eq_mag_prediction/eq_mag_prediction_clean-ifs` has a `.git` file that points at a hanamel worktree which is not on this machine. Do not create a new git history for that tree. When that git dir is available, use a branch named `feature/hgx-inversion-interval` there as well.
