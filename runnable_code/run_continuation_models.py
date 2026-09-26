@@ -139,7 +139,8 @@ def enrich_magnet_catalog_depth_from_source(
     lookup = pd.concat(
         [src_keys, source["depth"].astype(float)],
         axis=1,
-    ).drop_duplicates(
+    )
+    lookup = lookup.sort_values("depth", na_position="last").drop_duplicates(
         subset=["_merge_time", "_merge_lat", "_merge_lon", "_merge_mag"],
         keep="first",
     )
@@ -158,15 +159,53 @@ def enrich_magnet_catalog_depth_from_source(
     if matched < total:
         warnings.warn(
             f"depth_source_catalog matched {matched}/{total} events "
-            f"({depth_source_csv}); unmatched rows keep existing depth",
+            f"({depth_source_csv}); rows with non-finite depth are dropped",
             UserWarning,
             stacklevel=2,
         )
     out["depth"] = merged["depth"].to_numpy()
-    still_missing = out["depth"].isna()
-    if still_missing.any():
-        out.loc[still_missing, "depth"] = float(_DEFAULT_MAGNET_DEPTH_KM)
+    finite_depth = np.isfinite(pd.to_numeric(out["depth"], errors="coerce").to_numpy(dtype=float))
+    n_drop = int((~finite_depth).sum())
+    if n_drop:
+        warnings.warn(
+            f"dropping {n_drop}/{total} events with non-finite depth "
+            f"({depth_source_csv})",
+            UserWarning,
+            stacklevel=2,
+        )
+        out = out.loc[finite_depth].reset_index(drop=True)
     return out
+
+
+def _drop_nonfinite_catalog_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop events whose time, location, magnitude, or depth is not finite.
+
+    ``time`` may be epoch seconds or a datetime string. ``to_numeric`` alone
+    rejects every datetime string.
+    """
+    cols = [
+        col
+        for col in ("latitude", "longitude", "magnitude", "depth")
+        if col in df.columns
+    ]
+    keep = np.ones(len(df), dtype=bool)
+    if "time" in df.columns:
+        times = _catalog_time_epoch_seconds(df["time"]).to_numpy(dtype=float)
+        keep &= np.isfinite(times)
+        cols = ["time", *cols]
+    for col in cols:
+        if col == "time":
+            continue
+        values = pd.to_numeric(df[col], errors="coerce").to_numpy(dtype=float)
+        keep &= np.isfinite(values)
+    n_drop = int((~keep).sum())
+    if n_drop:
+        print(
+            "Dropped "
+            f"{n_drop} catalog rows with non-finite {', '.join(cols)}",
+            flush=True,
+        )
+    return df.loc[keep].reset_index(drop=True)
 
 
 def prepare_magnet_catalog_for_magnet_template(
@@ -213,6 +252,7 @@ def prepare_magnet_catalog_for_magnet_template(
             f"mean depth {df['depth'].mean():.2f} km",
             flush=True,
         )
+    df = _drop_nonfinite_catalog_rows(df)
     dest_csv.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(dest_csv, index=False)
     return dest_csv.resolve()
@@ -252,7 +292,9 @@ def validate_magnet_catalog_for_gin(
         )
     if use_depth and "depth" in columns:
         depth_sample = pd.read_csv(catalog_csv, usecols=["depth"])
-        if depth_sample["depth"].nunique(dropna=True) <= 1:
+        if depth_sample.empty:
+            problems.append("catalog has no rows")
+        elif depth_sample["depth"].nunique(dropna=True) <= 1:
             problems.append(
                 "depth column is constant "
                 f"({depth_sample['depth'].iloc[0]!r}); "
@@ -1097,6 +1139,10 @@ def main(argv: list[str] | None = None) -> int:
         "shape_coords": str(shape_coords_path),
     }
 
+    leader_seed = cfg.get("inversion_cache_leader_seed")
+    defer_until_cached = (
+        leader_seed is not None and int(cfg.get("seed", 0)) != int(leader_seed)
+    )
     inv_id, params_json, inversion_output = compare.run_inversion(
         inversion_config,
         inversion_output_dir,
@@ -1104,6 +1150,7 @@ def main(argv: list[str] | None = None) -> int:
         store_pij=store_pij,
         store_distances=store_distances,
         gof_threshold=gof_threshold,
+        defer_until_cached=defer_until_cached,
     )
     print(f"Inversion id: {inv_id} ({params_json})", flush=True)
 

@@ -23,8 +23,9 @@ import numpy as np
 import pandas as pd
 from joblib.numpy_pickle import NumpyUnpickler
 
-# Matches magnitude_predictor_trainer default / Hauksson gin.
-_DEFAULT_PDF_SUPPORT_STRETCH = 7.0
+# Fallback when config.gin has no pdf_support_stretch. ANSS support is
+# [3.95, 8.2], so the width is 4.25. A value written in config.gin wins.
+_DEFAULT_PDF_SUPPORT_STRETCH = 4.25
 _PDF_SUPPORT_STRETCH_GIN_KEY = (
     "train_and_evaluate_magnitude_prediction_model.pdf_support_stretch"
 )

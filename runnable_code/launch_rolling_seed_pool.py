@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Parallel seed pool for rolling ETAS/FINE walk-forward (CPU A_h + FeatureState).
+"""Parallel seed pool for rolling ETAS/FINE walk-forward (GPU A_h + FeatureState).
 
 Mirrors ``run_etas_thinning_fine_fast_tracks.py``: one subprocess per seed under a
 thread pool (default ``--max-workers 6``). Shared ``output_root`` so completed
 ``forecast_catalog.csv`` pairs are skipped when ``force_rerun`` is off.
 
-Defaults match FINE_SPEED_MERGE_HANDOFF:
+Defaults:
 - FeatureState + sliding on
-- ``ETAS_FINE_AH_GPU=0`` / empty ``CUDA_VISIBLE_DEVICES``
+- ``ETAS_FINE_AH_GPU=1`` and TensorFlow GPU memory growth, so CuPy ``A_h`` can
+  allocate on the same device MAGNET uses
+- ``CUDA_VISIBLE_DEVICES`` left as the parent process set it
 - MAGNET from ``eq_mag_prediction_clean-ifs`` on PYTHONPATH
 """
 
@@ -43,15 +45,32 @@ def _resolve_python() -> Path:
     return Path(sys.executable)
 
 
-def _env(*, magnet_root: Path, repo: Path) -> dict[str, str]:
+def _env(*, magnet_root: Path, repo: Path, python: Path) -> dict[str, str]:
     env = os.environ.copy()
     parts = [str(repo), str(magnet_root)]
     existing = env.get("PYTHONPATH", "")
     if existing:
         parts.append(existing)
     env["PYTHONPATH"] = os.pathsep.join(parts)
-    env["ETAS_FINE_AH_GPU"] = "0"
-    env.setdefault("CUDA_VISIBLE_DEVICES", "")
+    env["ETAS_FINE_AH_GPU"] = "1"
+    # TensorFlow otherwise reserves the whole GPU at MAGNET load, and CuPy
+    # cannot allocate the FINE A_h grid on that same device.
+    env["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
+    prefix = python.resolve().parent.parent
+    # Feature-computation subprocesses import shapely. Without this, ld finds
+    # base Anaconda's older libstdc++ and the import fails. The same prefix
+    # is where TensorFlow's pip CUDA libraries live.
+    env["CONDA_PREFIX"] = str(prefix)
+    lib_dirs = [prefix / "lib"]
+    for site in (prefix / "lib").glob("python*/site-packages"):
+        nvidia = site / "nvidia"
+        if nvidia.is_dir():
+            lib_dirs.extend(path for path in nvidia.glob("*/lib") if path.is_dir())
+    existing_ld = env.get("LD_LIBRARY_PATH", "")
+    ld_parts = [str(path) for path in lib_dirs]
+    if existing_ld:
+        ld_parts.append(existing_ld)
+    env["LD_LIBRARY_PATH"] = os.pathsep.join(ld_parts)
     env["MAGNET_INCREMENTAL_ENCODERS"] = "1"
     env["MAGNET_INCREMENTAL_FEATURE_STATE"] = "1"
     env["MAGNET_INCREMENTAL_SLIDING"] = "1"
@@ -238,13 +257,13 @@ def main(argv: list[str] | None = None) -> int:
     cfg_dir = log_dir / "configs"
 
     python = _resolve_python()
-    env = _env(magnet_root=magnet_root, repo=REPO)
+    env = _env(magnet_root=magnet_root, repo=REPO, python=python)
     schedule = "by_realization" if args.schedule == "by-realization" else args.schedule
 
     print(
         f"=== rolling seed pool "
         f"seeds={seeds[0]}..{seeds[-1]} (n={len(seeds)}) "
-        f"max_workers={args.max_workers} AH_GPU=0 "
+        f"max_workers={args.max_workers} AH_GPU={env['ETAS_FINE_AH_GPU']} "
         f"python={python} magnet={magnet_root} "
         f"output_root={output_root} ===",
         flush=True,

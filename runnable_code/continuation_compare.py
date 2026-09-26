@@ -31,6 +31,7 @@ import math
 import os
 import pathlib
 import sys
+import time
 from typing import TypedDict
 
 import geopandas as gpd
@@ -739,6 +740,52 @@ def apply_cli_overrides(cfg: dict, args: argparse.Namespace, repo_root: pathlib.
     return out
 
 
+def complete_inversion_payload(params_json: pathlib.Path) -> dict | None:
+    """Return a finished inversion JSON, or None while it is missing or partial."""
+    if not params_json.is_file():
+        return None
+    try:
+        payload = json.loads(params_json.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if not payload.get("inversion_done"):
+        return None
+    if payload.get("final_parameters") is None:
+        return None
+    return payload
+
+
+def wait_for_inversion_cache(
+    params_json: pathlib.Path,
+    *,
+    poll_seconds: float = 20.0,
+) -> dict:
+    """Block until ``params_json`` is a complete inversion file."""
+    print(f"Stage: waiting for ETAS inversion cache {params_json}", flush=True)
+    started = time.monotonic()
+    next_log = started + 60.0
+    while True:
+        payload = complete_inversion_payload(params_json)
+        if payload is not None:
+            waited = time.monotonic() - started
+            print(
+                f"Stage: ETAS inversion cache ready after {waited:.0f}s ({params_json})",
+                flush=True,
+            )
+            return payload
+        now = time.monotonic()
+        if now >= next_log:
+            print(
+                f"Stage: still waiting for ETAS inversion cache "
+                f"({now - started:.0f}s) {params_json}",
+                flush=True,
+            )
+            next_log = now + 60.0
+        time.sleep(poll_seconds)
+
+
 def run_inversion(
     inversion_config: dict,
     inversion_output_dir: pathlib.Path,
@@ -747,6 +794,8 @@ def run_inversion(
     store_pij: bool,
     store_distances: bool,
     gof_threshold: float,
+    defer_until_cached: bool = False,
+    cache_poll_seconds: float = 20.0,
 ) -> tuple[str, pathlib.Path, dict]:
     from etas.inversion import ETASParameterCalculation
 
@@ -756,23 +805,34 @@ def run_inversion(
     inv_run_dir = inversion_output_dir / f"inv_{inv_id}"
     params_json = inv_run_dir / f"parameters_{inv_id}.json"
 
-    if params_json.exists() and not force_inversion:
-        print(f"Stage: using cached ETAS inversion parameters ({params_json})", flush=True)
-    else:
-        print("Stage: running ETAS parameter inversion (this may take a while)...", flush=True)
-        inversion_config = dict(inversion_config)
-        inversion_config["id"] = inv_id
-        inv_run_dir.mkdir(parents=True, exist_ok=True)
-        inversion_output_dir.mkdir(parents=True, exist_ok=True)
-        calc = ETASParameterCalculation(inversion_config)
-        calc.prepare()
-        calc.invert(gof_threshold=gof_threshold)
-        calc.store_results(
-            str(inv_run_dir) + os.sep,
-            store_pij=store_pij,
-            store_distances=store_distances,
-        )
-        print(f"Stage: ETAS inversion complete — stored in {inv_run_dir}", flush=True)
+    if not force_inversion:
+        cached = complete_inversion_payload(params_json)
+        if cached is not None:
+            print(
+                f"Stage: using cached ETAS inversion parameters ({params_json})",
+                flush=True,
+            )
+            return inv_id, params_json, cached
+        if defer_until_cached:
+            cached = wait_for_inversion_cache(
+                params_json, poll_seconds=cache_poll_seconds
+            )
+            return inv_id, params_json, cached
+
+    print("Stage: running ETAS parameter inversion (this may take a while)...", flush=True)
+    inversion_config = dict(inversion_config)
+    inversion_config["id"] = inv_id
+    inv_run_dir.mkdir(parents=True, exist_ok=True)
+    inversion_output_dir.mkdir(parents=True, exist_ok=True)
+    calc = ETASParameterCalculation(inversion_config)
+    calc.prepare()
+    calc.invert(gof_threshold=gof_threshold)
+    calc.store_results(
+        str(inv_run_dir) + os.sep,
+        store_pij=store_pij,
+        store_distances=store_distances,
+    )
+    print(f"Stage: ETAS inversion complete — stored in {inv_run_dir}", flush=True)
 
     with open(params_json, encoding="utf-8") as f:
         inversion_output = json.load(f)

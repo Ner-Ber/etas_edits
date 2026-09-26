@@ -551,6 +551,55 @@ def test_enrich_magnet_catalog_depth_from_native_source(tmp_path: Path) -> None:
     assert df["depth"].tolist() == [8.2, 12.5]
 
 
+def test_prepare_drops_nonfinite_time_location_magnitude_and_depth(
+    tmp_path: Path,
+) -> None:
+    mod = _load_runner()
+    native = tmp_path / "native.csv"
+    native.write_text(
+        "time,latitude,longitude,magnitude,depth\n"
+        "1000,34.0,-118.0,3.5,8.2\n"
+        "2000,35.0,-117.0,4.0,\n"
+        "3000,36.0,-116.0,4.5,6.0\n"
+        "4000,37.0,-115.0,5.0,1.0\n",
+        encoding="utf-8",
+    )
+    etas_like = tmp_path / "etas_magnet.csv"
+    etas_like.write_text(
+        "time,latitude,longitude,magnitude,depth\n"
+        "1000,34.0,-118.0,3.5,0.0\n"
+        "2000,35.0,-117.0,4.0,0.0\n"
+        "3000,36.0,-116.0,,0.0\n"
+        "4000,37.0,-115.0,5.0,1.0\n",
+        encoding="utf-8",
+    )
+    dest = tmp_path / "prepared.csv"
+    mod.prepare_magnet_catalog_for_magnet_template(
+        etas_like,
+        dest,
+        depth_source_csv=native,
+    )
+    df = pd.read_csv(dest)
+    assert df["time"].tolist() == [1000, 4000]
+    assert df["depth"].tolist() == [8.2, 1.0]
+
+
+def test_prepare_keeps_datetime_string_times(tmp_path: Path) -> None:
+    mod = _load_runner()
+    src = tmp_path / "src.csv"
+    src.write_text(
+        "time,latitude,longitude,magnitude,depth\n"
+        "2017-01-02 00:00:00,34.0,-118.0,4.0,5.0\n"
+        "2017-01-03 00:00:00,34.1,-118.1,3.5,8.0\n",
+        encoding="utf-8",
+    )
+    dest = tmp_path / "prepared.csv"
+    mod.prepare_magnet_catalog_for_magnet_template(src, dest)
+    df = pd.read_csv(dest)
+    assert len(df) == 2
+    assert df["depth"].tolist() == [5.0, 8.0]
+
+
 def test_apply_overrides_errors_without_region_or_projection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
