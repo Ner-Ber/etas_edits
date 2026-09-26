@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 import geopandas as gpd
 import matplotlib.pyplot as plt
@@ -20,6 +20,8 @@ from scipy.special import gammaln
 from shapely.geometry import Polygon as ShapelyPolygon
 
 import etas.molchan as molchan
+import etas.rate_simulation as rate_simulation
+import etas.utility_functions as utility_functions
 from etas.inversion import ETASParameterCalculation
 
 
@@ -379,6 +381,312 @@ def l_test_from_catalog_forecast(
     return likelihood_test(
         rates, counts, num_simulations=num_simulations, seed=seed
     )
+
+
+def gr_magnitude_probabilities(
+    magnitude_edges: np.ndarray,
+    beta: float,
+    mc: float,
+) -> np.ndarray:
+    """Gutenberg–Richter probability of each magnitude bin, left edges inclusive.
+
+    The last bin is open. Bins that start above ``mc`` do not absorb the
+    probability below the first edge, so the probabilities sum to
+    ``exp(-beta * (m_first - mc))``.
+    """
+    edges = np.asarray(magnitude_edges, dtype=float).ravel()
+    if edges.size == 0:
+        raise ValueError("magnitude_edges is empty")
+    if not np.isfinite(beta) or beta <= 0.0:
+        raise ValueError(f"beta must be positive, got {beta}")
+    survival = np.exp(-float(beta) * (edges - float(mc)))
+    probabilities = np.empty(edges.size, dtype=float)
+    probabilities[:-1] = survival[:-1] - survival[1:]
+    probabilities[-1] = survival[-1]
+    return np.clip(probabilities, 0.0, None)
+
+
+def region_cell_centers_and_areas(region: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Cell-center latitude, longitude, and area in km² for a CSEP cartesian region."""
+    origins = np.asarray(region.origins(), dtype=float)
+    half = 0.5 * float(region.dh)
+    longitude = origins[:, 0] + half
+    latitude = origins[:, 1] + half
+    area = np.asarray(region.get_cell_area(), dtype=float)
+    return latitude, longitude, area
+
+
+def gridded_forecast_from_rates(
+    rates: np.ndarray,
+    region: Any,
+    start_time: Any,
+    end_time: Any,
+    name: str,
+) -> Any:
+    """Wrap a space–magnitude expected-count grid as a PyCSEP gridded forecast."""
+    from csep.core.forecasts import GriddedForecast
+
+    return GriddedForecast(
+        start_time=start_time,
+        end_time=end_time,
+        data=np.asarray(rates, dtype=float),
+        region=region,
+        magnitudes=np.asarray(region.magnitudes, dtype=float),
+        name=name,
+    )
+
+
+def _theta_from_step_dir(step_dir: Path) -> dict[str, Any] | None:
+    inv_dirs = sorted((Path(step_dir) / "inversions").glob("inv_*"))
+    if not inv_dirs:
+        return None
+    inv_id = inv_dirs[0].name.replace("inv_", "")
+    params_json = inv_dirs[0] / f"parameters_{inv_id}.json"
+    if not params_json.is_file():
+        return None
+    payload = json.loads(params_json.read_text(encoding="utf-8"))
+    theta = payload.get("final_parameters")
+    if not isinstance(theta, dict):
+        return None
+    return {
+        "theta": theta,
+        "beta": float(payload["beta"]),
+        "m_ref": float(payload["m_ref"]),
+        "delta_m": float(payload.get("delta_m") or 0.0),
+    }
+
+
+def _times_to_days(times: pd.Series) -> np.ndarray:
+    stamps = pd.to_datetime(times, utc=True, format="mixed").dt.tz_convert(None)
+    return ((stamps - pd.Timestamp("1970-01-01")) / pd.Timedelta("1D")).to_numpy(dtype=float)
+
+
+def horizon_step_intensity_grids(
+    step_records: Sequence[dict[str, Any]],
+    seeds: Sequence[int],
+    observed: pd.DataFrame,
+    *,
+    methods: Sequence[str],
+    region: Any,
+    study_poly: ShapelyPolygon,
+    load_forecast: Callable[[Path, str, int], pd.DataFrame | None],
+    fallback_theta: dict[str, Any],
+    fallback_beta: float,
+    fallback_mc: float,
+    fallback_m_ref: float,
+    example_seed: int | None = None,
+    progress: Callable[[int, int], None] | None = None,
+) -> list[dict[str, Any]]:
+    """One mean intensity grid per rolling step, for each method.
+
+    A step is one forecast of length ``HORIZON_DAYS``. The grid is the average
+    over seeds of that step's ETAS compensator. Steps are not added together.
+    When ``example_seed`` is set, each row also stores that seed's own grid
+    under ``example_rates``.
+    """
+    cell_lat, cell_lon, cell_area = region_cell_centers_and_areas(region)
+    n_mag = len(region.magnitudes)
+    history = filter_to_study_domain(
+        observed, m_ref=float(fallback_mc), study_poly=study_poly,
+    )
+    if "time" not in history.columns:
+        raise ValueError("observed catalog needs a time column")
+    history = history.sort_values("time")
+    history_days = _times_to_days(history["time"])
+    hist_lat, hist_lon, hist_mag = catalog_lat_lon_mag(history)
+    hist_lat = hist_lat.to_numpy(dtype=float)
+    hist_lon = hist_lon.to_numpy(dtype=float)
+    hist_mag = hist_mag.to_numpy(dtype=float)
+    theta_cache: dict[str, dict[str, Any] | None] = {}
+    rows: list[dict[str, Any]] = []
+    n_steps = len(step_records)
+
+    for step_number, record in enumerate(step_records, start=1):
+        if progress is not None:
+            progress(step_number, n_steps)
+        step_dir = Path(record["step_dir"])
+        cache_key = str(step_dir)
+        if cache_key not in theta_cache:
+            theta_cache[cache_key] = _theta_from_step_dir(step_dir)
+        step_fit = theta_cache[cache_key]
+        if step_fit is None:
+            theta = fallback_theta
+            beta = float(fallback_beta)
+            mc = float(fallback_mc)
+            m_ref = float(fallback_m_ref)
+        else:
+            theta = step_fit["theta"]
+            beta = step_fit["beta"]
+            delta_m = step_fit["delta_m"]
+            m_ref = step_fit["m_ref"]
+            mc = m_ref - (delta_m / 2.0 if delta_m > 0.0 else 0.0)
+        params = utility_functions.expand_theta_log10(dict(theta))
+        params["m_c"] = mc
+        loaded = {
+            method: [(seed, load_forecast(step_dir, method, seed)) for seed in seeds]
+            for method in methods
+        }
+        if all(
+            forecast is None or getattr(forecast, "empty", True)
+            for catalogs in loaded.values()
+            for _seed, forecast in catalogs
+        ):
+            continue
+        t_start = pd.to_datetime(record["forecast_start"], utc=True).tz_convert(None)
+        t_end = pd.to_datetime(record["forecast_end"], utc=True).tz_convert(None)
+        t_start_days = float((t_start - pd.Timestamp("1970-01-01")) / pd.Timedelta("1D"))
+        t_end_days = float((t_end - pd.Timestamp("1970-01-01")) / pd.Timedelta("1D"))
+        hist_keep = history_days <= t_start_days
+        background = rate_simulation.integrated_spatial_counts(
+            hist_lat[hist_keep], hist_lon[hist_keep], hist_mag[hist_keep], history_days[hist_keep],
+            t_start_days, t_end_days, cell_lat, cell_lon, cell_area, params,
+        )
+        probabilities = gr_magnitude_probabilities(np.asarray(region.magnitudes), beta, mc)
+        rates: dict[str, np.ndarray] = {}
+        n_seeds: dict[str, int] = {}
+        example_rates: dict[str, np.ndarray] = {}
+        for method, catalogs in loaded.items():
+            total = np.zeros(cell_lat.size, dtype=float)
+            used = 0
+            example_spatial = None
+            for seed, forecast in catalogs:
+                if forecast is None or forecast.empty:
+                    continue
+                forecast = filter_to_study_domain(forecast, m_ref=m_ref, study_poly=study_poly)
+                if forecast.empty or "time" not in forecast.columns:
+                    triggered = np.zeros(cell_lat.size, dtype=float)
+                else:
+                    sim_lat, sim_lon, sim_mag = catalog_lat_lon_mag(forecast)
+                    triggered = rate_simulation.integrated_spatial_counts(
+                        sim_lat.to_numpy(dtype=float),
+                        sim_lon.to_numpy(dtype=float),
+                        sim_mag.to_numpy(dtype=float),
+                        _times_to_days(forecast["time"]),
+                        t_start_days, t_end_days, cell_lat, cell_lon, cell_area, params,
+                        include_background=False,
+                    )
+                spatial = background + triggered
+                total += spatial
+                used += 1
+                if example_seed is not None and int(seed) == int(example_seed):
+                    example_spatial = spatial
+            if used == 0:
+                continue
+            rates[method] = (total / used)[:, None] * probabilities[None, :]
+            n_seeds[method] = used
+            if example_spatial is not None:
+                example_rates[method] = example_spatial[:, None] * probabilities[None, :]
+        if not rates:
+            continue
+        row: dict[str, Any] = {
+            "step_index": int(record["step_index"]),
+            "forecast_start": t_start,
+            "forecast_end": t_end,
+            "rates": rates,
+            "n_seeds": n_seeds,
+        }
+        if example_seed is not None:
+            row["example_seed"] = int(example_seed)
+            row["example_rates"] = example_rates
+        rows.append(row)
+    return rows
+
+
+def averaged_rolling_intensity_grid(
+    step_records: Sequence[dict[str, Any]],
+    seeds: Sequence[int],
+    observed: pd.DataFrame,
+    *,
+    region: Any,
+    study_poly: ShapelyPolygon,
+    load_forecast: Callable[[Path, int], pd.DataFrame | None],
+    fallback_theta: dict[str, Any],
+    fallback_beta: float,
+    fallback_mc: float,
+    fallback_m_ref: float,
+) -> np.ndarray:
+    """Mean space–magnitude expected counts over rolling steps and seeds.
+
+    Each step's intensity uses the observed catalog up to that step's start,
+    plus that seed's simulated events inside the step. Those step grids are
+    summed for each seed, then averaged. Magnitude bins follow the step's
+    Gutenberg–Richter beta. This is the averaged ETAS compensator, not the
+    histogram of simulated epicenters.
+    """
+    cell_lat, cell_lon, cell_area = region_cell_centers_and_areas(region)
+    n_mag = len(region.magnitudes)
+    totals = np.zeros((cell_lat.size, n_mag), dtype=float)
+    used = np.zeros(len(seeds), dtype=bool)
+    history = filter_to_study_domain(
+        observed, m_ref=float(fallback_mc), study_poly=study_poly,
+    )
+    if "time" not in history.columns:
+        raise ValueError("observed catalog needs a time column")
+    history = history.sort_values("time")
+    history_days = _times_to_days(history["time"])
+    hist_lat, hist_lon, hist_mag = catalog_lat_lon_mag(history)
+    hist_lat = hist_lat.to_numpy(dtype=float)
+    hist_lon = hist_lon.to_numpy(dtype=float)
+    hist_mag = hist_mag.to_numpy(dtype=float)
+    theta_cache: dict[str, dict[str, Any] | None] = {}
+
+    for record in step_records:
+        step_dir = Path(record["step_dir"])
+        cache_key = str(step_dir)
+        if cache_key not in theta_cache:
+            theta_cache[cache_key] = _theta_from_step_dir(step_dir)
+        step_fit = theta_cache[cache_key]
+        if step_fit is None:
+            theta = fallback_theta
+            beta = float(fallback_beta)
+            mc = float(fallback_mc)
+            m_ref = float(fallback_m_ref)
+        else:
+            theta = step_fit["theta"]
+            beta = step_fit["beta"]
+            delta_m = step_fit["delta_m"]
+            m_ref = step_fit["m_ref"]
+            mc = m_ref - (delta_m / 2.0 if delta_m > 0.0 else 0.0)
+        params = utility_functions.expand_theta_log10(dict(theta))
+        params["m_c"] = mc
+        loaded: list[tuple[int, pd.DataFrame | None]] = [
+            (seed_index, load_forecast(step_dir, seed))
+            for seed_index, seed in enumerate(seeds)
+        ]
+        if all(forecast is None or forecast.empty for _seed_index, forecast in loaded):
+            continue
+        t_start = pd.to_datetime(record["forecast_start"], utc=True).tz_convert(None)
+        t_end = pd.to_datetime(record["forecast_end"], utc=True).tz_convert(None)
+        t_start_days = float((t_start - pd.Timestamp("1970-01-01")) / pd.Timedelta("1D"))
+        t_end_days = float((t_end - pd.Timestamp("1970-01-01")) / pd.Timedelta("1D"))
+        hist_keep = history_days <= t_start_days
+        background = rate_simulation.integrated_spatial_counts(
+            hist_lat[hist_keep], hist_lon[hist_keep], hist_mag[hist_keep], history_days[hist_keep],
+            t_start_days, t_end_days, cell_lat, cell_lon, cell_area, params,
+        )
+        probabilities = gr_magnitude_probabilities(np.asarray(region.magnitudes), beta, mc)
+        for seed_index, forecast in loaded:
+            if forecast is None or forecast.empty:
+                continue
+            forecast = filter_to_study_domain(forecast, m_ref=m_ref, study_poly=study_poly)
+            if forecast.empty or "time" not in forecast.columns:
+                triggered = np.zeros(cell_lat.size, dtype=float)
+            else:
+                sim_lat, sim_lon, sim_mag = catalog_lat_lon_mag(forecast)
+                triggered = rate_simulation.integrated_spatial_counts(
+                    sim_lat.to_numpy(dtype=float),
+                    sim_lon.to_numpy(dtype=float),
+                    sim_mag.to_numpy(dtype=float),
+                    _times_to_days(forecast["time"]),
+                    t_start_days, t_end_days, cell_lat, cell_lon, cell_area, params,
+                    include_background=False,
+                )
+            totals += (background + triggered)[:, None] * probabilities[None, :]
+            used[seed_index] = True
+    n_used = int(np.count_nonzero(used))
+    if n_used == 0:
+        raise ValueError("no forecast catalogs were available for the intensity average")
+    return totals / n_used
 
 
 def pop_csep_sim_arrays(scores: dict[str, Any]) -> dict[str, np.ndarray]:
@@ -867,10 +1175,14 @@ def plot_csep_metric_overlays(
     title: str | None = None,
     colors: dict[str, str] | None = None,
     labels: dict[str, str] | None = None,
+    test_names: Sequence[str] | None = None,
 ) -> list[plt.Figure]:
     """One overlay figure per available metric (PL, N, M, S, and L when present)."""
     figures: list[plt.Figure] = []
+    selected = None if test_names is None else set(test_names)
     for sim_key, obs_key, d2_key, d1_key, xlabel, test_name in CSEP_METRIC_SPECS:
+        if selected is not None and test_name not in selected:
+            continue
         fig = plot_consistency_overlay(
             ensemble_by_method,
             sim_key=sim_key,

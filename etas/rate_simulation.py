@@ -14,6 +14,7 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import pyproj
+from scipy.special import roots_legendre
 from matplotlib.path import Path as MplPath
 from shapely import geometry
 from shapely.geometry import Point, Polygon
@@ -344,6 +345,120 @@ def g(t: float, H: dict, params: dict) -> float:
 def _g_vector(t, event_times: np.ndarray, params: dict) -> np.ndarray:
     dt = np.asarray(t, dtype=np.float64) - event_times
     return np.exp(-dt / params["tau"]) / (dt + params["c"]) ** (1.0 + params["omega"])
+
+
+def omori_time_weights(
+    event_times_days: np.ndarray,
+    t_start_days: float,
+    t_end_days: float,
+    params: dict,
+    *,
+    n_quad: int = 16,
+) -> np.ndarray:
+    """Integrate the Omori factor g from each event through ``[t_start, t_end]``.
+
+    The integral is zero when the event is at or after ``t_end``. Gauss–Legendre
+    nodes are mapped onto ``[max(t_start, t_event), t_end]``.
+    """
+    event_times = np.asarray(event_times_days, dtype=np.float64).ravel()
+    weights_out = np.zeros(event_times.size, dtype=np.float64)
+    if event_times.size == 0 or t_end_days <= t_start_days:
+        return weights_out
+    lower = np.maximum(event_times, float(t_start_days))
+    span = float(t_end_days) - lower
+    valid = span > 0.0
+    if not np.any(valid):
+        return weights_out
+    nodes, quad_weights = roots_legendre(int(n_quad))
+    half = 0.5 * span[valid]
+    midpoint = 0.5 * (lower[valid] + float(t_end_days))
+    sample_t = midpoint[:, None] + half[:, None] * nodes[None, :]
+    dt = sample_t - event_times[valid][:, None]
+    g_values = np.exp(-dt / params["tau"]) / (dt + params["c"]) ** (1.0 + params["omega"])
+    weights_out[valid] = half * np.sum(quad_weights[None, :] * g_values, axis=1)
+    return weights_out
+
+
+def integrated_spatial_counts(
+    latitudes: np.ndarray,
+    longitudes: np.ndarray,
+    magnitudes: np.ndarray,
+    times_days: np.ndarray,
+    t_start_days: float,
+    t_end_days: float,
+    cell_lat: np.ndarray,
+    cell_lon: np.ndarray,
+    cell_area_km2: np.ndarray,
+    params: dict,
+    *,
+    include_background: bool = True,
+    n_quad: int = 16,
+    batch_size: int = 32,
+) -> np.ndarray:
+    """Expected event counts in each cell from one ETAS history.
+
+    Integrates ``μ + Σ kernel(event, cell) g(t - t_event)`` over the cell area
+    and over ``[t_start, t_end]``. This is the compensator of the thinning
+    intensity, not a count of sampled earthquakes. Pass ``include_background=False``
+    when adding only the events that occurred inside the window on top of a
+    history integral that already contains μ.
+    """
+    linear = expand_theta_log10(dict(params))
+    cell_lat = np.asarray(cell_lat, dtype=np.float64).ravel()
+    cell_lon = np.asarray(cell_lon, dtype=np.float64).ravel()
+    cell_area = np.asarray(cell_area_km2, dtype=np.float64).ravel()
+    if cell_lat.shape != cell_lon.shape or cell_lat.shape != cell_area.shape:
+        raise ValueError("cell latitudes, longitudes, and areas must share a shape")
+    duration = float(t_end_days) - float(t_start_days)
+    if duration < 0.0:
+        raise ValueError("t_end_days is before t_start_days")
+    counts = (
+        linear["mu"] * cell_area * duration
+        if include_background
+        else np.zeros(cell_lat.size, dtype=np.float64)
+    )
+    latitudes = np.asarray(latitudes, dtype=np.float64).ravel()
+    longitudes = np.asarray(longitudes, dtype=np.float64).ravel()
+    magnitudes = np.asarray(magnitudes, dtype=np.float64).ravel()
+    times_days = np.asarray(times_days, dtype=np.float64).ravel()
+    if not (latitudes.size == longitudes.size == magnitudes.size == times_days.size):
+        raise ValueError("event coordinate arrays must share a length")
+    if latitudes.size == 0 or duration == 0.0:
+        return counts
+    finite = np.isfinite(latitudes) & np.isfinite(longitudes) & np.isfinite(magnitudes) & np.isfinite(times_days)
+    latitudes, longitudes, magnitudes, times_days = (
+        latitudes[finite], longitudes[finite], magnitudes[finite], times_days[finite],
+    )
+    time_weights = omori_time_weights(
+        times_days, t_start_days, t_end_days, linear, n_quad=n_quad,
+    )
+    keep = time_weights > 0.0
+    if not np.any(keep):
+        return counts
+    latitudes, longitudes, magnitudes, time_weights = (
+        latitudes[keep], longitudes[keep], magnitudes[keep], time_weights[keep],
+    )
+    target_lat = np.radians(cell_lat)[None, :]
+    target_lon = np.radians(cell_lon)[None, :]
+    productivity_scale = linear["k0"]
+    length_scale = linear["d"]
+    exponent = 1.0 + linear["rho"]
+    for start in range(0, latitudes.size, int(batch_size)):
+        stop = min(start + int(batch_size), latitudes.size)
+        source_lat = np.radians(latitudes[start:stop])[:, None]
+        source_lon = np.radians(longitudes[start:stop])[:, None]
+        distance_sq = np.square(utility_functions.haversine_km(
+            source_lat, target_lat, source_lon, target_lon,
+        ))
+        magnitude_gap = magnitudes[start:stop] - linear["m_c"]
+        amplitude = productivity_scale * np.exp(linear["a"] * magnitude_gap)
+        core = length_scale * np.exp(linear["gamma"] * magnitude_gap)
+        kernel = amplitude[:, None] / (distance_sq + core[:, None]) ** exponent
+        counts += np.sum(
+            time_weights[start:stop][:, None] * kernel * cell_area[None, :],
+            axis=0,
+        )
+    return counts
 
 
 def lambda_s_total(
