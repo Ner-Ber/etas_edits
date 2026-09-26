@@ -440,8 +440,15 @@ def execute_rolling_step(
         step_cfg["magnet"]["mode"] = "load"
         step_cfg["magnet"]["model_dir"] = str(magnet_model_dir)
 
-    step_cfg_path = step_output_dir / "step_config.json"
-    step_cfg_path.write_text(json.dumps(step_cfg, indent=2), encoding="utf-8")
+    if seed is not None:
+        step_cfg_path = step_output_dir / f"step_config_seed_{int(seed)}.json"
+    else:
+        step_cfg_path = step_output_dir / "step_config.json"
+    payload = json.dumps(step_cfg, indent=2)
+    step_cfg_path.write_text(payload, encoding="utf-8")
+    shared_cfg = step_output_dir / "step_config.json"
+    if step_cfg_path != shared_cfg:
+        shared_cfg.write_text(payload, encoding="utf-8")
 
     runner_args = [
         "--config",
