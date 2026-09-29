@@ -1,9 +1,11 @@
 """Fill the rolling-analysis cache for one horizon.
 
-A second run leaves existing results in place and only computes realizations
-that are new or whose forecast files have changed. Other notebooks can call
+Writes intensity grids, Bayona scores, and the per-window negative-binomial /
+binary conditional-likelihood tests under ``analysis_cache/``. A second run
+leaves existing results in place and only recomputes realizations (or window
+tests) whose inputs changed. Other notebooks can call
 ``etas.rolling_analysis.update_cache`` or this script, then
-``etas.rolling_analysis.load_analysis``.
+``etas.rolling_analysis.load_analysis`` / ``window_distribution_tests``.
 
 Example::
 

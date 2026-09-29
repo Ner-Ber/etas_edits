@@ -1,11 +1,16 @@
 """Cache and load rolling ETAS / FINE forecast analysis.
 
-``update_cache`` is the expensive pass: per-seed intensity grids and Bayona
-scores. A later call recomputes only seeds, steps, or scores whose inputs
-changed (new realization files, a newer catalog, a different simulation count).
+``update_cache`` is the expensive pass: per-seed intensity grids, Bayona
+scores, and the per-window negative-binomial / binary conditional-likelihood
+tests. A later call recomputes only seeds, steps, scores, or window tests
+whose inputs changed (new realization files, a newer catalog, a different
+simulation count, or rewritten intensity arrays).
 
 ``load_analysis`` only reads that cache. Notebooks that compare experiments
 should load one horizon directory at a time and concatenate ``store.scores``.
+Window-test rows are on disk as ``window_tests.csv``; call
+``window_distribution_tests(store)`` to load them (a no-op recompute when
+current).
 
 The command-line entry point is ``runnable_code/cache_rolling_analysis.py``.
 """
@@ -73,7 +78,7 @@ class AnalysisStore:
         if self._scores is None:
             frame = pd.read_csv(self.cache_dir / "scores.csv")
             for column in ("forecast_start", "forecast_end"):
-                frame[column] = pd.to_datetime(frame[column])
+                frame[column] = pd.to_datetime(frame[column], format="mixed")
             self._scores = frame
         return self._scores
 
@@ -303,12 +308,18 @@ def window_distribution_tests(
     num_simulations: int = 200,
     progress: Callable[[str], None] | None = None,
     max_workers: int | None = None,
+    force: bool = False,
 ) -> pd.DataFrame:
     """Negative-binomial number test and binary conditional likelihood test per window.
 
     Both read the cached intensity. The number test uses the variance of the
     saved catalog sizes in that window. Results are written under the analysis
-    cache and reused when the simulation count and catalog fingerprint match.
+    cache and reused when the simulation count, catalog fingerprint, step count,
+    seed list, and intensity files match. A cache written before seeds were
+    recorded is kept and stamped with the current seeds. ``force`` recomputes
+    every window. Adding a realization, or filling a realization that was
+    missing from the intensity file, changes the seed-averaged rate, so that
+    horizon's tests are recomputed rather than patched.
     """
     import etas.bayona_evaluations as bayona_evaluations
 
@@ -318,7 +329,16 @@ def window_distribution_tests(
     json_path = cache_dir / _WINDOW_TESTS_JSON
     methods = list(store.methods)
     n_steps = int(store.manifest.get("n_steps", 0))
-    if _window_tests_match(json_path, csv_path, store.manifest, methods, num_simulations, n_steps):
+    arrays_fp = _window_test_arrays_fp(cache_dir)
+    recorded_fp = _read_json(json_path).get("arrays_fp") if json_path.is_file() else None
+    if (
+        not force
+        and recorded_fp == arrays_fp
+        and _window_tests_match(
+            json_path, csv_path, store.manifest, methods, num_simulations, n_steps,
+        )
+    ):
+        _remember_window_test_seeds(json_path, store.seeds)
         progress(
             f"window tests cached: {n_steps} steps, {len(methods)} methods, "
             f"{int(num_simulations)} binary likelihood simulations"
@@ -396,8 +416,10 @@ def window_distribution_tests(
     _write_json(json_path, {
         "num_simulations": int(num_simulations),
         "methods": methods,
+        "seeds": [int(seed) for seed in store.seeds],
         "catalog_fp": store.manifest.get("catalog_fp"),
         "n_steps": n_steps,
+        "arrays_fp": arrays_fp,
     })
     progress(
         f"window tests written: {frame['step_index'].nunique()} steps, "
@@ -455,13 +477,38 @@ def _window_tests_match(
         return False
     if int(meta.get("n_steps", -1)) != int(n_steps):
         return False
+    recorded_seeds = meta.get("seeds")
+    manifest_seeds = [int(seed) for seed in manifest.get("seeds", [])]
+    if recorded_seeds is not None and [int(seed) for seed in recorded_seeds] != manifest_seeds:
+        return False
     frame = pd.read_csv(csv_path, usecols=["step_index", "method"])
     return len(frame) == int(n_steps) * len(methods)
 
 
+def _window_test_arrays_fp(cache_dir: Path) -> str:
+    """Fingerprint of the per-window intensity files the tests read."""
+    rows = []
+    for path in sorted((cache_dir / "steps").glob("step_*.npz")):
+        stat = path.stat()
+        rows.append(f"{path.name}:{stat.st_mtime_ns}:{stat.st_size}")
+    return hashlib.sha256("\n".join(rows).encode("utf-8")).hexdigest()
+
+
+def _remember_window_test_seeds(json_path: Path, seeds: Sequence[int]) -> None:
+    """Record seeds on a legacy window-test cache without recomputing it."""
+    meta = json.loads(json_path.read_text(encoding="utf-8"))
+    recorded = [int(seed) for seed in seeds]
+    if meta.get("seeds") == recorded:
+        return
+    if meta.get("seeds") is not None:
+        return
+    meta["seeds"] = recorded
+    _write_json(json_path, meta)
+
+
 def _read_window_tests(csv_path: Path) -> pd.DataFrame:
     frame = pd.read_csv(csv_path)
-    frame["forecast_start"] = pd.to_datetime(frame["forecast_start"])
+    frame["forecast_start"] = pd.to_datetime(frame["forecast_start"], format="mixed")
     return frame
 
 
@@ -492,10 +539,21 @@ def update_cache(
     methods: Sequence[str] = ("etas", "FINE"),
     dh: float = 0.1,
     num_simulations: int = 200,
+    n_realizations: int | None = None,
     labels: dict[str, str] | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> CacheUpdate:
-    """Fill or refresh the cache. Unchanged seeds and scores are left on disk."""
+    """Fill or refresh the cache. Unchanged seeds and scores are left on disk.
+
+    After intensity / Bayona scores are current, also refreshes
+    ``window_tests.csv`` (negative-binomial and binary conditional likelihood)
+    via ``window_distribution_tests``. That secondary cache is reused when its
+    inputs match; rewriting intensity arrays invalidates it.
+
+    ``n_realizations`` caps how many catalogs are used per method in each
+    window: the lowest seed ids, or every catalog when fewer exist. A window
+    that already has at least those realizations cached is left as it is.
+    """
     horizon_dir = Path(horizon_dir)
     cache_dir = cache_dir_for(horizon_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -511,6 +569,7 @@ def update_cache(
                 methods=list(methods),
                 dh=float(dh),
                 num_simulations=int(num_simulations),
+                n_realizations=None if n_realizations is None else int(n_realizations),
                 labels=dict(DEFAULT_LABELS if labels is None else labels),
                 progress=progress or (lambda _message: None),
             )
@@ -527,6 +586,7 @@ def _update_locked(
     methods: list[str],
     dh: float,
     num_simulations: int,
+    n_realizations: int | None,
     labels: dict[str, str],
     progress: Callable[[str], None],
 ) -> CacheUpdate:
@@ -538,13 +598,19 @@ def _update_locked(
     step_pairs = _discover_steps(horizon_dir)
     if not step_pairs:
         raise FileNotFoundError(f"No step_* directories under {horizon_dir}")
+    _check_n_realizations(n_realizations)
     if _cache_is_current(
         cache_dir, step_pairs, methods, dh, num_simulations, catalog_fp,
+        n_realizations=n_realizations,
     ):
         manifest = json.loads((cache_dir / "manifest.json").read_text(encoding="utf-8"))
         progress(
             f"cache up to date: {manifest.get('n_steps', 0)} steps, "
             f"{len(manifest.get('seeds', []))} seeds"
+        )
+        store = AnalysisStore(horizon_dir, cache_dir, manifest)
+        window_distribution_tests(
+            store, num_simulations=num_simulations, progress=progress,
         )
         return CacheUpdate(cache_dir, int(manifest.get("n_steps", 0)), 0, 0, 0, 0)
 
@@ -590,7 +656,8 @@ def _update_locked(
         step_ids.append(step_index)
         fit = _theta_from_step_dir(step_dir) or fallback
         present = {
-            method: _forecast_files(step_dir, method) for method in methods
+            method: _limit_realizations(_forecast_files(step_dir, method), n_realizations)
+            for method in methods
         }
         for method, files in present.items():
             for seed, path in files.items():
@@ -621,6 +688,7 @@ def _update_locked(
             rate_simulation=rate_simulation,
             utility_functions=utility_functions,
             bayona_evaluations=bayona_evaluations,
+            n_realizations=n_realizations,
         )
         backgrounds_computed += counts["backgrounds"]
         seeds_computed += counts["seeds"]
@@ -641,7 +709,7 @@ def _update_locked(
         cache_dir, observed, region, study_poly, float(fallback["m_ref"]),
         span_start, span_end, catalog_fp, csep_utils,
     )
-    seeds = _common_seeds(step_pairs, methods)
+    seeds = _common_seeds(step_pairs, methods, n_realizations=n_realizations)
     _write_aggregates(cache_dir, methods, seeds, magnitude_edges, csep_utils)
     _write_scores_table(cache_dir, step_ids)
     manifest = {
@@ -651,6 +719,7 @@ def _update_locked(
         "num_simulations": num_simulations,
         "methods": methods,
         "seeds": seeds,
+        "n_realizations": n_realizations,
         "mc": float(config.get("mc", fallback["mc"])),
         "catalog_path": str(catalog_path),
         "catalog_fp": catalog_fp,
@@ -677,6 +746,10 @@ def _update_locked(
             f"{summary.seeds_computed} seeds, {summary.steps_rescored} scores, "
             f"{summary.events_written} event files"
         )
+    store = AnalysisStore(horizon_dir, cache_dir, manifest)
+    window_distribution_tests(
+        store, num_simulations=num_simulations, progress=progress,
+    )
     return summary
 
 
@@ -687,6 +760,7 @@ def _cache_is_current(
     dh: float,
     num_simulations: int,
     catalog_fp: str,
+    n_realizations: int | None = None,
 ) -> bool:
     """True when every realization file and score already matches the cache."""
     manifest_path = cache_dir / "manifest.json"
@@ -721,7 +795,10 @@ def _cache_is_current(
         windows = _load_windows(step_dir)
         if windows is None:
             continue
-        present = {method: _forecast_files(step_dir, method) for method in methods}
+        present = {
+            method: _limit_realizations(_forecast_files(step_dir, method), n_realizations)
+            for method in methods
+        }
         if not any(present.values()):
             continue
         for method, files in present.items():
@@ -742,14 +819,22 @@ def _cache_is_current(
             "num_simulations": num_simulations,
             "window": [start, end],
         })
+        array_path = cache_dir / "steps" / f"{step_dir.name}.npz"
+        files_ready = _cached_realizations_ready(
+            meta.get("files"), file_fps, n_realizations=n_realizations,
+        )
+        score_ready = meta.get("score_key") == score_key or (
+            n_realizations is not None and meta.get("files") != file_fps and files_ready
+        )
         if (
-            meta.get("files") != file_fps
+            not files_ready
             or meta.get("catalog_fp") != catalog_fp
             or meta.get("forecast_start") != start
             or meta.get("forecast_end") != end
-            or meta.get("score_key") != score_key
-            or not (cache_dir / "steps" / f"{step_dir.name}.npz").is_file()
+            or not score_ready
+            or not array_path.is_file()
             or not (cache_dir / "scores" / f"{step_dir.name}.json").is_file()
+            or not _arrays_cover_files(array_path, file_fps)
         ):
             return False
     for method, seeds in file_index.items():
@@ -762,7 +847,7 @@ def _cache_is_current(
             if meta.get("fingerprint") != fingerprint or not _events_have_time(data_path):
                 return False
     for method in methods:
-        for seed in _common_seeds(step_pairs, methods):
+        for seed in _common_seeds(step_pairs, methods, n_realizations=n_realizations):
             if not (cache_dir / "agg" / f"seed_{seed}__{method}.npy").is_file():
                 return False
     return True
@@ -795,6 +880,7 @@ def _update_step(
     rate_simulation: Any,
     utility_functions: Any,
     bayona_evaluations: Any,
+    n_realizations: int | None = None,
 ) -> dict[str, int]:
     meta_path = cache_dir / "steps" / f"{step_name}.json"
     array_path = cache_dir / "steps" / f"{step_name}.npz"
@@ -822,15 +908,22 @@ def _update_step(
         "num_simulations": num_simulations,
         "window": [start.isoformat(), end.isoformat()],
     })
+    files_ready = _cached_realizations_ready(
+        meta.get("files"), file_fps, n_realizations=n_realizations,
+    )
+    score_ready = meta.get("score_key") == score_key or (
+        n_realizations is not None and meta.get("files") != file_fps and files_ready
+    )
     if (
         meta.get("theta_fp") == theta_fp
         and meta.get("forecast_start") == start.isoformat()
         and meta.get("forecast_end") == end.isoformat()
         and meta.get("catalog_fp") == catalog_fp
-        and meta.get("files") == file_fps
-        and meta.get("score_key") == score_key
+        and files_ready
+        and score_ready
         and score_path.is_file()
         and array_path.is_file()
+        and _arrays_cover_files(array_path, file_fps)
     ):
         return {"backgrounds": 0, "seeds": 0, "rescored": 0}
     arrays = _read_arrays(array_path)
@@ -872,17 +965,14 @@ def _update_step(
                 continue
             frame = pd.read_csv(path)
             if frame.empty:
-                triggered = None
+                triggered = np.zeros(cell_lat.size, dtype=float)
             else:
                 triggered = _triggered_counts(
                     frame, float(fit["m_ref"]), study_poly,
                     t_start_days, t_end_days, cell_lat, cell_lon, cell_area, params,
                     csep_utils, rate_simulation,
                 )
-            if triggered is None:
-                arrays.pop(array_name, None)
-            else:
-                arrays[array_name] = np.asarray(triggered, dtype=np.float32)
+            arrays[array_name] = np.asarray(triggered, dtype=np.float32)
             seeds_computed += 1
 
     for array_name in list(arrays):
@@ -1238,13 +1328,51 @@ def _region_from_fit(fit: dict[str, Any], dh: float, csep_utils: Any) -> tuple[A
     return region, study_poly, edges
 
 
+def _check_n_realizations(n_realizations: int | None) -> None:
+    if n_realizations is not None and int(n_realizations) < 1:
+        raise ValueError("n_realizations must be at least 1")
+
+
+def _limit_realizations(
+    files: dict[int, Path],
+    n_realizations: int | None,
+) -> dict[int, Path]:
+    """Keep the lowest seed ids, at most ``n_realizations`` catalogs."""
+    if n_realizations is None or len(files) <= int(n_realizations):
+        return files
+    chosen = sorted(files)[: int(n_realizations)]
+    return {seed: files[seed] for seed in chosen}
+
+
+def _cached_realizations_ready(
+    cached: Any,
+    wanted: dict[str, str],
+    *,
+    n_realizations: int | None,
+) -> bool:
+    """True when the cache already holds the realizations this run asked for.
+
+    With a cap, extra cached seeds still count. Without a cap the file list
+    must match exactly, so a newly added catalog is computed.
+    """
+    if not isinstance(cached, dict):
+        return False
+    if n_realizations is None:
+        return cached == wanted
+    return all(cached.get(key) == fingerprint for key, fingerprint in wanted.items())
+
+
 def _common_seeds(
     step_pairs: list[tuple[int, Path]],
     methods: list[str],
+    n_realizations: int | None = None,
 ) -> list[int]:
     common: set[int] | None = None
     for _step_index, step_dir in step_pairs:
-        present = [_forecast_files(step_dir, method) for method in methods]
+        present = [
+            _limit_realizations(_forecast_files(step_dir, method), n_realizations)
+            for method in methods
+        ]
         if not all(present):
             continue
         both = set.intersection(*(set(files) for files in present))
@@ -1288,11 +1416,61 @@ def _method_dir(step_dir: Path, method: str) -> Path:
     return candidate
 
 
+def _active_inversion_id(step_dir: Path) -> str | None:
+    pointer = step_dir / "active_inversion.json"
+    if not pointer.is_file():
+        return None
+    try:
+        payload = json.loads(pointer.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    inv_id = payload.get("inv_id")
+    return str(inv_id) if inv_id else None
+
+
+def _active_parameters_file(step_dir: Path) -> Path | None:
+    """Parameter file for the inversion this step fitted or reused.
+
+    ``active_inversion.json`` stores an absolute path from the machine that
+    wrote the walk. When that path is missing, rebuild it under this horizon.
+    """
+    pointer = step_dir / "active_inversion.json"
+    if not pointer.is_file():
+        return None
+    try:
+        payload = json.loads(pointer.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    inv_id = str(payload.get("inv_id") or "")
+    stored = payload.get("parameters_json")
+    if stored:
+        stored_path = Path(str(stored))
+        if stored_path.is_file():
+            return stored_path
+        parts = stored_path.parts
+        for index, part in enumerate(parts):
+            if part.startswith("step_"):
+                local = step_dir.parent.joinpath(*parts[index:])
+                if local.is_file():
+                    return local
+                break
+    if inv_id:
+        local = step_dir / "inversions" / f"inv_{inv_id}" / f"parameters_{inv_id}.json"
+        if local.is_file():
+            return local
+    return None
+
+
 def _forecast_files(step_dir: Path, method: str) -> dict[int, Path]:
     folder = _method_dir(step_dir, method)
     if not folder.is_dir():
         return {}
     inv_dirs = sorted(path for path in folder.glob("inv_*") if path.is_dir())
+    active_id = _active_inversion_id(step_dir)
+    if active_id is not None:
+        preferred = folder / f"inv_{active_id}"
+        if preferred.is_dir() and any(preferred.glob(f"seed_*/{FORECAST_CATALOG_NAME}")):
+            inv_dirs = [preferred]
     if not inv_dirs:
         return {}
     found: dict[int, Path] = {}
@@ -1302,13 +1480,15 @@ def _forecast_files(step_dir: Path, method: str) -> dict[int, Path]:
 
 
 def _theta_from_step_dir(step_dir: Path) -> dict[str, Any] | None:
-    inv_dirs = sorted((step_dir / "inversions").glob("inv_*"))
-    if not inv_dirs:
-        return None
-    inv_id = inv_dirs[0].name.replace("inv_", "")
-    params_path = inv_dirs[0] / f"parameters_{inv_id}.json"
-    if not params_path.is_file():
-        return None
+    params_path = _active_parameters_file(step_dir)
+    if params_path is None:
+        inv_dirs = sorted((step_dir / "inversions").glob("inv_*"))
+        if not inv_dirs:
+            return None
+        inv_id = inv_dirs[0].name.replace("inv_", "")
+        params_path = inv_dirs[0] / f"parameters_{inv_id}.json"
+        if not params_path.is_file():
+            return None
     payload = json.loads(params_path.read_text(encoding="utf-8"))
     theta = payload.get("final_parameters")
     if not isinstance(theta, dict) or "shape_coords" not in payload:
@@ -1363,6 +1543,25 @@ def _json_fingerprint(payload: Any) -> str:
 
 def _array_name(method: str, seed: int) -> str:
     return f"{method}__{int(seed)}"
+
+
+def _arrays_cover_files(array_path: Path, file_fps: dict[str, str]) -> bool:
+    """True when every forecast file has a stored triggered-count array.
+
+    An empty catalog is stored as zeros. A missing name means that realization
+    was skipped and the step still needs to be filled.
+    """
+    if not array_path.is_file():
+        return False
+    with np.load(array_path) as stored:
+        names = set(stored.files)
+    if "background" not in names:
+        return False
+    for key in file_fps:
+        method, seed_text = key.split("/", 1)
+        if _array_name(method, int(seed_text)) not in names:
+            return False
+    return True
 
 
 def _frame_lon_lat_mag(

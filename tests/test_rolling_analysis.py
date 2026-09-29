@@ -38,6 +38,28 @@ def test_window_tests_match_requires_the_same_catalog_and_simulation_count(tmp_p
     assert not rolling_analysis._window_tests_match(
         json_path, csv_path, manifest, ["etas", "FINE"], 1000, 2,
     )
+    meta["seeds"] = [1]
+    manifest["seeds"] = [1]
+    json_path.write_text(json.dumps(meta), encoding="utf-8")
+    assert rolling_analysis._window_tests_match(
+        json_path, csv_path, manifest, ["etas", "FINE"], 200, 2,
+    )
+    manifest["seeds"] = [1, 2]
+    assert not rolling_analysis._window_tests_match(
+        json_path, csv_path, manifest, ["etas", "FINE"], 200, 2,
+    )
+
+
+def test_legacy_window_tests_record_seeds_without_rewriting_results(tmp_path):
+    json_path = tmp_path / "window_tests.json"
+    json_path.write_text(json.dumps({"num_simulations": 200}), encoding="utf-8")
+    rolling_analysis._remember_window_test_seeds(json_path, [0, 1])
+    stamped = json.loads(json_path.read_text(encoding="utf-8"))
+    assert stamped["seeds"] == [0, 1]
+    assert stamped["num_simulations"] == 200
+    rolling_analysis._remember_window_test_seeds(json_path, [0, 1])
+    again = json.loads(json_path.read_text(encoding="utf-8"))
+    assert again == stamped
 
 _THETA = {
     "log10_mu": -2.0,
@@ -164,3 +186,69 @@ def test_cache_reuses_seeds_and_recomputes_a_new_one(tmp_path: Path):
     assert mag.size == 1
     observed_lon, _observed_lat, _observed_mag = store.observed_events()
     assert observed_lon.size == 1
+    assert (store.cache_dir / "window_tests.csv").is_file()
+    assert (store.cache_dir / "window_tests.json").is_file()
+    window_tests = rolling_analysis.window_distribution_tests(
+        store, num_simulations=5,
+    )
+    assert set(window_tests["method"]) == {"etas", "FINE"}
+    assert len(window_tests) == 2
+    assert "binary_cl_quantile" in window_tests.columns
+    assert "nbd_delta1" in window_tests.columns
+
+
+def test_empty_forecast_catalog_is_cached_once(tmp_path: Path):
+    pytest.importorskip("csep")
+    horizon, config = _build_horizon(tmp_path, [1])
+    for path in horizon.glob("step_000/*/inv_test/seed_1/forecast_catalog.csv"):
+        path.write_text("time,latitude,longitude,magnitude\n", encoding="utf-8")
+    first = rolling_analysis.update_cache(
+        horizon, config_path=config, repo_root=tmp_path,
+        methods=["etas", "FINE"], dh=0.5, num_simulations=2,
+    )
+    assert first.seeds_computed == 2
+    assert first.steps_rescored == 1
+    second = rolling_analysis.update_cache(
+        horizon, config_path=config, repo_root=tmp_path,
+        methods=["etas", "FINE"], dh=0.5, num_simulations=2,
+    )
+    assert second.up_to_date
+    store = rolling_analysis.load_analysis(horizon)
+    assert len(store.scores) == 2
+
+
+def test_n_realizations_uses_the_lowest_seeds_and_keeps_a_larger_cache(tmp_path: Path):
+    pytest.importorskip("csep")
+    horizon, config = _build_horizon(tmp_path, [1, 2, 3])
+    limited = rolling_analysis.update_cache(
+        horizon, config_path=config, repo_root=tmp_path,
+        methods=["etas", "FINE"], dh=0.5, num_simulations=2,
+        n_realizations=1,
+    )
+    assert limited.seeds_computed == 2
+    store = rolling_analysis.load_analysis(horizon)
+    assert store.seeds == [1]
+    assert set(store.scores["n_seeds"]) == {1}
+
+    again = rolling_analysis.update_cache(
+        horizon, config_path=config, repo_root=tmp_path,
+        methods=["etas", "FINE"], dh=0.5, num_simulations=2,
+        n_realizations=1,
+    )
+    assert again.up_to_date
+
+    wider = rolling_analysis.update_cache(
+        horizon, config_path=config, repo_root=tmp_path,
+        methods=["etas", "FINE"], dh=0.5, num_simulations=2,
+        n_realizations=2,
+    )
+    assert wider.seeds_computed == 2
+    assert rolling_analysis.load_analysis(horizon).seeds == [1, 2]
+
+    kept = rolling_analysis.update_cache(
+        horizon, config_path=config, repo_root=tmp_path,
+        methods=["etas", "FINE"], dh=0.5, num_simulations=2,
+        n_realizations=1,
+    )
+    assert kept.up_to_date
+    assert rolling_analysis.load_analysis(horizon).seeds == [1, 2]
