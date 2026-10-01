@@ -1,11 +1,12 @@
 """Fill the rolling-analysis cache for one horizon.
 
-Writes intensity grids, Bayona scores, and the per-window negative-binomial /
-binary conditional-likelihood tests under ``analysis_cache/``. A second run
-leaves existing results in place and only recomputes realizations (or window
-tests) whose inputs changed. Other notebooks can call
-``etas.rolling_analysis.update_cache`` or this script, then
-``etas.rolling_analysis.load_analysis`` / ``window_distribution_tests``.
+Writes intensity grids, Bayona scores, per-window negative-binomial / binary
+conditional-likelihood tests, and soft background probabilities
+(``P0 = mu / lambda`` at event times) under ``analysis_cache/``. A second run
+leaves existing results in place and only recomputes inputs that changed.
+Other notebooks can call ``etas.rolling_analysis.update_cache`` or this
+script, then ``load_analysis``, ``window_distribution_tests``, and
+``background_probabilities``.
 
 Example::
 

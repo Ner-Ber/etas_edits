@@ -195,6 +195,14 @@ def test_cache_reuses_seeds_and_recomputes_a_new_one(tmp_path: Path):
     assert len(window_tests) == 2
     assert "binary_cl_quantile" in window_tests.columns
     assert "nbd_delta1" in window_tests.columns
+    assert (store.cache_dir / "background_probability.csv").is_file()
+    assert (store.cache_dir / "background_probability.json").is_file()
+    p0 = rolling_analysis.background_probabilities(store)
+    assert set(p0["source"]) >= {"observed", "etas", "FINE"}
+    assert {"p0", "rate", "mu", "time_days"}.issubset(p0.columns)
+    assert ((p0["p0"] >= 0.0) & (p0["p0"] <= 1.0)).all()
+    again = rolling_analysis.background_probabilities(store)
+    assert len(again) == len(p0)
 
 
 def test_empty_forecast_catalog_is_cached_once(tmp_path: Path):

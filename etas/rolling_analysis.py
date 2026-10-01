@@ -1,16 +1,18 @@
 """Cache and load rolling ETAS / FINE forecast analysis.
 
 ``update_cache`` is the expensive pass: per-seed intensity grids, Bayona
-scores, and the per-window negative-binomial / binary conditional-likelihood
-tests. A later call recomputes only seeds, steps, scores, or window tests
-whose inputs changed (new realization files, a newer catalog, a different
-simulation count, or rewritten intensity arrays).
+scores, per-window negative-binomial / binary conditional-likelihood tests,
+and soft background probabilities \(P_0 = \\mu / \\lambda\) at event times.
+A later call recomputes only inputs that changed (new realization files, a
+newer catalog, a different simulation count, rewritten intensity arrays, or
+event/parameter fingerprints for \(P_0\)).
 
 ``load_analysis`` only reads that cache. Notebooks that compare experiments
 should load one horizon directory at a time and concatenate ``store.scores``.
 Window-test rows are on disk as ``window_tests.csv``; call
 ``window_distribution_tests(store)`` to load them (a no-op recompute when
-current).
+current). Background probabilities are ``background_probability.csv``; call
+``background_probabilities(store)``.
 
 The command-line entry point is ``runnable_code/cache_rolling_analysis.py``.
 """
@@ -233,6 +235,8 @@ _WINDOW_TEST_REGION: Any = None
 _WINDOW_TEST_EDGES: np.ndarray | None = None
 _WINDOW_TESTS_CSV = "window_tests.csv"
 _WINDOW_TESTS_JSON = "window_tests.json"
+_BG_PROB_CSV = "background_probability.csv"
+_BG_PROB_JSON = "background_probability.json"
 
 
 def _init_window_test_worker(region: Any, magnitude_edges: np.ndarray) -> None:
@@ -512,6 +516,329 @@ def _read_window_tests(csv_path: Path) -> pd.DataFrame:
     return frame
 
 
+def _instantaneous_etas_rates(
+    lat: np.ndarray,
+    lon: np.ndarray,
+    t_days: np.ndarray,
+    hist_lat: np.ndarray,
+    hist_lon: np.ndarray,
+    hist_mag: np.ndarray,
+    hist_t: np.ndarray,
+    params: dict[str, Any],
+    *,
+    batch_size: int = 64,
+) -> np.ndarray:
+    """ETAS intensity density λ(x, y, t) at each target (lat, lon, t)."""
+    import etas.utility_functions as utility_functions
+
+    lat = np.asarray(lat, dtype=np.float64).ravel()
+    lon = np.asarray(lon, dtype=np.float64).ravel()
+    t_days = np.asarray(t_days, dtype=np.float64).ravel()
+    n = lat.size
+    mu = float(params["mu"])
+    rates = np.full(n, mu, dtype=np.float64)
+    hist_t = np.asarray(hist_t, dtype=np.float64).ravel()
+    if n == 0 or hist_t.size == 0:
+        return rates
+
+    hlat = np.radians(np.asarray(hist_lat, dtype=np.float64).ravel())
+    hlon = np.radians(np.asarray(hist_lon, dtype=np.float64).ravel())
+    hm = np.asarray(hist_mag, dtype=np.float64).ravel()
+    tlat = np.radians(lat)
+    tlon = np.radians(lon)
+
+    k0 = float(params["k0"])
+    a = float(params["a"])
+    d = float(params["d"])
+    gamma = float(params["gamma"])
+    rho = float(params["rho"])
+    c = float(params["c"])
+    tau = float(params["tau"])
+    omega = float(params["omega"])
+    mc = float(params["m_c"])
+    mag_gap = hm - mc
+    amplitude = k0 * np.exp(a * mag_gap)
+    core = d * np.exp(gamma * mag_gap)
+
+    for start in range(0, n, int(batch_size)):
+        stop = min(start + int(batch_size), n)
+        dt = t_days[start:stop, None] - hist_t[None, :]
+        past = dt > 0.0
+        if not np.any(past):
+            continue
+        dist_sq = np.square(utility_functions.haversine_km(
+            hlat[None, :], tlat[start:stop, None],
+            hlon[None, :], tlon[start:stop, None],
+        ))
+        spatial = amplitude[None, :] / (dist_sq + core[None, :]) ** (1.0 + rho)
+        g_vals = np.zeros_like(dt)
+        g_vals[past] = np.exp(-dt[past] / tau) / (dt[past] + c) ** (1.0 + omega)
+        rates[start:stop] = mu + np.sum(spatial * g_vals, axis=1)
+    return rates
+
+
+def _p0_from_rates(rates: np.ndarray, mu: float) -> np.ndarray:
+    rates = np.asarray(rates, dtype=np.float64)
+    out = np.full(rates.shape, np.nan, dtype=np.float64)
+    ok = np.isfinite(rates) & (rates > 0.0)
+    out[ok] = float(mu) / rates[ok]
+    return np.clip(out, 0.0, 1.0)
+
+
+def _params_from_fit(fit: dict[str, Any]) -> dict[str, Any]:
+    import etas.utility_functions as utility_functions
+
+    params = utility_functions.expand_theta_log10(dict(fit["theta"]))
+    params["m_c"] = float(fit["mc"])
+    return params
+
+
+def _window_params_map(horizon_dir: Path) -> dict[int, dict[str, Any]]:
+    out: dict[int, dict[str, Any]] = {}
+    for step_index, step_dir in _discover_steps(horizon_dir):
+        fit = _theta_from_step_dir(step_dir)
+        if fit is None:
+            continue
+        out[int(step_index)] = _params_from_fit(fit)
+    return out
+
+
+def _background_prob_events_fp(
+    cache_dir: Path,
+    methods: Sequence[str],
+    seeds: Sequence[int],
+) -> str:
+    rows: list[str] = []
+    for name in ("observed.npz", "training.npz"):
+        path = cache_dir / "events" / name
+        if path.is_file():
+            stat = path.stat()
+            rows.append(f"{name}:{stat.st_mtime_ns}:{stat.st_size}")
+    for method in methods:
+        for seed in seeds:
+            path = cache_dir / "events" / method / f"seed_{int(seed)}.npz"
+            if path.is_file():
+                stat = path.stat()
+                rows.append(f"{method}/seed_{int(seed)}:{stat.st_mtime_ns}:{stat.st_size}")
+    return hashlib.sha256("\n".join(rows).encode("utf-8")).hexdigest()
+
+
+def _step_theta_fp(cache_dir: Path) -> str:
+    rows: list[str] = []
+    for path in sorted((cache_dir / "steps").glob("step_*.json")):
+        meta = json.loads(path.read_text(encoding="utf-8"))
+        rows.append(f"{path.name}:{meta.get('theta_fp', '')}")
+    return hashlib.sha256("\n".join(rows).encode("utf-8")).hexdigest()
+
+
+def _background_prob_match(
+    json_path: Path,
+    csv_path: Path,
+    manifest: dict[str, Any],
+    methods: Sequence[str],
+    seeds: Sequence[int],
+    events_fp: str,
+    theta_fp: str,
+) -> bool:
+    if not json_path.is_file() or not csv_path.is_file():
+        return False
+    meta = json.loads(json_path.read_text(encoding="utf-8"))
+    if list(meta.get("methods", [])) != list(methods):
+        return False
+    if [int(seed) for seed in meta.get("seeds", [])] != [int(seed) for seed in seeds]:
+        return False
+    if meta.get("catalog_fp") != manifest.get("catalog_fp"):
+        return False
+    if int(meta.get("n_steps", -1)) != int(manifest.get("n_steps", -1)):
+        return False
+    if meta.get("events_fp") != events_fp:
+        return False
+    if meta.get("theta_fp") != theta_fp:
+        return False
+    return True
+
+
+def _p0_rows_for_catalog(
+    frame: pd.DataFrame,
+    *,
+    source: str,
+    seed: int,
+    windows: pd.DataFrame,
+    observed_history: pd.DataFrame,
+    window_params: dict[int, dict[str, Any]],
+    default_params: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Soft P0 for every event in ``frame`` across rolling windows."""
+    if frame is None or frame.empty or windows is None or windows.empty:
+        return []
+    history_t = observed_history["time_days"].to_numpy(dtype=float)
+    rows: list[dict[str, Any]] = []
+    epoch = pd.Timestamp("1970-01-01")
+    for window in windows.itertuples(index=False):
+        start = pd.Timestamp(window.forecast_start)
+        end = pd.Timestamp(window.forecast_end)
+        start_days = float((start - epoch) / pd.Timedelta("1D"))
+        end_days = float((end - epoch) / pd.Timedelta("1D"))
+        params = window_params.get(int(window.step_index), default_params)
+        event_t = frame["time_days"].to_numpy(dtype=float)
+        chosen = frame.loc[(event_t > start_days) & (event_t <= end_days)].copy()
+        if chosen.empty:
+            continue
+        chosen = chosen.sort_values("time_days")
+        base = observed_history.loc[history_t <= start_days]
+        hist_lat = np.concatenate([
+            base["latitude"].to_numpy(dtype=float),
+            chosen["latitude"].to_numpy(dtype=float),
+        ])
+        hist_lon = np.concatenate([
+            base["longitude"].to_numpy(dtype=float),
+            chosen["longitude"].to_numpy(dtype=float),
+        ])
+        hist_mag = np.concatenate([
+            base["magnitude"].to_numpy(dtype=float),
+            chosen["magnitude"].to_numpy(dtype=float),
+        ])
+        hist_t = np.concatenate([
+            base["time_days"].to_numpy(dtype=float),
+            chosen["time_days"].to_numpy(dtype=float),
+        ])
+        rates = _instantaneous_etas_rates(
+            chosen["latitude"].to_numpy(dtype=float),
+            chosen["longitude"].to_numpy(dtype=float),
+            chosen["time_days"].to_numpy(dtype=float),
+            hist_lat, hist_lon, hist_mag, hist_t, params,
+        )
+        mu = float(params["mu"])
+        p0 = _p0_from_rates(rates, mu)
+        for index, row in enumerate(chosen.itertuples(index=False)):
+            rows.append({
+                "source": source,
+                "seed": int(seed),
+                "step_index": int(window.step_index),
+                "time_days": float(row.time_days),
+                "longitude": float(row.longitude),
+                "latitude": float(row.latitude),
+                "magnitude": float(row.magnitude),
+                "mu": mu,
+                "rate": float(rates[index]),
+                "p0": float(p0[index]),
+            })
+    return rows
+
+
+def background_probabilities(
+    store: AnalysisStore,
+    *,
+    force: bool = False,
+    progress: Callable[[str], None] | None = None,
+) -> pd.DataFrame:
+    """Soft background probability \(P_0 = \\mu / \\lambda\) at each event time.
+
+    For each rolling window, history is the observed catalog up to the forecast
+    start plus earlier events from the same catalog inside that window. Results
+    are stored as ``background_probability.csv`` and reused when the catalog,
+    cached event files, step parameters, methods, and seeds match.
+    """
+    progress = progress or (lambda _message: None)
+    cache_dir = store.cache_dir
+    csv_path = cache_dir / _BG_PROB_CSV
+    json_path = cache_dir / _BG_PROB_JSON
+    methods = list(store.methods)
+    seeds = [int(seed) for seed in store.seeds]
+    events_fp = _background_prob_events_fp(cache_dir, methods, seeds)
+    theta_fp = _step_theta_fp(cache_dir)
+    if (
+        not force
+        and _background_prob_match(
+            json_path, csv_path, store.manifest, methods, seeds, events_fp, theta_fp,
+        )
+    ):
+        progress(
+            f"background probability cached: {int(store.manifest.get('n_steps', 0))} steps, "
+            f"{len(methods)} methods, {len(seeds)} seeds"
+        )
+        return pd.read_csv(csv_path)
+
+    windows = store.windows()
+    if windows.empty:
+        empty = pd.DataFrame(columns=[
+            "source", "seed", "step_index", "time_days", "longitude", "latitude",
+            "magnitude", "mu", "rate", "p0",
+        ])
+        empty.to_csv(csv_path, index=False)
+        _write_json(json_path, {
+            "methods": methods,
+            "seeds": seeds,
+            "catalog_fp": store.manifest.get("catalog_fp"),
+            "n_steps": int(store.manifest.get("n_steps", 0)),
+            "events_fp": events_fp,
+            "theta_fp": theta_fp,
+        })
+        progress("background probability: no windows")
+        return empty
+
+    window_params = _window_params_map(store.horizon_dir)
+    if not window_params:
+        raise FileNotFoundError(
+            f"No inversion parameters under {store.horizon_dir} for background probability"
+        )
+    default_params = next(iter(window_params.values()))
+    observed_history = pd.concat(
+        [store.training_frame(), store.observed_frame()],
+        ignore_index=True,
+    ).sort_values("time_days")
+
+    rows: list[dict[str, Any]] = []
+    progress("background probability: observed")
+    rows.extend(_p0_rows_for_catalog(
+        store.observed_frame(),
+        source="observed",
+        seed=-1,
+        windows=windows,
+        observed_history=observed_history,
+        window_params=window_params,
+        default_params=default_params,
+    ))
+    for method in methods:
+        for seed in seeds:
+            progress(f"background probability: {method} seed {seed}")
+            rows.extend(_p0_rows_for_catalog(
+                store.event_frame(method, seed),
+                source=method,
+                seed=int(seed),
+                windows=windows,
+                observed_history=observed_history,
+                window_params=window_params,
+                default_params=default_params,
+            ))
+
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        frame = pd.DataFrame(columns=[
+            "source", "seed", "step_index", "time_days", "longitude", "latitude",
+            "magnitude", "mu", "rate", "p0",
+        ])
+    else:
+        frame = frame.sort_values(
+            ["source", "seed", "time_days", "step_index"]
+        ).reset_index(drop=True)
+    frame.to_csv(csv_path, index=False)
+    _write_json(json_path, {
+        "methods": methods,
+        "seeds": seeds,
+        "catalog_fp": store.manifest.get("catalog_fp"),
+        "n_steps": int(store.manifest.get("n_steps", 0)),
+        "events_fp": events_fp,
+        "theta_fp": theta_fp,
+        "n_rows": int(len(frame)),
+    })
+    progress(
+        f"background probability written: {len(frame)} events "
+        f"({csv_path.name})"
+    )
+    return frame
+
+
 def load_analysis(horizon_dir: Path) -> AnalysisStore:
     """Read a horizon cache. Does not recompute anything."""
     horizon_dir = Path(horizon_dir)
@@ -547,8 +874,9 @@ def update_cache(
 
     After intensity / Bayona scores are current, also refreshes
     ``window_tests.csv`` (negative-binomial and binary conditional likelihood)
-    via ``window_distribution_tests``. That secondary cache is reused when its
-    inputs match; rewriting intensity arrays invalidates it.
+    and ``background_probability.csv`` (\(P_0 = \\mu / \\lambda\) at event times).
+    Those secondary caches are reused when their inputs match; rewriting
+    intensity or event files invalidates them.
 
     ``n_realizations`` caps how many catalogs are used per method in each
     window: the lowest seed ids, or every catalog when fewer exist. A window
@@ -612,6 +940,7 @@ def _update_locked(
         window_distribution_tests(
             store, num_simulations=num_simulations, progress=progress,
         )
+        background_probabilities(store, progress=progress)
         return CacheUpdate(cache_dir, int(manifest.get("n_steps", 0)), 0, 0, 0, 0)
 
     import etas.bayona_evaluations as bayona_evaluations
@@ -750,6 +1079,7 @@ def _update_locked(
     window_distribution_tests(
         store, num_simulations=num_simulations, progress=progress,
     )
+    background_probabilities(store, progress=progress)
     return summary
 
 

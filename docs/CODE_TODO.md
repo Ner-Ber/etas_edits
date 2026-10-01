@@ -17,6 +17,29 @@ Maintenance rules: `.cursor/rules/code-todo.mdc`
 
 ## Open
 
+### `unite-hauksson-prerc-output-roots`
+- **Status:** open
+- **Added:** 2026-09-29 19:24
+- **Updated:** 2026-09-29 19:24
+- **Goal:** Merge Hauksson pre-Ridgecrest rolling output trees into one root named `outputs/rolling_continuation_hauksson_pre_ridgecrest` (drop the `_short` sibling).
+- **Context:** Same test set (forecast 2016-05-23 → 2019-07-01, Mc 2.4, same MAGNET `mc_depth`). Horizons do not collide: short has `horizon_0.5d` / `horizon_1d`; long has `horizon_7d` / `60d` / `300d`. Analysis notebooks currently list two `EXPERIMENTS`. Keep **two configs** (run settings differ: short uses yearly inversion reuse / no `pij`; long stores `pij`) but point both at the united `output_root`. **Blocked until** the hanamel seed-refresh job finishes writing under `…_short` (log: `outputs/rolling_continuation_hauksson_pre_ridgecrest_short/horizon_comparison/cache_refresh_all_seeds.log` — wait for `=== DONE ===`). Do not `mv` while that job is running. HGX may still write to the short path until its config is updated.
+- **Acceptance:**
+  - `horizon_0.5d` and `horizon_1d` (with `analysis_cache`) live under `outputs/rolling_continuation_hauksson_pre_ridgecrest/`.
+  - One `horizon_comparison/` rebuilt for that root covering horizons `0.5 1 7 60 300`.
+  - `config/rolling_continuation_hauksson_pre_ridgecrest_short.json` `output_root` points at the united tree (config file may keep `_short` in its name).
+  - Notebooks `compare_rolling_etas_fine_across_horizons.ipynb`, `compare_rolling_etas_fine_horizon_bayona.ipynb`, and `compare_rolling_etas_fine.ipynb` use the single root; no required references to `…_pre_ridgecrest_short` as an output path.
+  - Empty/obsolete `…_short` output dir removed or clearly stubbed; HGX note in `docs/HGX_HAUKSSON_PRERC_SHORT.md` if that campaign continues.
+- **Key paths:**
+  - `outputs/rolling_continuation_hauksson_pre_ridgecrest/`
+  - `outputs/rolling_continuation_hauksson_pre_ridgecrest_short/` (source of 0.5d/1d; retire after move)
+  - `config/rolling_continuation_hauksson_pre_ridgecrest.json`
+  - `config/rolling_continuation_hauksson_pre_ridgecrest_short.json`
+  - `notebooks/compare_rolling_etas_fine_across_horizons.ipynb`
+  - `notebooks/compare_rolling_etas_fine_horizon_bayona.ipynb`
+  - `notebooks/compare_rolling_etas_fine.ipynb`
+  - `runnable_code/cache_horizon_comparison.py`
+  - `docs/HGX_HAUKSSON_PRERC_SHORT.md`
+
 ### `fine-ensemble-parallel-cpu-defaults`
 - **Status:** in_progress
 - **Added:** 2026-09-21
