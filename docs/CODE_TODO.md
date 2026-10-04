@@ -17,6 +17,25 @@ Maintenance rules: `.cursor/rules/code-todo.mdc`
 
 ## Open
 
+### `fine-catalog-magnitude-distribution`
+- **Status:** open
+- **Added:** 2026-10-04 19:45
+- **Updated:** 2026-10-04 19:45
+- **Goal:** Write the magnitude distribution family and its parameters into each FINE realization's output catalog, so a later likelihood does not need another MAGNET forward pass.
+- **Context:** A FINE `forecast_catalog.csv` stores `latitude`, `longitude`, `magnitude`, `time`, and thinning columns (`is_background`, `event_source`, …). `realization_meta.json` records `thinning_magnitude_generator: MAGNET_magnitude` and `thinning_model_dir`, but not the distribution. Magnitudes are draws from a Kumaraswamy mixture (`eq_mag_prediction.forecasting.metrics.kumaraswamy_mixture_instance`); the per-event parameter vector is length `n_model_parameters` (6 for the Hauksson `mc_depth` model) and is shifted/stretched by `user_magnitude_threshold` and `pdf_support_stretch`. That vector is discarded unless `magnet.save_predictions` is true, in which case it goes to a sidecar `magnet_predictions.npz` (`etas/magnet_inference_cache.py` `write_prediction_sidecar`) rather than the catalog. The sidecar has no distribution name and no shift/stretch. `config/rolling_continuation_hauksson_pre_ridgecrest.json` sets `save_predictions` false; `outputs/rolling_continuation_hauksson_pre_ridgecrest/horizon_7d` contains no `magnet_predictions.npz`. The analysis cache (`events/FINE/seed_*.npz`) keeps only `latitude`, `longitude`, `magnitude`, `time_days`. `etas/rolling_analysis.py` `magnitude_likelihoods` therefore re-runs the model for every forecast event. ETAS catalogs are Gutenberg–Richter and are out of scope except that FINE output must say it is not that distribution.
+- **Acceptance:**
+  - New FINE runs write, on the realization output, the distribution name (`kumaraswamy_mixture`), the shift, and the stretch, plus the mixture-parameter vector aligned to each catalog row.
+  - A reader can evaluate the magnitude density with `metrics.kumaraswamy_mixture_instance` and `MinusLoglikelihoodConstShiftStretchLoss`'s shift/stretch from those files alone.
+  - Catalog readers that only need latitude, longitude, magnitude, and time still load existing catalogs that lack the new fields.
+  - A unit test builds a tiny FINE catalog and checks the distribution label and parameter vector round-trip.
+- **Key paths:**
+  - `runnable_code/continuation_ensemble.py` (`forecast_catalog.csv`, `realization_meta.json`)
+  - `runnable_code/run_continuation_models.py` (`save_predictions`, `--save-magnet-predictions`)
+  - `etas/magnet_inference.py` (`predict_magnitudes`, `flush_prediction_buffer`)
+  - `etas/magnet_inference_cache.py` (`write_prediction_sidecar`, `load_magnet_predictions`)
+  - `etas/rolling_analysis.py` (`magnitude_likelihoods`)
+  - `config/rolling_continuation_hauksson_pre_ridgecrest.json`
+
 ### `unite-hauksson-prerc-output-roots`
 - **Status:** open
 - **Added:** 2026-09-29 19:24

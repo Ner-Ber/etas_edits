@@ -11,8 +11,11 @@ event/parameter fingerprints for \(P_0\)).
 should load one horizon directory at a time and concatenate ``store.scores``.
 Window-test rows are on disk as ``window_tests.csv``; call
 ``window_distribution_tests(store)`` to load them (a no-op recompute when
-current). Background probabilities are ``background_probability.csv``; call
-``background_probabilities(store)``.
+current). One row per simulated catalog is ``window_realization_counts.csv``;
+call ``window_realization_counts(store)`` (written on first use). Background
+probabilities are ``background_probability.csv``; call
+``background_probabilities(store)``. Magnitude likelihoods are
+``magnitude_likelihoods.csv``; call ``magnitude_likelihoods(store, ...)``.
 
 The command-line entry point is ``runnable_code/cache_rolling_analysis.py``.
 """
@@ -235,8 +238,17 @@ _WINDOW_TEST_REGION: Any = None
 _WINDOW_TEST_EDGES: np.ndarray | None = None
 _WINDOW_TESTS_CSV = "window_tests.csv"
 _WINDOW_TESTS_JSON = "window_tests.json"
+_REALIZATION_COUNTS_CSV = "window_realization_counts.csv"
 _BG_PROB_CSV = "background_probability.csv"
 _BG_PROB_JSON = "background_probability.json"
+_MAGNITUDE_LIKELIHOODS_CSV = "magnitude_likelihoods.csv"
+_MAGNITUDE_LIKELIHOODS_JSON = "magnitude_likelihoods.json"
+_MAGNITUDE_LIKELIHOODS_PARTIAL_CSV = "magnitude_likelihoods.partial.csv"
+_MAGNITUDE_LIKELIHOODS_PARTIAL_JSON = "magnitude_likelihoods.partial.json"
+_LIKELIHOOD_COLUMNS = [
+    "population", "source", "seed", "time_unix", "magnitude",
+    "fine_likelihood", "etas_likelihood",
+]
 
 
 def _init_window_test_worker(region: Any, magnitude_edges: np.ndarray) -> None:
@@ -839,6 +851,559 @@ def background_probabilities(
     return frame
 
 
+def _magnet_model_dir(config: dict[str, Any], repo_root: Path) -> Path | None:
+    magnet = config.get("magnet")
+    if not isinstance(magnet, dict):
+        return None
+    relative = magnet.get("model_dir")
+    if not relative:
+        return None
+    model_dir = (Path(repo_root) / str(relative)).resolve()
+    if not model_dir.is_dir():
+        return None
+    return model_dir
+
+
+def _magnitude_likelihood_meta(store: AnalysisStore, model_dir: Path) -> dict[str, Any]:
+    return {
+        "model_dir": str(Path(model_dir).resolve()),
+        "seeds": [int(seed) for seed in store.seeds],
+        "methods": list(store.methods),
+        "n_steps": int(store.manifest.get("n_steps", 0)),
+    }
+
+
+def _magnitude_likelihoods_match(
+    json_path: Path,
+    csv_path: Path,
+    meta: dict[str, Any],
+    events_fp: str,
+    theta_fp: str,
+) -> bool:
+    """True when a finished likelihood file matches this horizon.
+
+    Files written by the notebook only store model, seeds, methods, and step
+    count. Those stay valid. Files written here also store event and inversion
+    fingerprints, and a mismatch of either forces a recompute.
+    """
+    if not json_path.is_file() or not csv_path.is_file():
+        return False
+    stored = json.loads(json_path.read_text(encoding="utf-8"))
+    try:
+        same_model = Path(str(stored["model_dir"])).resolve() == Path(meta["model_dir"]).resolve()
+    except (KeyError, OSError):
+        return False
+    if not same_model:
+        return False
+    if [int(seed) for seed in stored.get("seeds", [])] != [int(seed) for seed in meta["seeds"]]:
+        return False
+    if list(stored.get("methods", [])) != list(meta["methods"]):
+        return False
+    if int(stored.get("n_steps", -1)) != int(meta["n_steps"]):
+        return False
+    if "events_fp" in stored and stored["events_fp"] != events_fp:
+        return False
+    if "theta_fp" in stored and stored["theta_fp"] != theta_fp:
+        return False
+    return True
+
+
+def _write_likelihood_frame(path: Path, frame: pd.DataFrame) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    frame.to_csv(tmp, index=False)
+    tmp.replace(path)
+
+
+def _fine_magnitude_density(predictions, magnitudes, shift, stretch) -> np.ndarray:
+    """Per-event density from metrics.kumaraswamy_mixture_instance.
+
+    Same shift, stretch, and log Jacobian as
+    metrics.MinusLoglikelihoodConstShiftStretchLoss.
+    """
+    import tensorflow as tf
+    from eq_mag_prediction.forecasting import metrics
+
+    variable = metrics.kumaraswamy_mixture_instance(
+        np.asarray(predictions, dtype=np.float32)
+    )
+    shifted = (
+        np.asarray(magnitudes, dtype=np.float32).reshape(-1) - np.float32(shift)
+    ) / np.float32(stretch)
+    shifted = tf.maximum(shifted, np.float32(1e-10))
+    log_density = variable.log_prob(tf.cast(shifted, variable.dtype)) - np.log(float(stretch))
+    return np.asarray(np.exp(log_density), dtype=float).reshape(-1)
+
+
+def _gutenberg_richter_likelihood(times, magnitudes, window_beta: pd.DataFrame) -> np.ndarray:
+    """ETAS magnitude density via metrics.gr_likelihood and the window inversion."""
+    from eq_mag_prediction.forecasting import metrics
+
+    times = np.asarray(times, dtype=np.int64).reshape(-1)
+    magnitudes = np.asarray(magnitudes, dtype=float).reshape(-1)
+    starts = window_beta["start_unix"].to_numpy(dtype=np.int64)
+    index = np.searchsorted(starts, times, side="right") - 1
+    index = np.clip(index, 0, len(window_beta) - 1)
+    density = metrics.gr_likelihood(
+        magnitudes,
+        window_beta["beta"].to_numpy(dtype=float)[index],
+        window_beta["mc"].to_numpy(dtype=float)[index],
+    )
+    return np.asarray(density, dtype=float).reshape(-1)
+
+
+def _window_beta_table(cache_dir: Path) -> pd.DataFrame:
+    rows = []
+    for step_path in sorted((cache_dir / "steps").glob("step_*.json")):
+        meta = json.loads(step_path.read_text(encoding="utf-8"))
+        start = pd.to_datetime(meta["forecast_start"])
+        end = pd.to_datetime(meta["forecast_end"])
+        rows.append({
+            "step_index": int(meta["step_index"]),
+            "start_unix": int(start.value // 10**9),
+            "end_unix": int(end.value // 10**9),
+            "beta": float(meta["beta"]),
+            "mc": float(meta["mc"]),
+        })
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return frame
+    return frame.sort_values("step_index").reset_index(drop=True)
+
+
+def _extend_observed_window(session, catalog, catalog_times, history_columns, start_unix, end_unix) -> None:
+    in_window = (catalog_times >= start_unix) & (catalog_times < end_unix)
+    if not np.any(in_window):
+        return
+    observed_window = catalog.loc[in_window, history_columns].copy()
+    observed_window["time"] = catalog_times[in_window]
+    session.extend_likelihood_history(observed_window)
+
+
+def _compute_magnitude_likelihoods(
+    store: AnalysisStore,
+    model_dir: Path,
+    meta: dict[str, Any],
+    events_fp: str,
+    theta_fp: str,
+    progress: Callable[[str], None],
+) -> pd.DataFrame:
+    """Score observed splits and every loaded realization, checkpointing each window."""
+    import tensorflow as tf
+
+    import etas.magnet_inference as magnet_inference
+    import etas.magnet_inference_cache as magnet_inference_cache
+    from eq_mag_prediction.forecasting import one_region_model
+    from eq_mag_prediction.forecasting import training_examples
+
+    for device in tf.config.list_physical_devices("GPU"):
+        try:
+            tf.config.experimental.set_memory_growth(device, True)
+        except RuntimeError:
+            pass
+
+    cache_dir = store.cache_dir
+    csv_path = cache_dir / _MAGNITUDE_LIKELIHOODS_CSV
+    json_path = cache_dir / _MAGNITUDE_LIKELIHOODS_JSON
+    partial_csv = cache_dir / _MAGNITUDE_LIKELIHOODS_PARTIAL_CSV
+    partial_json = cache_dir / _MAGNITUDE_LIKELIHOODS_PARTIAL_JSON
+    window_beta = _window_beta_table(cache_dir)
+    if window_beta.empty:
+        raise FileNotFoundError(f"No step parameter files under {cache_dir / 'steps'}")
+
+    finished_meta = {
+        **meta,
+        "events_fp": events_fp,
+        "theta_fp": theta_fp,
+    }
+    partial_meta = json.loads(partial_json.read_text(encoding="utf-8")) if partial_json.is_file() else {}
+    resume = (
+        partial_csv.is_file()
+        and partial_meta.get("model_dir") == meta["model_dir"]
+        and [int(seed) for seed in partial_meta.get("seeds", [])] == meta["seeds"]
+        and list(partial_meta.get("methods", [])) == meta["methods"]
+        and int(partial_meta.get("n_steps", -1)) == int(meta["n_steps"])
+        and partial_meta.get("events_fp") == events_fp
+        and partial_meta.get("theta_fp") == theta_fp
+    )
+    observed_done = bool(partial_meta.get("observed", False)) if resume else False
+    if resume and observed_done:
+        progress(f"magnitude likelihoods resuming from {partial_csv.name}")
+        rows = pd.read_csv(partial_csv)
+        done_steps = {int(step) for step in partial_meta.get("completed_steps", [])}
+    else:
+        rows = pd.DataFrame(columns=_LIKELIHOOD_COLUMNS)
+        done_steps = set()
+        observed_done = False
+    if observed_done and set(window_beta["step_index"].astype(int)) <= done_steps:
+        _write_likelihood_frame(csv_path, rows)
+        _write_json(json_path, finished_meta)
+        partial_csv.unlink(missing_ok=True)
+        partial_json.unlink(missing_ok=True)
+        progress(f"magnitude likelihoods written: {len(rows)} events ({csv_path.name})")
+        return rows
+
+    def _flush(observed: bool) -> None:
+        _write_likelihood_frame(partial_csv, rows)
+        _write_json(partial_json, {
+            **finished_meta,
+            "observed": observed,
+            "completed_steps": sorted(done_steps),
+        })
+
+    magnet_session = magnet_inference.get_magnet_generator(model_dir).session
+    magnet_session.warm()
+    domain = magnet_session.original_domain
+    shift = float(magnet_session.magnitude_shift)
+    stretch = float(magnet_session.pdf_support_stretch)
+
+    if not observed_done:
+        labels = training_examples.magnitude_prediction_labels(domain)
+        features_and_models = one_region_model.load_features_and_construct_models(
+            domain,
+            magnet_session.all_encoders,
+            str(model_dir),
+            cache_dir=str(magnet_session.cache_dir),
+            scaler_saving_dir=None,
+        )
+        event_times = magnet_inference_cache.catalog_times_to_unix_seconds(domain.event_times)
+        event_magnitudes = np.asarray(domain.event_magnitudes, dtype=float)
+        observed_rows = []
+        split_bounds = (
+            ("before_test", "train", domain.train_start_time, domain.validation_start_time),
+            ("before_test", "validation", domain.validation_start_time, domain.test_start_time),
+            ("test", "test", domain.test_start_time, domain.test_end_time),
+        )
+        for population, set_name, start_time, end_time in split_bounds:
+            mask = (event_times >= int(start_time)) & (event_times < int(end_time))
+            magnitudes = event_magnitudes[mask]
+            label_count = int(np.asarray(getattr(labels, f"{set_name}_labels")).reshape(-1).size)
+            if magnitudes.size != label_count:
+                raise RuntimeError(
+                    f"{set_name} feature rows ({label_count}) do not match "
+                    f"catalog events ({magnitudes.size})"
+                )
+            slice_index = {"train": 0, "validation": 1, "test": 2}[set_name]
+            predictions = np.asarray(
+                magnet_session.loaded_model.predict(
+                    one_region_model.features_in_order(features_and_models, slice_index),
+                    verbose=0,
+                )
+            )
+            times = event_times[mask]
+            observed_rows.append(pd.DataFrame({
+                "population": population,
+                "source": "observed",
+                "seed": -1,
+                "time_unix": times.astype(np.int64),
+                "magnitude": magnitudes,
+                "fine_likelihood": _fine_magnitude_density(predictions, magnitudes, shift, stretch),
+                "etas_likelihood": _gutenberg_richter_likelihood(times, magnitudes, window_beta),
+            }))
+        observed = pd.concat(observed_rows, ignore_index=True)
+        test_times = observed.loc[observed["population"] == "test", "time_unix"].to_numpy(dtype=np.int64)
+        starts = window_beta["start_unix"].to_numpy(dtype=np.int64)
+        ends = window_beta["end_unix"].to_numpy(dtype=np.int64)
+        outside_test = int(np.sum((test_times < int(starts[0])) | (test_times >= int(ends[-1]))))
+        if outside_test:
+            progress(
+                f"{outside_test} test events fall outside the cached forecast windows; "
+                "their ETAS density uses the nearest window's Gutenberg–Richter parameters."
+            )
+        rows = pd.concat([observed, rows], ignore_index=True)
+        observed_done = True
+        _flush(True)
+
+    catalog = domain.earthquakes_catalog
+    catalog_times = magnet_inference_cache.catalog_times_to_unix_seconds(catalog["time"])
+    history_columns = [
+        column for column in ("longitude", "latitude", "magnitude", "depth")
+        if column in catalog.columns
+    ]
+    pre_test_mask = catalog_times < int(domain.test_start_time)
+    pre_test = catalog.loc[pre_test_mask, history_columns].copy()
+    pre_test["time"] = catalog_times[pre_test_mask]
+    magnet_session.set_likelihood_history(pre_test)
+
+    catalogs: dict[tuple[str, int], tuple[pd.DataFrame, np.ndarray] | None] = {}
+    for method in meta["methods"]:
+        for seed in meta["seeds"]:
+            frame = store.event_frame(method, int(seed))
+            if len(frame) == 0 or frame["time_days"].isna().all():
+                catalogs[(method, int(seed))] = None
+                continue
+            event_clock = pd.Timestamp("1970-01-01") + pd.to_timedelta(frame["time_days"], unit="D")
+            unix = np.asarray(
+                magnet_inference_cache.catalog_times_to_unix_seconds(event_clock),
+                dtype=np.int64,
+            )
+            catalogs[(method, int(seed))] = (frame, unix)
+
+    n_windows = len(window_beta)
+    forecast_parts: list[pd.DataFrame] = []
+    for window_number, window in window_beta.iterrows():
+        start_unix = int(window["start_unix"])
+        end_unix = int(window["end_unix"])
+        step_index = int(window["step_index"])
+        if step_index in done_steps:
+            _extend_observed_window(
+                magnet_session, catalog, catalog_times, history_columns, start_unix, end_unix,
+            )
+            continue
+        if window_number % 10 == 0 or window_number == n_windows - 1:
+            progress(f"magnitude likelihoods: window {step_index + 1}/{n_windows}")
+        for method in meta["methods"]:
+            for seed in meta["seeds"]:
+                prepared = catalogs[(method, int(seed))]
+                if prepared is None:
+                    continue
+                frame, unix = prepared
+                chosen = np.flatnonzero((unix >= start_unix) & (unix < end_unix))
+                if chosen.size == 0:
+                    continue
+                part = frame.iloc[chosen][["longitude", "latitude", "magnitude"]].copy()
+                part["time"] = unix[chosen]
+                forecast_parts.append(pd.DataFrame({
+                    "population": "forecast",
+                    "source": method,
+                    "seed": int(seed),
+                    "time_unix": part["time"].to_numpy(dtype=np.int64),
+                    "magnitude": part["magnitude"].to_numpy(dtype=float),
+                    "fine_likelihood": _fine_magnitude_density(
+                        magnet_session.mixture_parameters(part),
+                        part["magnitude"],
+                        shift,
+                        stretch,
+                    ),
+                    "etas_likelihood": _gutenberg_richter_likelihood(
+                        part["time"], part["magnitude"], window_beta,
+                    ),
+                }))
+        _extend_observed_window(
+            magnet_session, catalog, catalog_times, history_columns, start_unix, end_unix,
+        )
+        done_steps.add(step_index)
+        if forecast_parts:
+            rows = pd.concat([rows, *forecast_parts], ignore_index=True)
+            forecast_parts = []
+        _flush(True)
+
+    if forecast_parts:
+        rows = pd.concat([rows, *forecast_parts], ignore_index=True)
+    _write_likelihood_frame(csv_path, rows)
+    _write_json(json_path, finished_meta)
+    partial_csv.unlink(missing_ok=True)
+    partial_json.unlink(missing_ok=True)
+    progress(f"magnitude likelihoods written: {len(rows)} events ({csv_path.name})")
+    return rows
+
+
+def magnitude_likelihoods(
+    store: AnalysisStore,
+    *,
+    config_path: Path,
+    repo_root: Path,
+    force: bool = False,
+    progress: Callable[[str], None] | None = None,
+) -> pd.DataFrame:
+    """FINE and ETAS magnitude densities for the labeled catalog and every realization.
+
+    Results are ``analysis_cache/magnitude_likelihoods.csv``. A finished file
+    for the same model, seeds, methods, and step count is loaded. While a new
+    file is being built, each finished window is appended to
+    ``magnitude_likelihoods.partial.csv`` so a stopped run can continue.
+    """
+    progress = progress or (lambda _message: None)
+    config = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    csv_path = store.cache_dir / _MAGNITUDE_LIKELIHOODS_CSV
+    json_path = store.cache_dir / _MAGNITUDE_LIKELIHOODS_JSON
+    model_dir = _magnet_model_dir(config, Path(repo_root))
+    if model_dir is None:
+        progress("magnitude likelihoods skipped: config has no MAGNET model directory")
+        if csv_path.is_file() and not force:
+            return pd.read_csv(csv_path)
+        return pd.DataFrame(columns=_LIKELIHOOD_COLUMNS)
+
+    meta = _magnitude_likelihood_meta(store, model_dir)
+    events_fp = _background_prob_events_fp(store.cache_dir, meta["methods"], meta["seeds"])
+    theta_fp = _step_theta_fp(store.cache_dir)
+    if (
+        not force
+        and _magnitude_likelihoods_match(json_path, csv_path, meta, events_fp, theta_fp)
+    ):
+        progress(
+            f"magnitude likelihoods cached: {int(meta['n_steps'])} steps, "
+            f"{len(meta['methods'])} methods, {len(meta['seeds'])} seeds"
+        )
+        return pd.read_csv(csv_path)
+    return _compute_magnitude_likelihoods(
+        store, model_dir, meta, events_fp, theta_fp, progress,
+    )
+
+
+def window_realization_counts(
+    store: AnalysisStore,
+    *,
+    force: bool = False,
+    progress: Callable[[str], None] | None = None,
+) -> pd.DataFrame:
+    """One row per saved catalog in each forecast window.
+
+    ``n_events`` counts catalog events inside the window. ``n_forecast`` is
+    that realization's expected count: background plus its own triggered
+    field, summed over the forecast grid and scaled by the Gutenberg–Richter
+    magnitude mass. ``n_observed`` and the delta columns are the window
+    values, repeated across seeds. The table is written to
+    ``analysis_cache/window_realization_counts.csv`` and reused unless
+    ``force`` is set.
+    """
+    import etas.csep_utils as csep_utils
+
+    progress = progress or (lambda _message: None)
+    path = store.cache_dir / _REALIZATION_COUNTS_CSV
+    if path.is_file() and not force:
+        progress(f"realization counts cached: {path.name}")
+        return _read_realization_counts(path)
+
+    origin = pd.Timestamp("1970-01-01")
+    windows = store.windows()
+    if windows.empty:
+        frame = pd.DataFrame(
+            columns=[
+                "step_index", "forecast_start", "forecast_end", "method", "seed",
+                "n_events", "n_forecast", "n_observed",
+                "nbd_delta1", "nbd_delta2", "poisson_delta1", "poisson_delta2",
+            ]
+        )
+        frame.to_csv(path, index=False)
+        return frame
+
+    step_index = windows["step_index"].to_numpy(dtype=int)
+    start_days = (
+        (windows["forecast_start"] - origin) / pd.Timedelta("1D")
+    ).to_numpy(dtype=float)
+    end_days = (
+        (windows["forecast_end"] - origin) / pd.Timedelta("1D")
+    ).to_numpy(dtype=float)
+    pieces = []
+    for method in store.methods:
+        for seed in store.seeds:
+            days = np.sort(
+                store.event_frame(method, int(seed))["time_days"].to_numpy(dtype=float)
+            )
+            left = np.searchsorted(days, start_days, side="right")
+            right = np.searchsorted(days, end_days, side="right")
+            pieces.append(pd.DataFrame({
+                "step_index": step_index,
+                "forecast_start": windows["forecast_start"].to_numpy(),
+                "forecast_end": windows["forecast_end"].to_numpy(),
+                "method": method,
+                "seed": int(seed),
+                "n_events": (right - left).astype(int),
+            }))
+    frame = pd.concat(pieces, ignore_index=True)
+
+    grid = np.load(store.cache_dir / "grid.npz")
+    magnitude_edges = np.asarray(grid["magnitude_edges"], dtype=float)
+    forecast_steps: list[int] = []
+    forecast_methods: list[str] = []
+    forecast_seeds: list[int] = []
+    forecast_counts: list[float] = []
+    step_paths = sorted((store.cache_dir / "steps").glob("step_*.json"))
+    for index, meta_path in enumerate(step_paths, start=1):
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        with np.load(meta_path.with_suffix(".npz")) as arrays:
+            probabilities = csep_utils.gr_magnitude_probabilities(
+                magnitude_edges, float(meta["beta"]), float(meta["mc"]),
+            )
+            magnitude_mass = float(np.sum(probabilities))
+            background_sum = float(np.sum(arrays["background"]))
+            names = set(arrays.files)
+            step = int(meta["step_index"])
+            for method in store.methods:
+                for seed in store.seeds:
+                    name = f"{method}__{int(seed)}"
+                    if name not in names:
+                        continue
+                    triggered_sum = float(np.sum(arrays[name]))
+                    forecast_steps.append(step)
+                    forecast_methods.append(method)
+                    forecast_seeds.append(int(seed))
+                    forecast_counts.append((background_sum + triggered_sum) * magnitude_mass)
+        if index == 1 or index % 250 == 0 or index == len(step_paths):
+            progress(f"realization expected counts: {index}/{len(step_paths)} steps")
+    if forecast_steps:
+        frame = frame.merge(
+            pd.DataFrame({
+                "step_index": forecast_steps,
+                "method": forecast_methods,
+                "seed": forecast_seeds,
+                "n_forecast": forecast_counts,
+            }),
+            on=["step_index", "method", "seed"],
+            how="left",
+        )
+    else:
+        frame["n_forecast"] = np.nan
+
+    tests_path = store.cache_dir / _WINDOW_TESTS_CSV
+    if tests_path.is_file():
+        tests = pd.read_csv(tests_path)
+        keep = [
+            column for column in (
+                "step_index", "method", "n_observed", "nbd_delta1", "nbd_delta2",
+            )
+            if column in tests.columns
+        ]
+        frame = frame.merge(tests[keep], on=["step_index", "method"], how="left")
+    elif "n_observed" not in frame.columns:
+        frame["n_observed"] = np.nan
+
+    scores = store.scores
+    score_columns = [
+        column for column in ("poisson_delta1", "poisson_delta2")
+        if column in scores.columns
+    ]
+    if score_columns:
+        frame = frame.merge(
+            scores[["step_index", "method", *score_columns]],
+            on=["step_index", "method"],
+            how="left",
+        )
+    if "n_observed" not in frame.columns and "n_observed" in scores.columns:
+        frame = frame.merge(
+            scores[["step_index", "method", "n_observed"]],
+            on=["step_index", "method"],
+            how="left",
+        )
+
+    column_order = [
+        "step_index", "forecast_start", "forecast_end", "method", "seed",
+        "n_events", "n_forecast", "n_observed",
+        "nbd_delta1", "nbd_delta2", "poisson_delta1", "poisson_delta2",
+    ]
+    for column in column_order:
+        if column not in frame.columns:
+            frame[column] = np.nan
+    frame = frame[column_order].sort_values(
+        ["step_index", "method", "seed"],
+    ).reset_index(drop=True)
+    frame.to_csv(path, index=False)
+    progress(
+        f"realization counts written: {len(frame)} rows, "
+        f"{frame['step_index'].nunique()} windows ({path.name})"
+    )
+    return _read_realization_counts(path)
+
+
+def _read_realization_counts(path: Path) -> pd.DataFrame:
+    frame = pd.read_csv(path)
+    for column in ("forecast_start", "forecast_end"):
+        if column in frame.columns:
+            frame[column] = pd.to_datetime(frame[column], format="mixed")
+    return frame
+
+
 def load_analysis(horizon_dir: Path) -> AnalysisStore:
     """Read a horizon cache. Does not recompute anything."""
     horizon_dir = Path(horizon_dir)
@@ -941,6 +1506,9 @@ def _update_locked(
             store, num_simulations=num_simulations, progress=progress,
         )
         background_probabilities(store, progress=progress)
+        magnitude_likelihoods(
+            store, config_path=config_path, repo_root=repo_root, progress=progress,
+        )
         return CacheUpdate(cache_dir, int(manifest.get("n_steps", 0)), 0, 0, 0, 0)
 
     import etas.bayona_evaluations as bayona_evaluations
@@ -1080,6 +1648,9 @@ def _update_locked(
         store, num_simulations=num_simulations, progress=progress,
     )
     background_probabilities(store, progress=progress)
+    magnitude_likelihoods(
+        store, config_path=config_path, repo_root=repo_root, progress=progress,
+    )
     return summary
 
 

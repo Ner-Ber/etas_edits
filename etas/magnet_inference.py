@@ -435,6 +435,101 @@ class MagnetInferenceSession:
             domain.earthquakes_catalog = earthquakes_catalog
         return sampled_magnitudes
 
+    def set_likelihood_history(self, catalog: pd.DataFrame) -> None:
+        """Set the incremental history used when scoring magnitude likelihoods."""
+        if not self._warmed:
+            self.warm()
+        if self.all_encoders is None:
+            raise RuntimeError("MAGNET session has no encoders; call warm() first")
+        if not magnet_encoder_incremental.incremental_encoders_enabled():
+            raise RuntimeError(
+                "Magnitude likelihoods on a forecast catalog need incremental encoders"
+            )
+        if self._incremental_state is None:
+            self._incremental_state = magnet_encoder_incremental.IncrementalEncoderState(
+                self.all_encoders
+            )
+        self._incremental_state.sync_catalog_extension(catalog)
+        self._thinning_features_warm = True
+
+    def extend_likelihood_history(self, events: pd.DataFrame) -> None:
+        """Append observed events, in time order, to the likelihood history."""
+        if self._incremental_state is None:
+            raise RuntimeError("Call set_likelihood_history before extending it")
+        if len(events) == 0:
+            return
+        times = magnet_inference_cache.catalog_times_to_unix_seconds(events["time"])
+        order = np.argsort(times, kind="mergesort")
+        for position in order:
+            row = events.iloc[int(position)]
+            payload = {
+                "time": pd.to_datetime(int(times[int(position)]), unit="s"),
+                "longitude": float(row["longitude"]),
+                "latitude": float(row["latitude"]),
+                "magnitude": float(row["magnitude"]),
+            }
+            if "depth" in events.columns and pd.notna(row["depth"]):
+                payload["depth"] = float(row["depth"])
+            self._incremental_state.append_row(payload)
+
+    def mixture_parameters(self, events: pd.DataFrame) -> np.ndarray:
+        """Kumaraswamy mixture parameters for each row, in row order.
+
+        The density of those parameters is ``metrics.kumaraswamy_mixture_instance``.
+        Rows are evaluated in time order and each magnitude is appended, on a copy
+        of the history, before the next row.
+        """
+        if not self._warmed:
+            self.warm()
+        if self._incremental_state is None:
+            raise RuntimeError("Call set_likelihood_history before scoring magnitudes")
+        n_events = len(events)
+        if n_events == 0:
+            return np.zeros((0, 0), dtype=np.float32)
+
+        saved = self._incremental_state
+        self._incremental_state = saved.copy()
+        try:
+            times, locations = magnet_inference_cache.aftershock_times_and_locations(events)
+            magnitudes = np.asarray(events["magnitude"], dtype=float).reshape(-1)
+            order = np.argsort(times, kind="mergesort")
+            pred_rows: list[np.ndarray] = []
+            for position in order:
+                time_value = int(times[int(position)])
+                lng = float(locations[int(position), 0])
+                lat = float(locations[int(position), 1])
+                loc = geometry.Point(lng=lng, lat=lat)
+                raw_features = self._incremental_state.features_for_example(time_value, loc)
+                model_inputs = magnet_encoder_incremental.flatten_and_scale_altered_features(
+                    raw_features,
+                    self.all_encoders,
+                    self.scalers,
+                    self.location_scalers,
+                    {time_value: [[loc]]},
+                )
+                model_prediction = self._model_forward(model_inputs)
+                pred = np.asarray(
+                    model_prediction.numpy()
+                    if hasattr(model_prediction, "numpy")
+                    else model_prediction,
+                    dtype=np.float32,
+                ).reshape(1, -1)
+                pred_rows.append(pred)
+                self._incremental_state.append_row(
+                    {
+                        "time": pd.to_datetime(time_value, unit="s"),
+                        "longitude": lng,
+                        "latitude": lat,
+                        "magnitude": float(magnitudes[int(position)]),
+                    }
+                )
+            predictions = np.concatenate(pred_rows, axis=0)
+            ordered = np.empty_like(predictions)
+            ordered[order] = predictions
+            return ordered
+        finally:
+            self._incremental_state = saved
+
 
 class MagnetMagnitudeGenerator:
     """Callable magnitude generator backed by a cached :class:`MagnetInferenceSession`."""

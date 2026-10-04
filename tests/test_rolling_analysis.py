@@ -50,6 +50,30 @@ def test_window_tests_match_requires_the_same_catalog_and_simulation_count(tmp_p
     )
 
 
+def test_magnitude_likelihood_cache_keeps_a_notebook_file_without_fingerprints(tmp_path):
+    meta = {
+        "model_dir": str(tmp_path / "model"),
+        "seeds": [10, 11],
+        "methods": ["etas", "FINE"],
+        "n_steps": 2,
+    }
+    (tmp_path / "model").mkdir()
+    json_path = tmp_path / "magnitude_likelihoods.json"
+    csv_path = tmp_path / "magnitude_likelihoods.csv"
+    json_path.write_text(json.dumps(meta), encoding="utf-8")
+    pd.DataFrame({"population": ["test"], "fine_likelihood": [1.0]}).to_csv(csv_path, index=False)
+    assert rolling_analysis._magnitude_likelihoods_match(
+        json_path, csv_path, meta, "events", "theta",
+    )
+    stamped = dict(meta)
+    stamped["events_fp"] = "events"
+    stamped["theta_fp"] = "other"
+    json_path.write_text(json.dumps(stamped), encoding="utf-8")
+    assert not rolling_analysis._magnitude_likelihoods_match(
+        json_path, csv_path, meta, "events", "theta",
+    )
+
+
 def test_legacy_window_tests_record_seeds_without_rewriting_results(tmp_path):
     json_path = tmp_path / "window_tests.json"
     json_path.write_text(json.dumps({"num_simulations": 200}), encoding="utf-8")
@@ -260,3 +284,65 @@ def test_n_realizations_uses_the_lowest_seeds_and_keeps_a_larger_cache(tmp_path:
     )
     assert kept.up_to_date
     assert rolling_analysis.load_analysis(horizon).seeds == [1, 2]
+
+
+def test_window_realization_counts_events_inside_the_window(tmp_path):
+    cache = tmp_path / "analysis_cache"
+    (cache / "steps").mkdir(parents=True)
+    (cache / "events" / "etas").mkdir(parents=True)
+    np.savez_compressed(
+        cache / "events" / "etas" / "seed_0.npz",
+        longitude=np.zeros(3, dtype=np.float32),
+        latitude=np.zeros(3, dtype=np.float32),
+        magnitude=np.full(3, 3.0, dtype=np.float32),
+        time_days=np.array([1.0, 1.5, 2.0], dtype=np.float64),
+    )
+    np.savez_compressed(
+        cache / "grid.npz",
+        magnitude_edges=np.array([1.0]),
+        origins=np.zeros((2, 2)),
+        dh=np.array(0.1),
+    )
+    (cache / "steps" / "step_000.json").write_text(json.dumps({
+        "step_index": 0,
+        "forecast_start": "1970-01-02T00:00:00",
+        "forecast_end": "1970-01-03T00:00:00",
+        "beta": 1.0,
+        "mc": 1.0,
+    }), encoding="utf-8")
+    np.savez_compressed(
+        cache / "steps" / "step_000.npz",
+        background=np.array([1.0, 1.0], dtype=np.float32),
+        **{"etas__0": np.array([1.5, 0.5], dtype=np.float32)},
+    )
+    pd.DataFrame({
+        "step_index": [0],
+        "forecast_start": ["1970-01-02T00:00:00"],
+        "forecast_end": ["1970-01-03T00:00:00"],
+        "method": ["etas"],
+        "n_observed": [4.0],
+        "poisson_delta1": [0.2],
+        "poisson_delta2": [0.8],
+    }).to_csv(cache / "scores.csv", index=False)
+    pd.DataFrame({
+        "step_index": [0],
+        "method": ["etas"],
+        "n_observed": [4.0],
+        "nbd_delta1": [0.3],
+        "nbd_delta2": [0.7],
+    }).to_csv(cache / "window_tests.csv", index=False)
+    store = rolling_analysis.AnalysisStore(
+        tmp_path,
+        cache,
+        {"methods": ["etas"], "seeds": [0], "dh": 0.1, "version": 1},
+    )
+    frame = rolling_analysis.window_realization_counts(store)
+    assert len(frame) == 1
+    row = frame.iloc[0]
+    assert int(row["n_events"]) == 2
+    assert row["n_forecast"] == pytest.approx(4.0)
+    assert row["n_observed"] == pytest.approx(4.0)
+    assert row["nbd_delta1"] == pytest.approx(0.3)
+    assert row["poisson_delta2"] == pytest.approx(0.8)
+    again = rolling_analysis.window_realization_counts(store)
+    assert int(again.iloc[0]["n_events"]) == 2
