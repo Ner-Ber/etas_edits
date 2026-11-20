@@ -1,0 +1,12 @@
+# Strip cell outputs and volatile execution metadata in git while keeping
+# rendered outputs intact in the local working tree.
+# Enable on any clone with:
+#   git config filter.strip-notebook-output.clean "python3 scripts/strip_notebook_outputs.py"
+#   git config filter.strip-notebook-output.smudge cat
+notebooks/compare_rolling_etas_fine_across_horizons.ipynb filter=strip-notebook-output
+notebooks/compare_rolling_etas_fine_horizon_bayona.ipynb filter=strip-notebook-output
+notebooks/present_rolling_horizon_windows.ipynb filter=strip-notebook-output
+notebooks/fine_slides_figures.ipynb filter=strip-notebook-output
+notebooks/fine_slides_figures_flawed_short_featurestate.ipynb filter=strip-notebook-output
+notebooks/per_window_stm_loglikelihood.ipynb filter=strip-notebook-output
+notebooks/debug_residual_short_mag_ll.ipynb filter=strip-notebook-output
