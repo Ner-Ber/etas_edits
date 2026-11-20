@@ -143,3 +143,6 @@ dmypy.json
 # Pyre type checker
 .pyre/
 input_data/etas_converted_jma.csv
+input_data/anss_comcat_relm_etas.csv
+rolling_continuation_hauksson_pre_ridgecrest_short_v2/
+notebooks/*.html
