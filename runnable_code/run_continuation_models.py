@@ -880,6 +880,21 @@ def resolve_magnet_model_dir(
     return pathlib.Path(model_dir_str)
 
 
+def resolve_step_rng_seed(seed: int, cfg: dict) -> tuple[int, int | None]:
+    """Return ``(rng_seed, step_index)`` for a realization.
+
+    Standalone runs (no ``step_index`` in ``cfg``) seed directly with ``seed``.
+    Rolling runs derive an independent 31-bit ``rng_seed`` from
+    ``(seed, step_index)`` so consecutive rolling windows do not repeat the
+    same initial random draws while keeping the folder label ``seed_<seed>``.
+    """
+    raw_step_index = cfg.get("step_index")
+    if raw_step_index is None:
+        return int(seed), None
+    step_index = int(raw_step_index)
+    return utility_functions.derive_step_rng_seed(seed, step_index), step_index
+
+
 def expected_meta_for_method(
     *,
     seed: int,
@@ -889,6 +904,8 @@ def expected_meta_for_method(
     a_h_resolution: int,
     magnet_model_dir: pathlib.Path | None,
     max_forecast_events: int | None = None,
+    rng_seed: int | None = None,
+    step_index: int | None = None,
 ) -> dict:
     meta = ens.expected_realization_meta(
         seed=seed,
@@ -898,6 +915,10 @@ def expected_meta_for_method(
         timewindow_end=cfg["timewindow_end"],
         testwindow_end=cfg["testwindow_end"],
     )
+    if rng_seed is not None:
+        meta["rng_seed"] = int(rng_seed)
+    if step_index is not None:
+        meta["step_index"] = int(step_index)
     if max_forecast_events is not None:
         meta["max_forecast_events"] = int(max_forecast_events)
     if method == "thinning":
@@ -1345,6 +1366,7 @@ def main(argv: list[str] | None = None) -> int:
 
         for seed in seeds:
             run_dir = realization_dir(output_root, method, inv_id, seed)
+            rng_seed, step_index = resolve_step_rng_seed(seed, cfg)
             expected = expected_meta_for_method(
                 seed=seed,
                 inv_id=inv_id,
@@ -1353,6 +1375,8 @@ def main(argv: list[str] | None = None) -> int:
                 a_h_resolution=a_h_resolution,
                 magnet_model_dir=magnet_model_dir,
                 max_forecast_events=max_forecast_events,
+                rng_seed=rng_seed if step_index is not None else None,
+                step_index=step_index,
             )
             cached_dir = find_cached_run_dir(
                 output_root,
@@ -1373,8 +1397,14 @@ def main(argv: list[str] | None = None) -> int:
                 n_cached += 1
                 continue
 
-            print(f"  seed={seed}: simulating → {run_dir}", flush=True)
-            utility_functions.seed_forecast_rng(seed)
+            if step_index is not None:
+                print(
+                    f"  seed={seed} (step={step_index}, rng_seed={rng_seed}): simulating → {run_dir}",
+                    flush=True,
+                )
+            else:
+                print(f"  seed={seed}: simulating → {run_dir}", flush=True)
+            utility_functions.seed_forecast_rng(rng_seed)
             etas_catalog, thinning_catalog = compare.run_forecasts(
                 etas_inversion=etas_inversion,
                 history_df=history_df,
@@ -1388,7 +1418,7 @@ def main(argv: list[str] | None = None) -> int:
                 forecast_end_dt=forecast_end_dt,
                 forecast_start_t=forecast_start_t,
                 forecast_end_t=forecast_end_t,
-                seed=seed,
+                seed=rng_seed,
                 a_h_resolution=a_h_resolution,
                 thinning_magnitude_generator=thinning_mag_gen,
                 methods=forecast_methods,

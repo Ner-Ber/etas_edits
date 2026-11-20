@@ -6,6 +6,7 @@ import json
 import warnings
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -1031,4 +1032,183 @@ def test_apply_encoder_filter_overrides(
     assert "target_catalog.earthquake_criterion = @is_in_magnitude_range" in text
     assert "is_in_magnitude_range.min_magnitude = 3.6" in text
     assert "RecentEarthquakesEncoder.use_depth_as_feature = False" in text
+
+
+def test_resolve_step_rng_seed_and_cache_compatibility(tmp_path: Path) -> None:
+    mod = _load_runner()
+    base_cfg = {
+        "timewindow_end": "2016-05-23 23:05:46",
+        "testwindow_end": "2016-05-24 11:05:46",
+    }
+
+    # Standalone (no step_index): uses seed directly and stays compatible with old metas.
+    standalone_rng, standalone_step = mod.resolve_step_rng_seed(16, base_cfg)
+    assert standalone_rng == 16
+    assert standalone_step is None
+    standalone_meta = mod.expected_meta_for_method(
+        seed=16,
+        inv_id="abc",
+        method="FINE",
+        cfg=base_cfg,
+        a_h_resolution=500,
+        magnet_model_dir=Path("/tmp/model"),
+    )
+    assert "rng_seed" not in standalone_meta
+    assert "step_index" not in standalone_meta
+
+    run_dir = tmp_path / "FINE" / "inv_abc" / "seed_16"
+    run_dir.mkdir(parents=True)
+    (run_dir / "forecast_catalog.csv").write_text("magnitude\n3.0\n", encoding="utf-8")
+    (run_dir / "realization_meta.json").write_text(
+        json.dumps(standalone_meta), encoding="utf-8"
+    )
+    assert mod.cache_hit(run_dir, standalone_meta, force_rerun=False) is True
+
+    # Rolling (step_index set): derives per-step rng_seed and rejects stale caches missing rng_seed.
+    rolling_cfg_0 = {**base_cfg, "step_index": 0}
+    rolling_cfg_1 = {**base_cfg, "step_index": 1}
+    rng_0, step_0 = mod.resolve_step_rng_seed(16, rolling_cfg_0)
+    rng_1, step_1 = mod.resolve_step_rng_seed(16, rolling_cfg_1)
+    assert step_0 == 0 and step_1 == 1
+    assert rng_0 != rng_1
+
+    rolling_meta_0 = mod.expected_meta_for_method(
+        seed=16,
+        inv_id="abc",
+        method="FINE",
+        cfg=rolling_cfg_0,
+        a_h_resolution=500,
+        magnet_model_dir=Path("/tmp/model"),
+        rng_seed=rng_0,
+        step_index=step_0,
+    )
+    assert rolling_meta_0["seed"] == 16
+    assert rolling_meta_0["rng_seed"] == rng_0
+    assert rolling_meta_0["step_index"] == 0
+    assert mod.cache_hit(run_dir, rolling_meta_0, force_rerun=False) is False
+
+    (run_dir / "realization_meta.json").write_text(
+        json.dumps(rolling_meta_0), encoding="utf-8"
+    )
+    assert mod.cache_hit(run_dir, rolling_meta_0, force_rerun=False) is True
+
+
+def test_main_rolling_step_seeds_with_derived_rng_seed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mod = _load_runner()
+    catalog = tmp_path / "cat.csv"
+    catalog.write_text(
+        "latitude,longitude,time,magnitude\n"
+        "34.0,-118.0,2016-05-20 00:00:00,3.0\n",
+        encoding="utf-8",
+    )
+    poly = tmp_path / "poly.npy"
+    np.save(
+        poly,
+        np.array([[33.0, -119.0], [33.0, -117.0], [35.0, -117.0], [35.0, -119.0]]),
+    )
+    out_dir = tmp_path / "step_005"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cfg_path = tmp_path / "step_cfg.json"
+    cfg_path.write_text(
+        json.dumps(
+            {
+                "fn_catalog": str(catalog),
+                "shape_coords": str(poly),
+                "auxiliary_start": "2016-05-01 00:00:00",
+                "timewindow_start": "2016-05-10 00:00:00",
+                "timewindow_end": "2016-05-23 23:05:46",
+                "testwindow_end": "2016-05-24 11:05:46",
+                "mc": 2.4,
+                "delta_m": 0.1,
+                "coppersmith_multiplier": 100,
+                "theta_0": {"log10_mu": -6.0},
+                "methods": ["etas"],
+                "seed": 16,
+                "n_runs": 1,
+                "step_index": 5,
+                "output_root": str(out_dir),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class _FakeInversion:
+        theta = {"log10_mu": -6.0}
+        m_ref = 2.45
+        delta_m = 0.1
+        beta = 2.3
+        timewindow_end = pd.Timestamp("2016-05-23 23:05:46")
+        shape_coords = np.array(
+            [[33.0, -119.0], [33.0, -117.0], [35.0, -117.0], [35.0, -119.0]]
+        )
+        catalog = pd.DataFrame(
+            {
+                "time": [pd.Timestamp("2016-05-20 00:00:00")],
+                "latitude": [34.0],
+                "longitude": [-118.0],
+                "magnitude": [3.0],
+            }
+        )
+        source_events = pd.DataFrame({"xi_plus_1": [1.0]})
+
+    seed_calls: list[int] = []
+    forecast_seeds: list[int] = []
+
+    monkeypatch.setattr(
+        mod.compare,
+        "run_inversion",
+        lambda *a, **kw: ("inv1", tmp_path / "params.json", {"id": "inv1"}),
+    )
+    monkeypatch.setattr(
+        "etas.inversion.ETASParameterCalculation.load_calculation",
+        classmethod(lambda cls, payload: _FakeInversion()),
+    )
+    monkeypatch.setattr(
+        mod.utility_functions,
+        "seed_forecast_rng",
+        lambda s, **kw: seed_calls.append(int(s)),
+    )
+
+    def _fake_run_forecasts(**kwargs):
+        forecast_seeds.append(int(kwargs["seed"]))
+        df = pd.DataFrame(
+            {
+                "latitude": [34.0],
+                "longitude": [-118.0],
+                "time": [pd.Timestamp("2016-05-24 01:00:00")],
+                "magnitude": [2.7],
+            }
+        )
+        return df, None
+
+    monkeypatch.setattr(mod.compare, "run_forecasts", _fake_run_forecasts)
+
+    rc = mod.main(
+        [
+            "--config",
+            str(cfg_path),
+            "--methods",
+            "etas",
+            "--seed",
+            "16",
+            "--n-runs",
+            "1",
+        ]
+    )
+    assert rc == 0
+    expected_rng = mod.utility_functions.derive_step_rng_seed(16, 5)
+    assert seed_calls == [expected_rng]
+    assert forecast_seeds == [expected_rng]
+    assert expected_rng != 16
+
+    run_dir = out_dir / "etas" / "inv_inv1" / "seed_16"
+    assert (run_dir / "forecast_catalog.csv").is_file()
+    meta = json.loads((run_dir / "realization_meta.json").read_text(encoding="utf-8"))
+    assert meta["seed"] == 16
+    assert meta["rng_seed"] == expected_rng
+    assert meta["step_index"] == 5
+
+
 

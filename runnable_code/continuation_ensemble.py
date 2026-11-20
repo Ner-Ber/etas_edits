@@ -61,6 +61,7 @@ _FORECAST_CATALOG_NAME = "forecast_catalog.csv"
 _REALIZATION_META_NAME = "realization_meta.json"
 _REALIZATION_META_KEYS = (
     "seed",
+    "rng_seed",
     "inversion_id",
     "continuation_method",
     "a_h_resolution",

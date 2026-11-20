@@ -423,6 +423,7 @@ def execute_rolling_step(
     step_cfg["timewindow_start"] = str(step_window.train_start)
     step_cfg["timewindow_end"] = str(step_window.train_end)
     step_cfg["testwindow_end"] = str(step_window.forecast_end)
+    step_cfg["step_index"] = int(step_window.step_index)
     step_cfg["output_root"] = str(step_output_dir)
     step_cfg["methods"] = list(methods)
     step_cfg["force_inversion"] = force_inversion

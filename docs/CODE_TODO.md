@@ -20,20 +20,25 @@ Maintenance rules: `.cursor/rules/code-todo.mdc`
 ### `residual-short-horizon-mag-ll`
 - **Status:** in_progress
 - **Added:** 2026-11-19
-- **Updated:** 2026-11-19
+- **Updated:** 2026-11-20
 - **Goal:** Explain why FINE forecast mean −log p(m) still worsens for horizons &lt; 7 d on `_short_v2` (and loses to ETAS at 0.5–1 d) while MAGNET beats GR on observed test events; isolate bug vs evaluation mismatch vs real short-horizon behavior before any `_short_v3` re-run.
-- **Context:** FeatureState tip-freeze was fixed; contaminated `…_pre_ridgecrest_short` was replaced by `…_short_v2` (0.5/1/4 d). Long horizons stay on `…_pre_ridgecrest` (7/60/300 d). Slides in `notebooks/fine_slides_figures.ipynb` already point at `_short_v2`. Residual trend remains: FINE forecast −log p(m) rises as H→0 while FINE test ≈0.26 still beats ETAS test ≈0.31. Guide: `docs/RESIDUAL_SHORT_MAG_LL_DEBUG.md`. Working notebook: `notebooks/debug_residual_short_mag_ll.ipynb`. **Phase A done:** residual is driven by **first-in-window** FINE draws at short H (0.5 d first −log≈1.33 / `frac(M≥5)`≈9%; later events healthy); empty seeds 4/8/20/24; aggregation skew is secondary. Next: Phase B first-draw / observed-next probes.
+- **Context:** FeatureState tip-freeze was fixed; contaminated `…_pre_ridgecrest_short` was replaced by `…_short_v2` (0.5/1/4 d). Long horizons stay on `…_pre_ridgecrest` (7/60/300 d). Slides in `notebooks/fine_slides_figures.ipynb` already point at `_short_v2`. Guide: `docs/RESIDUAL_SHORT_MAG_LL_DEBUG.md`. Working notebook: `notebooks/debug_residual_short_mag_ll.ipynb`. **Phase A done (2026-11-19):** residual is driven by **first-in-window** FINE draws at short H (0.5 d first −log≈1.33 / `frac(M≥5)`≈9%; later events healthy); empty seeds 4/8/20/24; aggregation skew is secondary; A4 time-since-window-start plots added. **Phase B root cause isolated + fix implemented (2026-11-20):** rolling steps reused the identical `--seed` on every window (`step_000 .. step_2266`), collapsing 2,267×30 first draws onto ~26 repeated draws (e.g. `seed 16` repeated `M≈5.47` 2,228 times; `seeds 4/8/20/24` empty across all windows; ETAS/FINE time-bin spikes). Pre-`d82e655` `hanamel_7d` (2026-09-17) accidentally masked this by starting thinning at `t_hist` before `forecast_start`; post-`d82e655` (physically correct) exposed it cleanly. Implemented per-step RNG seeding via `utility_functions.derive_step_rng_seed(seed, step_index)` (`SeedSequence([seed, step_index])`), `step_index` in `rolling_continuation.execute_rolling_step`, `rng_seed` in `_REALIZATION_META_KEYS`, and `resolve_step_rng_seed` in `run_continuation_models.py` (75 unit tests passing). Next: fast matched verification run (`0.5/4/7 d`) then user-approved `_short_v3` refresh + port commit to HGX `feature/hgx-inversion-interval`.
 - **Acceptance:**
   - Phase A notebook answers whether the residual is mainly heavy FINE draws, bad/missing seeds, later-in-window events, or aggregation. **Met (2026-11-19):** first-draw heavy + seed skew; not later-window drift.
-  - Phase B probes separate “MAGNET wins on truth” from “FINE forecast draws at short H.”
-  - No full short re-run unless a concrete generation/scoring bug is proven; then `_short_v3` only with user approval.
+  - Phase B probes separate “MAGNET wins on truth” from “FINE forecast draws at short H.” **Met (2026-11-20):** proven cross-window RNG seed reuse + `d82e655` unmasking; live `step_000` parity confirmed 26/27 seeds match to `≤0.0002` across hanamel/HGX.
+  - Seeding fix implemented and unit-tested (`derive_step_rng_seed`, `step_index`, `rng_seed` cache invalidation). **Met (2026-11-20).**
+  - Fast matched verification run confirms `< 7 d` reversal and time-bin spikes disappear. **Met (2026-11-20):** on matched 56-day slice (`2016-05-23 → 2016-07-18`, seeds `10..19`, `outputs/verify_step_rng_seed_fix/hauksson_56d`), `0.5 d` FINE `-\log p(m)` dropped from `+0.6447 ± 0.2048` (pooled `+0.9705`, `first=+2.1532`) → **`+0.1682 ± 0.0281`** (pooled `+0.1710`, `first=+0.1478`), cleanly beating ETAS (`+0.3615`) and matching fixed `7 d` FINE (`+0.1238`); `seed 16` cured (`+1.613 → +0.130`), `10/10` seeds non-empty, FINE bin CV `0.50 → 0.15`.
+  - Full `_short_v3` re-run and HGX branch port (`feature/hgx-inversion-interval`) only with user approval.
 - **Key paths:**
   - `docs/RESIDUAL_SHORT_MAG_LL_DEBUG.md`
   - `notebooks/debug_residual_short_mag_ll.ipynb`
+  - `etas/utility_functions.py` (`derive_step_rng_seed`)
+  - `runnable_code/rolling_continuation.py` (`execute_rolling_step`)
+  - `runnable_code/continuation_ensemble.py` (`_REALIZATION_META_KEYS`)
+  - `runnable_code/run_continuation_models.py` (`resolve_step_rng_seed`, `expected_meta_for_method`)
+  - `tests/test_rolling_continuation.py`, `tests/test_continuation_models_config.py`
   - `outputs/rolling_continuation_hauksson_pre_ridgecrest_short_v2/`
   - `outputs/rolling_continuation_hauksson_pre_ridgecrest/`
-  - `etas/rolling_analysis.py` (`magnitude_likelihoods`)
-  - `etas/magnet_inference.py` (`reset_thinning_session`, `predict_magnitudes`)
 
 ### `fine-catalog-magnitude-distribution`
 - **Status:** open

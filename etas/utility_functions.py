@@ -212,6 +212,29 @@ def aftershock_radius_from_uniform(log10_d, gamma, rho, mi, mc, y_r):
     return np.sqrt(np.power(1 - y_r, -1 / rho) * d_g - d_g)
 
 
+def derive_step_rng_seed(seed: int, step_index: int) -> int:
+    """Derive an independent 31-bit RNG seed for one ``(realization, step)`` pair.
+
+    Rolling walk-forward forecasts keep the realization label ``seed_<seed>``
+    stable across windows, but each rolling window must draw from an
+    independent RNG stream instead of repeating the initial draws on every
+    step. Uses ``numpy.random.SeedSequence`` and maps into ``[1, 2**31 - 1]``
+    so the result is valid for NumPy, Python, and TensorFlow/TFP.
+    """
+    seed_int = int(seed)
+    step_int = int(step_index)
+    if seed_int < 0 or step_int < 0:
+        raise ValueError(
+            f"seed and step_index must be non-negative, got seed={seed!r}, step_index={step_index!r}"
+        )
+    raw = int(
+        np.random.SeedSequence([seed_int, step_int]).generate_state(
+            1, dtype=np.uint32
+        )[0]
+    )
+    return 1 + (raw % ((1 << 31) - 1))
+
+
 def seed_forecast_rng(seed: int, *, tensorflow: bool = True) -> None:
     """Seed NumPy and (when available) TensorFlow RNGs for forecast continuation.
 

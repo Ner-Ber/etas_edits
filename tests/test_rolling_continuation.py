@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import etas.utility_functions as utility_functions
 import rolling_continuation as rolling
 import run_rolling_continuation as run_rolling
 
@@ -440,6 +441,50 @@ def test_execute_rolling_step_records_reuse_path(tmp_path: Path) -> None:
         )
     forced = json.loads((step_dir / "step_config.json").read_text(encoding="utf-8"))
     assert "reuse_inversion_from_step" not in forced
+
+
+def test_derive_step_rng_seed_deterministic_distinct_and_bounded() -> None:
+    s0 = utility_functions.derive_step_rng_seed(16, 0)
+    assert s0 == utility_functions.derive_step_rng_seed(16, 0)
+    grid = [
+        utility_functions.derive_step_rng_seed(seed, step)
+        for seed in range(30)
+        for step in range(200)
+    ]
+    assert all(1 <= val <= (1 << 31) - 1 for val in grid)
+    assert len(set(grid)) == len(grid)
+    with pytest.raises(ValueError, match="non-negative"):
+        utility_functions.derive_step_rng_seed(-1, 0)
+    with pytest.raises(ValueError, match="non-negative"):
+        utility_functions.derive_step_rng_seed(0, -1)
+
+
+def test_execute_rolling_step_writes_step_index(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    step_dir = tmp_path / "step_007"
+    step_window = rolling.RollingStepWindows(
+        step_index=7,
+        train_start=pd.Timestamp("2018-01-01"),
+        train_end=pd.Timestamp("2018-01-08"),
+        forecast_start=pd.Timestamp("2018-01-08"),
+        forecast_end=pd.Timestamp("2018-01-09"),
+        horizon_days=1.0,
+    )
+    with patch("run_continuation_models.main", return_value=0):
+        rolling.execute_rolling_step(
+            base_cfg={"fn_catalog": "input_data/example_catalog.csv", "mc": 3.6},
+            step_window=step_window,
+            step_output_dir=step_dir,
+            repo_root=repo_root,
+            methods=["etas"],
+            seed=16,
+            write_summary=False,
+        )
+    seed_cfg = json.loads((step_dir / "step_config_seed_16.json").read_text(encoding="utf-8"))
+    shared_cfg = json.loads((step_dir / "step_config.json").read_text(encoding="utf-8"))
+    assert seed_cfg["step_index"] == 7
+    assert shared_cfg["step_index"] == 7
+
 
 
 
