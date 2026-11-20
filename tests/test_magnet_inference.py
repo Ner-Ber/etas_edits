@@ -466,3 +466,135 @@ def test_prepare_encoder_catalog_sorts_and_adds_depth() -> None:
     assert catalog.iloc[0]["magnitude"] == 2.5
     assert "depth" in catalog.columns
 
+
+class _FakeIncrementalState:
+    """Minimal stand-in for IncrementalEncoderState tip tracking."""
+
+    def __init__(self, n_events: int = 0):
+        self.n_events = int(n_events)
+        self.sync_calls: list[int] = []
+        self.append_calls = 0
+        self.catalog: list[int] = list(range(self.n_events))
+
+    def copy(self) -> "_FakeIncrementalState":
+        return _FakeIncrementalState(self.n_events)
+
+    def sync_catalog_extension(self, catalog) -> None:
+        n = 0 if catalog is None else len(catalog)
+        self.sync_calls.append(n)
+        self.n_events = n
+        self.catalog = list(range(n))
+
+    def features_for_example(self, time_value, loc):
+        del time_value, loc
+        return {}
+
+    def append_row(self, row) -> None:
+        del row
+        self.append_calls += 1
+        self.n_events += 1
+        self.catalog = list(range(self.n_events))
+
+
+def test_reset_thinning_session_forces_resync_before_skip(monkeypatch) -> None:
+    """Rolling windows must sync new truth after restore, not skip with a stale tip."""
+    from tests._magnet_test_helpers import import_magnet_inference
+
+    magnet_inference = import_magnet_inference()
+    session = magnet_inference.MagnetInferenceSession.__new__(
+        magnet_inference.MagnetInferenceSession
+    )
+    tip = _FakeIncrementalState(n_events=3)
+    session._thinning_snapshot = tip
+    session._incremental_state = _FakeIncrementalState(n_events=5)
+    session._thinning_features_warm = True
+
+    session.reset_thinning_session()
+
+    assert session._thinning_features_warm is False
+    assert session._incremental_state is not tip
+    assert session._incremental_state.n_events == 3
+
+
+def test_rolling_window_resync_advances_truth_tip(monkeypatch) -> None:
+    """After reset, the next predict must sync a longer catalog and refresh the tip."""
+    import numpy as np
+    import pandas as pd
+
+    from tests._magnet_test_helpers import import_magnet_inference
+
+    magnet_inference = import_magnet_inference()
+    import etas.magnet_encoder_incremental as magnet_encoder_incremental
+
+    monkeypatch.setattr(
+        magnet_encoder_incremental, "incremental_encoders_enabled", lambda: True
+    )
+    monkeypatch.setattr(
+        magnet_encoder_incremental, "incremental_feature_state_enabled", lambda: True
+    )
+    monkeypatch.setattr(
+        magnet_encoder_incremental,
+        "flatten_and_scale_altered_features",
+        lambda *args, **kwargs: [],
+    )
+
+    session = magnet_inference.MagnetInferenceSession.__new__(
+        magnet_inference.MagnetInferenceSession
+    )
+    session._warmed = True
+    session.magnitude_shift = 2.4
+    session.pdf_support_stretch = 7.0
+    session.all_encoders = {"catalog_earthquakes": object()}
+    session.scalers = {}
+    session.location_scalers = {}
+    session._prediction_buffer = []
+    session._tf_predict = None
+    tip = _FakeIncrementalState(n_events=2)
+    session._thinning_snapshot = tip
+    session._incremental_state = tip.copy()
+    session._thinning_features_warm = True
+
+    def fake_forward(model_inputs):
+        del model_inputs
+        return np.zeros((1, 6), dtype=np.float32)
+
+    monkeypatch.setattr(session, "_model_forward", fake_forward)
+    monkeypatch.setattr(
+        magnet_inference,
+        "_sample_from_model_prediction",
+        lambda *args, **kwargs: 3.0,
+    )
+
+    session.reset_thinning_session()
+    assert session._thinning_features_warm is False
+
+    history = pd.DataFrame(
+        {
+            "time": pd.to_datetime(
+                ["2016-05-20", "2016-05-21", "2016-05-24"], utc=True
+            ).tz_convert(None),
+            "longitude": [-118.0, -118.1, -118.2],
+            "latitude": [34.0, 34.1, 34.2],
+            "magnitude": [2.5, 2.6, 3.45],
+        }
+    )
+    aftershock = pd.DataFrame(
+        {
+            "time": [pd.Timestamp("2016-05-24 12:00:00")],
+            "longitude": [-118.3],
+            "latitude": [34.3],
+        }
+    )
+    magnitudes = session.predict_magnitudes(catalog=history, aftershock_df=aftershock)
+    assert magnitudes == [3.0]
+    assert session._incremental_state.sync_calls == [3]
+    assert session._thinning_snapshot.n_events == 3
+    assert session._thinning_features_warm is True
+    # Synthetic append happens after the truth snapshot was taken.
+    assert session._incremental_state.n_events == 4
+    assert session._thinning_snapshot.n_events == 3
+
+    session.reset_thinning_session()
+    assert session._thinning_features_warm is False
+    assert session._incremental_state.n_events == 3
+

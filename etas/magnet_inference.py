@@ -133,12 +133,18 @@ class MagnetInferenceSession:
         """Restore FeatureState from the truth-tip snapshot, or clear if none.
 
         Call at the start of each thinning simulation / rolling step so simulated
-        history from the previous seed/window does not leak. When a snapshot was
-        captured after warming on truth history, this avoids a full re-sync.
+        history from the previous seed/window does not leak.
+
+        After restore, ``_thinning_features_warm`` is left false so the next
+        one-event predict must sync the current observed catalog (through this
+        window's ``t0``) before ``skip_sync`` is allowed. Otherwise a process that
+        walks many rolling windows would keep the first window's tip forever.
+        Within a window, the first sync sets the flag again and later draws stay
+        on the fast path.
         """
         if self._thinning_snapshot is not None:
             self._incremental_state = self._thinning_snapshot.copy()
-            self._thinning_features_warm = True
+            self._thinning_features_warm = False
         else:
             self._incremental_state = None
             self._thinning_features_warm = False
@@ -311,12 +317,46 @@ class MagnetInferenceSession:
                 )
                 if not skip_sync:
                     self._incremental_state.sync_catalog_extension(base_history)
+                    # Refresh the truth-tip snapshot after syncing observed
+                    # history for this window, before any synthetic append.
+                    # Rolling step k+1 then restores this tip and syncs only
+                    # the newly observed events rather than a stale step-0 tip.
+                    self._thinning_snapshot = self._incremental_state.copy()
                     self._thinning_features_warm = True
+                # Opt-in tip table for short-horizon FeatureState debug
+                # (MAGNET_DIAG_FEATURE_TIP=1). Used by two-window checks.
+                if (
+                    os.environ.get("MAGNET_DIAG_FEATURE_TIP", "").strip()
+                    in {"1", "true", "yes"}
+                    and n_events == 1
+                ):
+                    tip_catalog = getattr(self._incremental_state, "catalog", None)
+                    tip_time = None
+                    tip_mag = None
+                    if isinstance(tip_catalog, pd.DataFrame) and len(tip_catalog) > 0:
+                        tip_row = tip_catalog.iloc[-1]
+                        tip_time = tip_row["time"] if "time" in tip_catalog.columns else None
+                        tip_mag = (
+                            tip_row["magnitude"]
+                            if "magnitude" in tip_catalog.columns
+                            else None
+                        )
+                    hist_end = None
                     if (
-                        self._thinning_snapshot is None
-                        and magnet_encoder_incremental.incremental_feature_state_enabled()
+                        isinstance(catalog, pd.DataFrame)
+                        and len(catalog) > 0
+                        and "time" in catalog.columns
                     ):
-                        self._thinning_snapshot = self._incremental_state.copy()
+                        hist_end = catalog["time"].max()
+                    print(
+                        "[MAGNET_DIAG_FEATURE_TIP] "
+                        f"skip_sync={skip_sync} "
+                        f"tip_time={tip_time} tip_mag={tip_mag} "
+                        f"hist_end={hist_end} "
+                        f"n_hist={0 if catalog is None else len(catalog)}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
             else:
                 self._incremental_state.reset(base_history)
             event_iter = tqdm(
