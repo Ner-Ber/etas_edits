@@ -17,6 +17,24 @@ Maintenance rules: `.cursor/rules/code-todo.mdc`
 
 ## Open
 
+### `residual-short-horizon-mag-ll`
+- **Status:** in_progress
+- **Added:** 2026-11-19
+- **Updated:** 2026-11-19
+- **Goal:** Explain why FINE forecast mean −log p(m) still worsens for horizons &lt; 7 d on `_short_v2` (and loses to ETAS at 0.5–1 d) while MAGNET beats GR on observed test events; isolate bug vs evaluation mismatch vs real short-horizon behavior before any `_short_v3` re-run.
+- **Context:** FeatureState tip-freeze was fixed; contaminated `…_pre_ridgecrest_short` was replaced by `…_short_v2` (0.5/1/4 d). Long horizons stay on `…_pre_ridgecrest` (7/60/300 d). Slides in `notebooks/fine_slides_figures.ipynb` already point at `_short_v2`. Residual trend remains: FINE forecast −log p(m) rises as H→0 while FINE test ≈0.26 still beats ETAS test ≈0.31. Guide: `docs/RESIDUAL_SHORT_MAG_LL_DEBUG.md`. Working notebook: `notebooks/debug_residual_short_mag_ll.ipynb`. **Phase A done:** residual is driven by **first-in-window** FINE draws at short H (0.5 d first −log≈1.33 / `frac(M≥5)`≈9%; later events healthy); empty seeds 4/8/20/24; aggregation skew is secondary. Next: Phase B first-draw / observed-next probes.
+- **Acceptance:**
+  - Phase A notebook answers whether the residual is mainly heavy FINE draws, bad/missing seeds, later-in-window events, or aggregation. **Met (2026-11-19):** first-draw heavy + seed skew; not later-window drift.
+  - Phase B probes separate “MAGNET wins on truth” from “FINE forecast draws at short H.”
+  - No full short re-run unless a concrete generation/scoring bug is proven; then `_short_v3` only with user approval.
+- **Key paths:**
+  - `docs/RESIDUAL_SHORT_MAG_LL_DEBUG.md`
+  - `notebooks/debug_residual_short_mag_ll.ipynb`
+  - `outputs/rolling_continuation_hauksson_pre_ridgecrest_short_v2/`
+  - `outputs/rolling_continuation_hauksson_pre_ridgecrest/`
+  - `etas/rolling_analysis.py` (`magnitude_likelihoods`)
+  - `etas/magnet_inference.py` (`reset_thinning_session`, `predict_magnitudes`)
+
 ### `fine-catalog-magnitude-distribution`
 - **Status:** open
 - **Added:** 2026-10-04 19:45
@@ -89,11 +107,11 @@ Maintenance rules: `.cursor/rules/code-todo.mdc`
 ### `magnet-featurestate-snapshot-per-seed`
 - **Status:** in_progress
 - **Added:** 2026-09-15
-- **Updated:** 2026-09-21
+- **Updated:** 2026-11-07
 - **Goal:** At `forecast_start`, warm FeatureState once from truth history and clone/snapshot per seed; for rolling step \(k+1\), ingest observed events from window \(k\) into the shared truth tip instead of full `reset_thinning_session` + re-warm every time.
-- **Context:** `FeatureState.copy` + `IncrementalEncoderState.copy`; session auto-captures truth tip after first sync (`_thinning_snapshot`); `reset_thinning_session` restores from snapshot. **2026-09-21:** multi-seed FINE ensembles use **one process per seed** + `--max-workers` (default 6) in `run_etas_thinning_fine_fast_tracks.py` to avoid in-process MAGNET leakage; snapshot still matters for in-process / rolling. Do not mark done until user approves close.
-- **Acceptance:** Multi-seed and multi-window tests show no cross-seed leakage; wall time to start seed \(>1\) drops vs full reset (documented); semantics match reset-every-time for magnitudes given same RNG.
-- **Key paths:** MAGNET `incremental_feature_state.py`, `etas/magnet_inference.py`, `etas/magnet_encoder_incremental.py`
+- **Context:** `FeatureState.copy` + `IncrementalEncoderState.copy`; session captures truth tip after each sync (`_thinning_snapshot`); `reset_thinning_session` restores that tip and clears `_thinning_features_warm` so the next predict syncs the current window's observed catalog before `skip_sync`. **Bug (2026-09–11):** restore left warm true and never refreshed the tip, so HGX short-horizon walks (0.5/1/4 d) froze MAGNET history at step 0 and produced seed-specific stuck first magnitudes (bad −mean LL). Unit tests: `test_reset_thinning_session_forces_resync_before_skip`, `test_rolling_window_resync_advances_truth_tip`. **2026-09-21:** multi-seed FINE ensembles use **one process per seed** + `--max-workers` (default 6) in `run_etas_thinning_fine_fast_tracks.py` to avoid in-process MAGNET leakage. Do not mark done until user approves close after HGX two-window + short re-run.
+- **Acceptance:** Multi-seed and multi-window tests show no cross-seed leakage; two consecutive rolling windows advance FeatureState tip with observed history; wall time to start seed \(>1\) drops vs full reset (documented); semantics match reset-every-time for magnitudes given same RNG.
+- **Key paths:** MAGNET `incremental_feature_state.py`, `etas/magnet_inference.py`, `etas/magnet_encoder_incremental.py`, `tests/test_magnet_inference.py`
 
 ### `delete-conda-env-etas-fine-speed-ifs`
 - **Status:** open
