@@ -12,7 +12,9 @@ from typing import Any
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.cm import ScalarMappable
 from matplotlib.colors import LogNorm, Normalize
+from matplotlib.lines import Line2D
 from scipy import stats as scipy_stats
 
 import etas.utility_functions as utility_functions
@@ -72,6 +74,14 @@ def figsize(name: str) -> tuple[float, float]:
     return tuple(S["figsize"][name])
 
 
+def _box_aspect(ax: plt.Axes, key: str) -> None:
+    """Set the axes box to ``style[key]`` as ``(width, height)`` when that key is set."""
+    aspect = S.get(key)
+    if not aspect:
+        return
+    ax.set_box_aspect(float(aspect[1]) / float(aspect[0]))
+
+
 def empty_figure(message: str, kind: str = "wide") -> plt.Figure:
     fig, ax = plt.subplots(figsize=figsize(kind))
     ax.set_axis_off()
@@ -79,19 +89,54 @@ def empty_figure(message: str, kind: str = "wide") -> plt.Figure:
     return fig
 
 
-def _finish(fig: plt.Figure) -> plt.Figure:
+def _legend(ax: plt.Axes, **kwargs) -> None:
+    """Place the legend to the right of the axes, past any colorbar.
+
+    Layout runs first so the colorbar has its final position. The legend is
+    anchored to that right edge and is kept out of a second layout pass.
+    """
+    fig = ax.figure
     fig.tight_layout()
+    kwargs.pop("loc", None)
+    kwargs.pop("bbox_to_anchor", None)
+    kwargs.setdefault("frameon", S["legend_frameon"])
+    kwargs.setdefault("fontsize", S["font"]["legend"])
+    handles = kwargs.pop("handles", None)
+    labels = kwargs.pop("labels", None)
+    if handles is None:
+        handles, labels = ax.get_legend_handles_labels()
+    elif labels is None:
+        labels = [handle.get_label() for handle in handles]
+    rightmost = max(fig.axes, key=lambda item: item.get_position().x1)
+    anchor_x = 1.02
+    if rightmost is not ax and rightmost.yaxis.label.get_text():
+        fig.canvas.draw()
+        label_right = rightmost.yaxis.label.get_window_extent().x1
+        anchor_x, _ = rightmost.transAxes.inverted().transform((label_right + 10, 0))
+    fig.legend(
+        handles,
+        labels,
+        loc="center left",
+        bbox_to_anchor=(anchor_x, 0.5),
+        bbox_transform=rightmost.transAxes,
+        borderaxespad=0.0,
+        **kwargs,
+    )
+
+
+def _finish(fig: plt.Figure) -> plt.Figure:
+    if not fig.legends:
+        fig.tight_layout()
     return fig
 
 
 def _style_horizon_axis(ax: plt.Axes, horizons: list[float]) -> None:
-    from matplotlib.ticker import FixedFormatter, FixedLocator, LogLocator
+    from matplotlib.ticker import FixedFormatter, FixedLocator, NullLocator
 
     ax.set_xscale("log")
     ax.xaxis.set_major_locator(FixedLocator(horizons))
     ax.xaxis.set_major_formatter(FixedFormatter([f"{days:g} d" for days in horizons]))
-    ax.xaxis.set_minor_locator(LogLocator(base=10.0, subs=np.arange(1, 10)))
-    ax.grid(True, which="minor", axis="x", color=S["colors"]["grid"], linewidth=0.7, zorder=0)
+    ax.xaxis.set_minor_locator(NullLocator())
     for days in horizons:
         ax.axvline(days, color=S["colors"]["reference"], linestyle="--", linewidth=1.0, zorder=1)
     ax.set_xlabel("Forecast horizon")
@@ -142,6 +187,44 @@ def _resolve_horizon_days(
     return None
 
 
+def _window_number_lookup(frame: pd.DataFrame) -> dict[Any, int]:
+    """Map ``step_index`` or ``forecast_start`` to 1-based sequential window numbers."""
+    if "step_index" in frame.columns:
+        steps = pd.to_numeric(frame["step_index"], errors="coerce").dropna().unique()
+        ordered = sorted(int(step) for step in steps)
+        return {step: index + 1 for index, step in enumerate(ordered)}
+    if "forecast_start" in frame.columns:
+        starts = pd.to_datetime(frame["forecast_start"], format="mixed")
+        ordered = sorted(starts.dropna().unique())
+        return {start: index + 1 for index, start in enumerate(ordered)}
+    return {}
+
+
+def _sequential_window_x(frame: pd.DataFrame, lookup: dict[Any, int] | None = None) -> np.ndarray:
+    """1-based forecasting-window index for each row (time / step order)."""
+    lookup = _window_number_lookup(frame) if lookup is None else lookup
+    if "step_index" in frame.columns and lookup:
+        steps = pd.to_numeric(frame["step_index"], errors="coerce")
+        return np.array(
+            [lookup[int(step)] if pd.notna(step) and int(step) in lookup else np.nan for step in steps],
+            dtype=float,
+        )
+    if "forecast_start" in frame.columns and lookup:
+        starts = pd.to_datetime(frame["forecast_start"], format="mixed")
+        return np.array(
+            [lookup[start] if pd.notna(start) and start in lookup else np.nan for start in starts],
+            dtype=float,
+        )
+    return np.arange(1, len(frame) + 1, dtype=float)
+
+
+def _style_window_xaxis(ax: plt.Axes) -> None:
+    from matplotlib.ticker import MaxNLocator
+
+    ax.set_xlabel("Forecast window")
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True, min_n_ticks=3))
+
+
 def _outside_of_total(inside: np.ndarray) -> str:
     """Red vertical lines over all lines, as ``12/300``."""
     flags = np.asarray(inside, dtype=bool)
@@ -190,7 +273,380 @@ def fig_metric_vs_horizon(
         ax.set_ylim(*ylim)
     ax.set_ylabel(ylabel)
     ax.set_title(title)
-    ax.legend(frameon=S["legend_frameon"])
+    _box_aspect(ax, "across_horizons_aspect")
+    _legend(ax)
+    return _finish(fig)
+
+
+def fig_metric_mean_std_vs_horizon(
+    frame: pd.DataFrame,
+    mean_column: str,
+    std_column: str,
+    horizons: list[float],
+    *,
+    title: str,
+    ylabel: str,
+    methods: list[str],
+    hline: float | None = None,
+) -> plt.Figure | None:
+    """Mean realization score versus horizon, with a ±1 standard-deviation band.
+
+    Each row is one method at one forecast length. The score was computed on the
+    whole test interval, once per saved catalog. The marker is the mean of those
+    catalogs and the band is their standard deviation.
+    """
+    required = {"horizon_days", "method", mean_column, std_column}
+    if frame.empty or not required.issubset(frame.columns):
+        return None
+    indexed = frame.set_index(["horizon_days", "method"])
+    fig, ax = plt.subplots(figsize=figsize("metric"))
+    _style_horizon_axis(ax, horizons)
+    if hline is not None:
+        ax.axhline(hline, color=S["colors"]["reference"], linewidth=1.0, zorder=1)
+    drawn = False
+    for method in methods:
+        xs: list[float] = []
+        means: list[float] = []
+        stds: list[float] = []
+        for days in horizons:
+            key = (float(days), method)
+            if key not in indexed.index:
+                continue
+            mean = float(indexed.loc[key, mean_column])
+            std = float(indexed.loc[key, std_column])
+            if not np.isfinite(mean):
+                continue
+            xs.append(_horizon_x(float(days), method, methods))
+            means.append(mean)
+            stds.append(std if np.isfinite(std) else 0.0)
+        if not xs:
+            continue
+        color = method_color(method)
+        center = np.asarray(means, dtype=float)
+        half = np.asarray(stds, dtype=float)
+        ax.fill_between(
+            xs, center - half, center + half,
+            color=color, alpha=S["fill_alpha"], linewidth=0, zorder=2,
+        )
+        ax.plot(
+            xs, center,
+            color=color,
+            marker=S["markers"].get(method, "o"),
+            label=method_label(method),
+            zorder=3,
+        )
+        drawn = True
+    if not drawn:
+        plt.close(fig)
+        return None
+    pads = S.get("ylabel_labelpad") or {}
+    ax.set_ylabel(ylabel, labelpad=pads.get(ylabel, 4.0))
+    ax.set_title(title)
+    _box_aspect(ax, "across_horizons_aspect")
+    _legend(ax)
+    return _finish(fig)
+
+
+def fig_loglikelihood_vs_horizon(
+    frame: pd.DataFrame,
+    horizons: list[float],
+    methods: list[str],
+    *,
+    title: str,
+    ylabel: str,
+    observed: str = "none",
+    yscale: str | None = None,
+    ylim: tuple[float, float] | None = None,
+) -> plt.Figure | None:
+    """Mean log-likelihood versus horizon, with a ±1 standard-deviation band.
+
+    ``observed`` draws the same score on the test catalog: ``"per_method"`` is a
+    dashed line in each method color, ``"black"`` is one shared line, and
+    ``"none"`` leaves the test catalog off the axes.
+    """
+    required = {"horizon_days", "method", "mean_log_likelihood", "std_log_likelihood"}
+    if frame.empty or not required.issubset(frame.columns):
+        return None
+    fig, ax = plt.subplots(figsize=figsize("metric"))
+    _style_horizon_axis(ax, horizons)
+    drawn = False
+    for method in methods:
+        part = frame.loc[frame["method"] == method].sort_values("horizon_days")
+        if part.empty:
+            continue
+        x = part["horizon_days"].to_numpy(dtype=float)
+        mean = part["mean_log_likelihood"].to_numpy(dtype=float)
+        std = part["std_log_likelihood"].to_numpy(dtype=float)
+        std = np.where(np.isfinite(std), std, 0.0)
+        color = method_color(method)
+        ax.fill_between(
+            x, mean - std, mean + std,
+            color=color, alpha=S["fill_alpha"], linewidth=0, zorder=2,
+        )
+        ax.plot(
+            x, mean,
+            color=color,
+            marker=S["markers"].get(method, "o"),
+            label=method_label(method),
+            zorder=3,
+        )
+        if observed == "per_method" and "observed_test_log_likelihood" in part.columns:
+            ax.plot(
+                x,
+                part["observed_test_log_likelihood"].to_numpy(dtype=float),
+                color=color,
+                linestyle="--",
+                linewidth=max(float(S["line_width"]), 0.4),
+                label=f"{method_label(method)} test",
+                zorder=4,
+            )
+        drawn = True
+    if observed == "black" and "observed_test_log_likelihood" in frame.columns:
+        observed_rows = frame.drop_duplicates("horizon_days").sort_values("horizon_days")
+        ax.plot(
+            observed_rows["horizon_days"],
+            observed_rows["observed_test_log_likelihood"],
+            color=S["colors"]["observed"],
+            marker="o",
+            label="observed test",
+            zorder=4,
+        )
+        drawn = True
+    if not drawn:
+        plt.close(fig)
+        return None
+    if yscale == "symlog":
+        ax.set_yscale("symlog", linthresh=1)
+    elif yscale:
+        ax.set_yscale(yscale)
+    if ylim is not None:
+        ax.set_ylim(*ylim)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    _box_aspect(ax, "across_horizons_aspect")
+    _legend(ax)
+    return _finish(fig)
+
+
+def _bar_errors(yerr: dict[str, float] | None, methods: list[str]) -> list[float] | None:
+    if yerr is None:
+        return None
+    return [
+        0.0 if not np.isfinite(yerr.get(method, np.nan)) else float(yerr[method])
+        for method in methods
+    ]
+
+
+def _zoom_to_bars(ax: plt.Axes, *series: np.ndarray) -> None:
+    """Set the y limit around the drawn values instead of starting at zero."""
+    finite = np.concatenate([np.asarray(item, dtype=float).ravel() for item in series])
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return
+    low = float(finite.min())
+    high = float(finite.max())
+    pad = 0.08 * (high - low) if high > low else 1.0
+    ax.set_ylim(low - pad, high + pad)
+
+
+def fig_method_bars(
+    values: dict[str, float],
+    methods: list[str],
+    *,
+    title: str,
+    ylabel: str,
+    yerr: dict[str, float] | None = None,
+    hline: float | None = None,
+    hline_label: str | None = None,
+    zoom: bool = False,
+    ylim: tuple[float, float] | None = None,
+) -> plt.Figure | None:
+    """One bar per method. Optional ``yerr`` is a ±1 standard-deviation whisker.
+
+    ``ylim`` forces the y-axis limits and overrides ``zoom``.
+    """
+    chosen = [method for method in methods if np.isfinite(values.get(method, np.nan))]
+    if not chosen:
+        return None
+    fig, ax = plt.subplots(figsize=figsize("hist"))
+    heights = np.array([float(values[method]) for method in chosen], dtype=float)
+    errors = _bar_errors(yerr, chosen)
+    ax.bar(
+        np.arange(len(chosen)),
+        heights,
+        color=[method_color(method) for method in chosen],
+        width=0.65,
+        yerr=errors,
+        capsize=4 if errors is not None else 0,
+        error_kw={"elinewidth": 1.2, "ecolor": S["colors"]["observed"]},
+    )
+    if hline is not None and np.isfinite(hline):
+        ax.axhline(
+            float(hline),
+            color=S["colors"]["observed"],
+            lw=1.4,
+            label=hline_label or "observed test",
+        )
+    ax.set_xticks(np.arange(len(chosen)), [method_label(method) for method in chosen])
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    if ylim is not None:
+        ax.set_ylim(*ylim)
+    elif zoom:
+        spread = heights if errors is None else np.concatenate([heights - errors, heights + errors])
+        extras = [spread] if hline is None or not np.isfinite(hline) else [spread, [float(hline)]]
+        _zoom_to_bars(ax, *extras)
+    if hline is not None and np.isfinite(hline):
+        _legend(ax)
+    return _finish(fig)
+
+
+def fig_grouped_method_bars(
+    values: dict[str, float],
+    observed: dict[str, float],
+    methods: list[str],
+    *,
+    title: str,
+    ylabel: str,
+    yerr: dict[str, float] | None = None,
+    value_label: str = "own realizations",
+    observed_label: str = "observed test",
+    zoom: bool = False,
+    ylim: tuple[float, float] | None = None,
+) -> plt.Figure | None:
+    """Two bars per method: the realization score and the observed-test score.
+
+    ``ylim`` forces the y-axis limits and overrides ``zoom``.
+    """
+    chosen = [
+        method for method in methods
+        if np.isfinite(values.get(method, np.nan)) and np.isfinite(observed.get(method, np.nan))
+    ]
+    if not chosen:
+        return None
+    fig, ax = plt.subplots(figsize=figsize("hist"))
+    positions = np.arange(len(chosen), dtype=float)
+    width = 0.36
+    heights = np.array([float(values[method]) for method in chosen], dtype=float)
+    observed_heights = np.array([float(observed[method]) for method in chosen], dtype=float)
+    errors = _bar_errors(yerr, chosen)
+    own = ax.bar(
+        positions - width / 2,
+        heights,
+        width,
+        yerr=errors,
+        color=[method_color(method) for method in chosen],
+        capsize=4 if errors is not None else 0,
+        error_kw={"elinewidth": 1.2, "ecolor": S["colors"]["observed"]},
+        label=value_label,
+    )
+    reference = ax.bar(
+        positions + width / 2,
+        observed_heights,
+        width,
+        color="0.75",
+        label=observed_label,
+    )
+    ax.set_xticks(positions, [method_label(method) for method in chosen])
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    if ylim is not None:
+        ax.set_ylim(*ylim)
+    elif zoom:
+        spread = heights if errors is None else np.concatenate([heights - errors, heights + errors])
+        _zoom_to_bars(ax, spread, observed_heights)
+    _legend(ax, handles=[own, reference], labels=[value_label, observed_label])
+    return _finish(fig)
+
+
+def fig_fraction_vs_horizon_by_discrepancy(
+    frame: pd.DataFrame,
+    metric: str,
+    horizons: list[float],
+    methods: list[str],
+    *,
+    title: str,
+    ylabel: str,
+    color_column: str = "mean_delta_percent",
+    ylim: tuple[float, float] | None = (0.0, 1.0),
+    vmin: float | None = None,
+    vmax: float | None = None,
+) -> plt.Figure | None:
+    """Fraction of windows versus horizon, with markers colored by mean Δ (%).
+
+    Marker shape separates methods. Face color is the mean per-window count
+    discrepancy at that horizon. Each method's line and marker edge use that
+    method's color.
+    """
+    required = {"horizon_days", "method", metric, color_column}
+    if frame.empty or not required.issubset(frame.columns):
+        return None
+    prepared = []
+    for method in methods:
+        subset = frame.loc[frame["method"] == method].dropna(subset=[metric, color_column])
+        if subset.empty:
+            continue
+        prepared.append((method, subset))
+    if not prepared:
+        return None
+    deltas = np.concatenate([
+        item[1][color_column].to_numpy(dtype=float) for item in prepared
+    ])
+    if vmin is None:
+        vmin = 0.0
+    if vmax is None:
+        vmax = max(float(np.nanmax(deltas)), 1.0)
+    norm = Normalize(vmin=float(vmin), vmax=float(vmax))
+    cmap = plt.get_cmap(S["cmaps"]["discrepancy"])
+    fig, ax = plt.subplots(figsize=figsize("metric"))
+    _style_horizon_axis(ax, horizons)
+    markers = S["markers"]
+    for method, subset in prepared:
+        by_horizon = {
+            float(row.horizon_days): row
+            for row in subset.itertuples(index=False)
+        }
+        xs = []
+        ys = []
+        colors = []
+        for days in horizons:
+            row = by_horizon.get(float(days))
+            if row is None:
+                continue
+            xs.append(_horizon_x(days, method, methods))
+            ys.append(float(getattr(row, metric)))
+            colors.append(float(getattr(row, color_column)))
+        if not xs:
+            continue
+        color = method_color(method)
+        ax.plot(xs, ys, color=color, lw=S["line_width"], zorder=2)
+        ax.scatter(
+            xs, ys, c=colors, cmap=cmap, norm=norm,
+            marker=markers.get(method, "o"),
+            s=S["scatter_size"],
+            zorder=3,
+            linewidths=1.2,
+            edgecolors=color,
+        )
+    if ylim is not None:
+        ax.set_ylim(*ylim)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    _box_aspect(ax, "across_horizons_aspect")
+    artist = ScalarMappable(norm=norm, cmap=cmap)
+    artist.set_array([])
+    fig.colorbar(artist, ax=ax, label=r"mean $\Delta$ (%)", pad=0.03, fraction=0.046)
+    handles = [
+        Line2D(
+            [0], [0], color=method_color(method), lw=S["line_width"],
+            marker=markers.get(method, "o"),
+            markerfacecolor="0.85", markeredgecolor=method_color(method),
+            markeredgewidth=1.2, markersize=7,
+            label=method_label(method),
+        )
+        for method, _subset in prepared
+    ]
+    _legend(ax, handles=handles, labels=[handle.get_label() for handle in handles])
     return _finish(fig)
 
 
@@ -398,48 +854,205 @@ def windows_tile(scores: pd.DataFrame) -> bool:
     return bool((gap < pd.Timedelta("1min")).all())
 
 
-def fig_cumulative_counts(scores: pd.DataFrame, horizon_days: float, methods: list[str]) -> plt.Figure:
-    fig, ax = plt.subplots(figsize=figsize("wide"))
-    unique = scores.drop_duplicates("step_index").sort_values("step_index")
-    ax.plot(
-        unique["step_index"],
-        unique["n_observed"].cumsum(),
-        color=S["colors"]["observed"],
-        label="Observed",
+def _cumulative_sampling_band(
+    realizations: pd.DataFrame | None,
+    method: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """Cumulative expected count across seeds, and its standard deviation.
+
+    Each seed contributes its own per-window expected count. The band is the
+    spread of those running sums, which is the sampling margin on the expected
+    curve.
+    """
+    needed = {"step_index", "method", "seed", "n_forecast"}
+    if realizations is None or realizations.empty or not needed.issubset(realizations.columns):
+        return None
+    subset = realizations.loc[
+        realizations["method"] == method, ["step_index", "seed", "n_forecast"]
+    ].dropna()
+    if subset["seed"].nunique() < 2:
+        return None
+    wide = subset.pivot_table(
+        index="step_index", columns="seed", values="n_forecast", aggfunc="first",
+    ).sort_index()
+    cumulative = np.cumsum(wide.to_numpy(dtype=float), axis=0)
+    return (
+        wide.index.to_numpy(dtype=float),
+        np.nanmean(cumulative, axis=1),
+        np.nanstd(cumulative, axis=1, ddof=1),
     )
-    for method in methods:
-        group = scores.loc[scores["method"] == method].sort_values("step_index")
-        ax.plot(
-            group["step_index"],
-            group["n_forecast"].cumsum(),
-            color=method_color(method),
-            label=f"{method_label(method)} expected",
+
+
+def fig_cumulative_counts(
+    scores: pd.DataFrame,
+    horizon_days: float,
+    methods: list[str],
+    *,
+    line_width: dict[str, float] | None = None,
+    labels: dict[str, str] | None = None,
+    label_size: float | None = None,
+    tick_size: float | None = None,
+    legend_size: float | None = None,
+    realizations: pd.DataFrame | None = None,
+    window_lines: bool = False,
+    zoom_step: int | None = None,
+    zoom_windows: int = 8,
+) -> plt.Figure:
+    """Cumulative observed and expected counts.
+
+    ``line_width`` maps ``"observed"`` and each method name to a stroke width.
+    ``labels`` maps ``"xlabel"``, ``"ylabel"``, ``"observed"``, and each method
+    name to the text drawn on the axes and in the legend. ``label_size`` is the
+    axis-label size and ``tick_size`` is the tick-label size. Missing values
+    use the shared style.
+
+    ``realizations`` is one row per seed and window, with ``n_forecast``. When
+    it is set, each expected curve gets a ±1 standard-deviation sampling band.
+    ``window_lines`` marks every walk-forward step. ``zoom_step`` opens an
+    inset covering ``zoom_windows`` steps starting at that window.
+    """
+    size_name = "cumulative_counts" if "cumulative_counts" in S["figsize"] else "wide"
+    fig, ax = plt.subplots(figsize=figsize(size_name))
+    widths = line_width or {}
+    names = labels or {}
+    default = float(S["line_width"])
+    axis_label_size = float(S["font"]["label"] if label_size is None else label_size)
+    axis_tick_size = float(S["font"]["tick"] if tick_size is None else tick_size)
+    legend_fontsize = float(S["font"]["legend"] if legend_size is None else legend_size)
+    band_alpha = float(S.get("fill_alpha", 0.15))
+    unique = scores.drop_duplicates("step_index").sort_values("step_index")
+    observed = unique["n_observed"].cumsum()
+    forecast_curves = {
+        method: scores.loc[scores["method"] == method].sort_values("step_index")
+        for method in methods
+    }
+    bands = {method: _cumulative_sampling_band(realizations, method) for method in methods}
+
+    def _draw(target: plt.Axes, *, labeled: bool, line_alpha: float) -> None:
+        if window_lines:
+            for step in unique["step_index"].to_numpy():
+                target.axvline(
+                    step,
+                    color=S["colors"]["reference"],
+                    lw=0.45,
+                    alpha=line_alpha,
+                    zorder=0,
+                )
+        for method in methods:
+            band = bands[method]
+            if band is None:
+                continue
+            steps, center, spread = band
+            target.fill_between(
+                steps,
+                center - spread,
+                center + spread,
+                color=method_color(method),
+                alpha=band_alpha,
+                linewidth=0,
+                zorder=1,
+            )
+        target.plot(
+            unique["step_index"],
+            observed,
+            color=S["colors"]["observed"],
+            lw=float(widths.get("observed", default)),
+            label=names.get("observed", "Observed") if labeled else None,
+            zorder=3,
         )
-    ax.set_xlabel("Walk-forward step")
-    ax.set_ylabel("Cumulative event count")
+        for method, group in forecast_curves.items():
+            target.plot(
+                group["step_index"],
+                group["n_forecast"].cumsum(),
+                color=method_color(method),
+                lw=float(widths.get(method, default)),
+                label=names.get(method, f"{method_label(method)} expected") if labeled else None,
+                zorder=4,
+            )
+
+    _draw(ax, labeled=True, line_alpha=0.12)
+    ax.set_xlabel(names.get("xlabel", "Walk-forward step"), fontsize=axis_label_size)
+    ax.set_ylabel(names.get("ylabel", "Cumulative event count"), fontsize=axis_label_size)
+    ax.tick_params(axis="both", labelsize=axis_tick_size)
     ax.set_title(f"Cumulative counts across non-overlapping {horizon_days:g}-day windows")
-    ax.legend(frameon=S["legend_frameon"])
+    aspect = S.get("cumulative_counts_aspect")
+    if aspect:
+        ax.set_box_aspect(float(aspect[1]) / float(aspect[0]))
+    if zoom_step is not None and zoom_windows > 0:
+        steps = unique["step_index"].to_numpy(dtype=float)
+        start = float(np.clip(zoom_step, steps.min(), steps.max()))
+        stop = float(min(start + zoom_windows - 1, steps.max()))
+        inset = ax.inset_axes([0.04, 0.58, 0.40, 0.36])
+        _draw(inset, labeled=False, line_alpha=0.85)
+        inset.axvspan(start, start + 1.0, color=S["colors"]["reference"], alpha=0.12, zorder=0)
+        inset.set_xlim(start - 0.4, stop + 0.4)
+        in_view = (unique["step_index"] >= start) & (unique["step_index"] <= stop)
+        y_values = [observed.loc[in_view].to_numpy(dtype=float)]
+        for group in forecast_curves.values():
+            cumulative = group["n_forecast"].cumsum()
+            y_values.append(
+                cumulative.loc[group["step_index"].between(start, stop)].to_numpy(dtype=float)
+            )
+        y_stack = np.concatenate(y_values)
+        pad = max(0.12 * float(y_stack.max() - y_stack.min()), 1.0)
+        inset.set_ylim(float(y_stack.min()) - pad, float(y_stack.max()) + pad)
+        inset.set_xticks(np.arange(start, stop + 1))
+        inset.tick_params(axis="both", labelsize=max(axis_tick_size - 3, 7))
+        inset.set_title(f"Windows {start:g}–{stop:g}", fontsize=max(axis_label_size - 2, 8))
+        ax.indicate_inset_zoom(inset, edgecolor=S["colors"]["reference"], alpha=0.9)
+    _legend(ax, fontsize=legend_fontsize)
     return _finish(fig)
 
 
 def fig_cumulative_igpa(
     scores: pd.DataFrame,
     horizon_days: float | None = None,
+    *,
+    line_width: dict[str, float] | float | None = None,
+    labels: dict[str, str] | None = None,
+    label_size: float | None = None,
+    tick_size: float | None = None,
 ) -> plt.Figure | None:
+    """Cumulative binary information gain of FINE against ETAS.
+
+    ``line_width``, ``labels``, ``label_size``, and ``tick_size`` match the
+    cumulative-count figure. A mapping uses the ``"FINE"`` stroke and the
+    ``"xlabel"`` text. The y-axis title stays ``"Cumulative IGPA"`` unless
+    ``labels`` sets ``"igpa"``.
+    """
     fine = scores.loc[scores["method"] == "FINE"].sort_values("step_index")
     if "IGPA" not in fine.columns or not fine["IGPA"].notna().any():
         return None
-    fig, ax = plt.subplots(figsize=figsize("wide"))
+    names = labels or {}
+    if isinstance(line_width, dict):
+        stroke = float(line_width.get("FINE", S["line_width"]))
+    elif line_width is None:
+        stroke = float(S["line_width"])
+    else:
+        stroke = float(line_width)
+    axis_label_size = float(S["font"]["label"] if label_size is None else label_size)
+    axis_tick_size = float(S["font"]["tick"] if tick_size is None else tick_size)
+    size_name = "cumulative_igpa" if "cumulative_igpa" in S["figsize"] else "wide"
+    fig, ax = plt.subplots(figsize=figsize(size_name))
     ax.plot(
         fine["step_index"],
         fine["IGPA"].cumsum(),
         color=method_color("FINE"),
-        lw=S["line_width"],
+        lw=stroke,
     )
-    ax.axhline(0.0, color=S["colors"]["reference"], lw=1.0)
-    ax.set_xlabel("Walk-forward step")
-    ax.set_ylabel("Cumulative IGPA")
+    ax.axhline(
+        0.0,
+        color=S["colors"]["reference"],
+        lw=1.0,
+        ls="--",
+        alpha=0.4,
+        zorder=0,
+    )
+    ax.set_xlabel(names.get("xlabel", "Walk-forward step"), fontsize=axis_label_size)
+    ax.set_ylabel(names.get("igpa", "Cumulative IGPA"), fontsize=axis_label_size)
+    ax.tick_params(axis="both", labelsize=axis_tick_size)
     ax.set_title(_stamp("Cumulative binary information gain of FINE against ETAS", horizon_days, scores))
+    _box_aspect(ax, "cumulative_igpa_aspect")
     return _finish(fig)
 
 
@@ -499,7 +1112,7 @@ def fig_cumulative_number_rows(
     ax.set_yticks(np.arange(len(table)), table["label"].astype(str).tolist())
     ax.set_xlabel("Event count over the test")
     ax.set_title(_stamp("Cumulative number test", horizon_days, number_table))
-    ax.legend(frameon=S["legend_frameon"], fontsize=S["font"]["legend"])
+    _legend(ax)
     return _finish(fig)
 
 
@@ -509,15 +1122,17 @@ def fig_window_coverage(
     horizon_days: float | None = None,
 ) -> plt.Figure:
     fig, ax = plt.subplots(figsize=figsize("wide"))
-    time_column = "forecast_start" if "forecast_start" in scores.columns else "step_index"
+    sort_column = "step_index" if "step_index" in scores.columns else "forecast_start"
+    lookup = _window_number_lookup(scores)
     for method in methods:
-        group = scores.loc[scores["method"] == method].sort_values(time_column)
+        group = scores.loc[scores["method"] == method].sort_values(sort_column)
         if group.empty:
             continue
+        x = _sequential_window_x(group, lookup)
         color = method_color(method)
         label = method_label(method)
         ax.fill_between(
-            group[time_column],
+            x,
             group["poisson_low"],
             group["poisson_high"],
             color=color,
@@ -526,25 +1141,27 @@ def fig_window_coverage(
             label=f"{label} 95%",
         )
         ax.plot(
-            group[time_column],
+            x,
             group["n_forecast"],
             color=color,
             lw=1.0,
             label=f"{label} expected",
         )
     observed = scores[
-        ["step_index", time_column, "n_observed", "method", "poisson_low", "poisson_high"]
+        ["step_index", "n_observed", "method", "poisson_low", "poisson_high"]
     ].copy()
+    if "forecast_start" in scores.columns:
+        observed["forecast_start"] = scores["forecast_start"]
     observed["covered"] = (observed["n_observed"] >= observed["poisson_low"]) & (
         observed["n_observed"] <= observed["poisson_high"]
     )
     coverage = observed.groupby("step_index", sort=False).agg(
         n_observed=("n_observed", "first"),
-        when=(time_column, "first"),
         fraction=("covered", "mean"),
     )
+    coverage = coverage.reset_index()
     circles = ax.scatter(
-        coverage["when"],
+        _sequential_window_x(coverage, lookup),
         coverage["n_observed"],
         c=coverage["fraction"],
         cmap=S["cmaps"]["coverage"],
@@ -556,7 +1173,7 @@ def fig_window_coverage(
         linewidths=0.4,
     )
     fig.colorbar(circles, ax=ax, label="fraction of models covering the count")
-    ax.set_xlabel("Forecast start" if time_column == "forecast_start" else "Walk-forward step")
+    _style_window_xaxis(ax)
     ax.set_ylabel("Events in the window")
     ax.set_title(_stamp("Window counts over the test", horizon_days, scores))
     ax.legend(frameon=S["legend_frameon"], ncol=2, fontsize=S["font"]["legend"])
@@ -599,6 +1216,7 @@ def _interval_rows(realizations: pd.DataFrame, method: str, value_column: str) -
         low, high = np.quantile(values, [LOW_QUANTILE, HIGH_QUANTILE])
         rows.append(
             {
+                "step_index": int(group["step_index"].iloc[0]),
                 "forecast_start": group["forecast_start"].iloc[0],
                 "n_observed": float(group["n_observed"].iloc[0]),
                 "observed": float(group["n_observed"].iloc[0])
@@ -612,7 +1230,7 @@ def _interval_rows(realizations: pd.DataFrame, method: str, value_column: str) -
         )
     if not rows:
         return pd.DataFrame()
-    return pd.DataFrame(rows).sort_values("forecast_start")
+    return pd.DataFrame(rows).sort_values("step_index")
 
 
 def fig_simulated_count_interval(
@@ -632,7 +1250,7 @@ def fig_simulated_count_interval(
     draw_high = np.maximum(high, draw_low)
     draw_observed = np.maximum(observed, floor)
     sizes = S["marker_area_base"] + S["marker_area_scale"] * np.maximum(observed, 0.0)
-    time = frame["forecast_start"]
+    time = _sequential_window_x(frame)
     fig, ax = plt.subplots(figsize=figsize("wide"))
     ax.vlines(time[inside], draw_low[inside], draw_high[inside], colors=S["colors"]["pass"], lw=0.7, alpha=0.8)
     ax.vlines(time[~inside], draw_low[~inside], draw_high[~inside], colors=S["colors"]["fail"], lw=0.9, alpha=0.9)
@@ -640,14 +1258,13 @@ def fig_simulated_count_interval(
     ax.scatter(time[~inside], draw_observed[~inside], s=sizes[~inside], c=S["colors"]["fail"], linewidths=0)
     ax.set_yscale("log")
     ax.set_ylabel("Number of earthquakes")
-    ax.set_xlabel("Forecast start")
+    _style_window_xaxis(ax)
     ax.set_title(_stamp(
         f"{method_label(method)} simulated-count interval — {_outside_of_total(inside)}",
         horizon_days,
         realizations,
     ))
     ax.grid(True, axis="y", which="both", color=S["colors"]["grid"], alpha=0.8)
-    fig.autofmt_xdate()
     return _finish(fig)
 
 
@@ -659,7 +1276,8 @@ def fig_statistic_interval(
     title: str,
     horizon_days: float | None = None,
 ) -> plt.Figure | None:
-    frame = frame.dropna(subset=["low", "high", "observed"]).sort_values("forecast_start")
+    sort_column = "step_index" if "step_index" in frame.columns else "forecast_start"
+    frame = frame.dropna(subset=["low", "high", "observed"]).sort_values(sort_column)
     if frame.empty:
         return None
     observed = frame["observed"].to_numpy(dtype=float)
@@ -669,17 +1287,16 @@ def fig_statistic_interval(
     sizes = S["marker_area_base"] + S["marker_area_scale"] * np.maximum(
         frame["n_observed"].to_numpy(dtype=float), 0.0
     )
-    time = frame["forecast_start"].to_numpy()
+    time = _sequential_window_x(frame)
     fig, ax = plt.subplots(figsize=figsize("wide"))
     ax.vlines(time[inside], low[inside], high[inside], colors=S["colors"]["pass"], lw=0.7, alpha=0.8)
     ax.vlines(time[~inside], low[~inside], high[~inside], colors=S["colors"]["fail"], lw=0.9, alpha=0.9)
     ax.scatter(time[inside], observed[inside], s=sizes[inside], c=S["colors"]["pass"], linewidths=0)
     ax.scatter(time[~inside], observed[~inside], s=sizes[~inside], c=S["colors"]["fail"], linewidths=0)
     ax.set_ylabel(ylabel)
-    ax.set_xlabel("Forecast start")
+    _style_window_xaxis(ax)
     ax.set_title(_stamp(f"{title} — {_outside_of_total(inside)}", horizon_days, frame))
     ax.grid(True, axis="y", color=S["colors"]["grid"], alpha=0.8)
-    fig.autofmt_xdate()
     return _finish(fig)
 
 
@@ -692,11 +1309,12 @@ def fig_quantile_series(
     title: str,
     horizon_days: float | None = None,
 ) -> plt.Figure | None:
-    subset = frame.loc[frame["method"] == method].dropna(subset=[column]).sort_values("forecast_start")
+    sort_column = "step_index" if "step_index" in frame.columns else "forecast_start"
+    subset = frame.loc[frame["method"] == method].dropna(subset=[column]).sort_values(sort_column)
     if subset.empty:
         return None
     score = subset[column].to_numpy(dtype=float)
-    time = subset["forecast_start"].to_numpy()
+    time = _sequential_window_x(subset)
     sizes = S["marker_area_base"] + S["marker_area_scale"] * np.maximum(
         subset["n_observed"].to_numpy(dtype=float), 0.0
     )
@@ -718,9 +1336,8 @@ def fig_quantile_series(
         )
     ax.set_ylim(-0.04, 1.04)
     ax.set_ylabel(ylabel)
-    ax.set_xlabel("Forecast start")
+    _style_window_xaxis(ax)
     ax.set_title(_stamp(title, horizon_days, subset))
-    fig.autofmt_xdate()
     return _finish(fig)
 
 
@@ -740,77 +1357,199 @@ def fig_quantile_series_combined(
     ylabel: str,
     title: str,
     horizon_days: float | None = None,
+    tick_labelsize: float | None = None,
+    labelsize: float | None = None,
 ) -> plt.Figure | None:
     """One quantile series per method, overlaid on a single axes.
 
-    Both methods share the forecast date and the observed-count marker size, so a
-    second filled marker would cover the first. The first method is drawn filled
-    and translucent. Later methods are open markers in ``colors['secondary']``,
-    which leaves the fill visible inside the outline.
+    ``scatter_hollow`` and ``scatter_markers`` in the style dict set the face
+    and the shape. Solid markers are drawn first. Hollow markers are larger and
+    drawn on top, so both stay visible on a shared forecast date.
+
+    ``tick_labelsize`` and ``labelsize`` override axis tick and axis-label font
+    sizes when set; otherwise the configured STYLE sizes are kept.
     """
     if column not in frame.columns:
         return None
-    fig, ax = plt.subplots(figsize=figsize("wide"))
+    size_name = "quantile_series" if "quantile_series" in S["figsize"] else "wide"
+    fig, ax = plt.subplots(figsize=figsize(size_name))
     ax.axhline(LOW_QUANTILE, color=S["colors"]["reference"], lw=0.8, ls="--", zorder=0)
     ax.axhline(HIGH_QUANTILE, color=S["colors"]["reference"], lw=0.8, ls="--", zorder=0)
     drawn = False
     pieces = []
-    markers = S["markers"]
-    for index, method in enumerate(methods):
-        subset = frame.loc[frame["method"] == method].dropna(subset=[column]).sort_values("forecast_start")
+    legend_artists = {}
+    hollow_map = S.get("scatter_hollow") or {}
+    marker_map = S.get("scatter_markers") or S["markers"]
+    sort_column = "step_index" if "step_index" in frame.columns else "forecast_start"
+    lookup = _window_number_lookup(frame)
+    styled = [
+        (index, method, bool(hollow_map.get(method, index > 0)))
+        for index, method in enumerate(methods)
+    ]
+    for index, method, hollow in sorted(styled, key=lambda item: item[2]):
+        subset = frame.loc[frame["method"] == method].dropna(subset=[column]).sort_values(sort_column)
         if subset.empty:
             continue
         pieces.append(subset)
         score = subset[column].to_numpy(dtype=float)
-        time = subset["forecast_start"].to_numpy()
+        time = _sequential_window_x(subset, lookup)
         sizes = S["marker_area_base"] + S["marker_area_scale"] * np.maximum(
             subset["n_observed"].to_numpy(dtype=float), 0.0
         )
+        if hollow:
+            sizes = sizes * 1.7
         finite = np.isfinite(score)
         passed = finite & (score >= LOW_QUANTILE) & (score <= HIGH_QUANTILE)
         failed = finite & ~passed
         pass_color, fail_color = _quantile_palette(index)
-        marker = markers.get(method, "o")
+        marker = marker_map.get(method, "o")
         label = method_label(method)
-        outlined = index > 0
         for chosen, color, band in (
             (passed, pass_color, "inside"),
             (failed, fail_color, "outside"),
         ):
             if not chosen.any():
                 continue
-            if outlined:
-                face, edge, alpha, width = "none", color, 1.0, 1.3
+            if hollow:
+                face, edge, width = "none", color, 1.4
             else:
-                face, edge, alpha, width = color, color, 0.55, 0.0
-            ax.scatter(
+                face, edge, width = color, color, 0.4
+            artist = ax.scatter(
                 time[chosen],
                 score[chosen],
                 s=sizes[chosen],
                 c=face,
                 marker=marker,
-                alpha=alpha,
+                alpha=1.0,
                 edgecolors=edge,
                 linewidths=width,
                 label=f"{label} {band}",
-                zorder=2 + index,
+                zorder=3 if hollow else 2,
             )
+            legend_artists[f"{label} {band}"] = artist
             drawn = True
     if not drawn:
         plt.close(fig)
         return None
     ax.set_ylim(-0.04, 1.04)
     ax.set_ylabel(ylabel)
-    ax.set_xlabel("Forecast start")
+    _style_window_xaxis(ax)
     combined = pd.concat(pieces, ignore_index=True)
     ax.set_title(_stamp(title, horizon_days, combined))
+    if tick_labelsize is not None:
+        ax.tick_params(axis="both", labelsize=float(tick_labelsize))
+    if labelsize is not None:
+        ax.xaxis.label.set_size(float(labelsize))
+        ax.yaxis.label.set_size(float(labelsize))
+    _box_aspect(ax, "quantile_series_aspect")
+    ordered = [
+        legend_artists[f"{method_label(method)} {band}"]
+        for method in methods
+        for band in ("inside", "outside")
+        if f"{method_label(method)} {band}" in legend_artists
+    ]
+    _legend(ax, handles=ordered, labels=[artist.get_label() for artist in ordered])
+    return _finish(fig)
+
+
+def fig_quantile_by_discrepancy(
+    frame: pd.DataFrame,
+    methods: list[str],
+    column: str,
+    *,
+    ylabel: str,
+    title: str,
+    horizon_days: float | None = None,
+    outside_column: str = "outside_95",
+) -> plt.Figure | None:
+    """Quantile series colored by Bayona's percentage count discrepancy.
+
+    Marker shape separates methods. Face color is Δ (%) from equation 4 of
+    Bayona et al. (2026). A red edge marks a window outside the 95% test.
+    Later methods are drawn first and slightly larger, so both markers stay
+    visible where they share a forecast start.
+    """
+    required = {column, "delta_percent", "method", "n_observed", outside_column}
+    if not required.issubset(frame.columns):
+        return None
+    if "step_index" not in frame.columns and "forecast_start" not in frame.columns:
+        return None
+    sort_column = "step_index" if "step_index" in frame.columns else "forecast_start"
+    drop_cols = [column, "delta_percent", sort_column]
+    prepared = []
+    for index, method in enumerate(methods):
+        subset = (
+            frame.loc[frame["method"] == method]
+            .dropna(subset=drop_cols)
+            .sort_values(sort_column)
+        )
+        if subset.empty:
+            continue
+        prepared.append((index, method, subset))
+    if not prepared:
+        return None
+    lookup = _window_number_lookup(pd.concat([item[2] for item in prepared], ignore_index=True))
+    deltas = np.concatenate([
+        item[2]["delta_percent"].to_numpy(dtype=float) for item in prepared
+    ])
+    norm = Normalize(vmin=0.0, vmax=max(float(np.nanmax(deltas)), 1.0))
+    cmap = plt.get_cmap(S["cmaps"]["discrepancy"])
+    fig, ax = plt.subplots(figsize=figsize("wide"))
+    ax.axhline(LOW_QUANTILE, color=S["colors"]["reference"], lw=0.8, ls="--", zorder=0)
+    ax.axhline(HIGH_QUANTILE, color=S["colors"]["reference"], lw=0.8, ls="--", zorder=0)
+    fail = S["colors"]["fail"]
+    markers = S["markers"]
+    for index, method, subset in reversed(prepared):
+        score = subset[column].to_numpy(dtype=float)
+        time = _sequential_window_x(subset, lookup)
+        delta = subset["delta_percent"].to_numpy(dtype=float)
+        sizes = S["marker_area_base"] + S["marker_area_scale"] * np.maximum(
+            subset["n_observed"].to_numpy(dtype=float), 0.0
+        )
+        outside = subset[outside_column].fillna(False).to_numpy(dtype=bool)
+        scale = 1.0 if index == 0 else 1.7
+        marker = markers.get(method, "o")
+        inside = ~outside
+        # The first method is smaller and drawn last, so its face stays visible
+        # inside the larger marker of the method underneath.
+        layer = len(methods) - index
+        if inside.any():
+            ax.scatter(
+                time[inside], score[inside], s=sizes[inside] * scale, c=delta[inside],
+                cmap=cmap, norm=norm, marker=marker, linewidths=0.0, zorder=2 + layer,
+            )
+        if outside.any():
+            ax.scatter(
+                time[outside], score[outside], s=sizes[outside] * scale, c=delta[outside],
+                cmap=cmap, norm=norm, marker=marker, edgecolors=fail, linewidths=1.35,
+                zorder=4 + layer,
+            )
+    artist = ScalarMappable(norm=norm, cmap=cmap)
+    artist.set_array([])
+    fig.colorbar(artist, ax=ax, label=r"$\Delta$ (%)", pad=0.16, fraction=0.046)
+    handles = [
+        Line2D(
+            [0], [0], linestyle="none", marker=markers.get(method, "o"),
+            markerfacecolor="0.35", markeredgecolor="0.35", markersize=7,
+            label=method_label(method),
+        )
+        for _index, method, _subset in prepared
+    ]
+    handles.append(Line2D(
+        [0], [0], linestyle="none", marker="o", markerfacecolor="0.85",
+        markeredgecolor=fail, markeredgewidth=1.4, markersize=7, label="outside 95%",
+    ))
     ax.legend(
+        handles=handles,
         frameon=S["legend_frameon"],
         fontsize=S["font"]["legend"],
         loc="center left",
-        bbox_to_anchor=(1.01, 0.5),
+        bbox_to_anchor=(1.02, 0.5),
     )
-    fig.autofmt_xdate()
+    ax.set_ylim(-0.04, 1.04)
+    ax.set_ylabel(ylabel)
+    _style_window_xaxis(ax)
+    ax.set_title(_stamp(title, horizon_days, pd.concat([item[2] for item in prepared], ignore_index=True)))
     return _finish(fig)
 
 
@@ -839,6 +1578,10 @@ def fig_quantile_histogram_combined(
     xlabel: str,
     title: str,
     horizon_days: float | None = None,
+    consistent_column: str | None = None,
+    invert_x: bool = False,
+    show_legend: bool = True,
+    show_summary: bool = True,
 ) -> plt.Figure | None:
     """One quantile histogram per method, on the same bins.
 
@@ -855,8 +1598,10 @@ def fig_quantile_histogram_combined(
     handles = []
     drawn = False
     for index, method in enumerate(methods):
-        score = pd.to_numeric(frame.loc[frame["method"] == method, column], errors="coerce").to_numpy(dtype=float)
-        score = score[np.isfinite(score)]
+        method_frame = frame.loc[frame["method"] == method]
+        score = pd.to_numeric(method_frame[column], errors="coerce").to_numpy(dtype=float)
+        finite = np.isfinite(score)
+        score = score[finite]
         if score.size == 0:
             continue
         counts, _ = np.histogram(score, bins=edges)
@@ -875,7 +1620,12 @@ def fig_quantile_histogram_combined(
                 facecolor="none", edgecolor=colors, linewidth=1.4, zorder=3,
             )
             handles.append(Patch(facecolor="none", edgecolor=pass_color, linewidth=1.4, label=label))
-        pass_rate, ks_stat = _histogram_summary(score)
+        _band_rate, ks_stat = _histogram_summary(score)
+        if consistent_column and consistent_column in method_frame.columns:
+            flag = method_frame[consistent_column].to_numpy()[finite]
+            pass_rate = float(np.mean(flag.astype(bool)))
+        else:
+            pass_rate = _band_rate
         notes.append(f"{label}  {pass_rate:.3f}   KS {ks_stat:.3f}")
         drawn = True
     if not drawn:
@@ -884,22 +1634,31 @@ def fig_quantile_histogram_combined(
     ax.set_xlabel(xlabel)
     ax.set_ylabel("Frequency")
     ax.set_title(_stamp(f"{title} histogram", horizon_days))
-    ax.legend(handles=handles, frameon=S["legend_frameon"], fontsize=S["font"]["legend"], loc="upper left")
-    ax.text(
-        0.98,
-        0.95,
-        "Pass %\n" + "\n".join(notes),
-        transform=ax.transAxes,
-        ha="right",
-        va="top",
-        fontsize=S["font"]["legend"],
-        bbox={"boxstyle": "round", "facecolor": "white", "edgecolor": S["colors"]["grid"], "linewidth": 0.8},
-    )
+    if show_legend:
+        ax.legend(handles=handles, frameon=S["legend_frameon"], fontsize=S["font"]["legend"], loc="upper left")
+    if show_summary:
+        ax.text(
+            0.98,
+            0.95,
+            "Pass %\n" + "\n".join(notes),
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            fontsize=S["font"]["legend"],
+            bbox={"boxstyle": "round", "facecolor": "white", "edgecolor": S["colors"]["grid"], "linewidth": 0.8},
+        )
+    if invert_x:
+        ax.invert_xaxis()
     return _finish(fig)
 
 
 def fig_quantile_histogram(
-    values: np.ndarray, *, title: str, xlabel: str, horizon_days: float | None = None,
+    values: np.ndarray,
+    *,
+    title: str,
+    xlabel: str,
+    horizon_days: float | None = None,
+    invert_x: bool = False,
 ) -> plt.Figure | None:
     score = np.asarray(values, dtype=float)
     score = score[np.isfinite(score)]
@@ -928,6 +1687,8 @@ def fig_quantile_histogram(
         fontsize=S["font"]["legend"],
         bbox={"boxstyle": "round", "facecolor": "white", "edgecolor": S["colors"]["grid"], "linewidth": 0.8},
     )
+    if invert_x:
+        ax.invert_xaxis()
     return _finish(fig)
 
 

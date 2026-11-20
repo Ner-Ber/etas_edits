@@ -61,9 +61,43 @@ with $N \sim \mathrm{Poisson}(N_{\mathrm{fore}})$. These are pyCSEP’s `poisson
 
 ### Negative-binomial 95% interval
 
-The negative-binomial number test replaces the Poisson with a distribution whose variance can exceed its mean ([pyCSEP `negative_binomial_number_test`](https://docs.cseptesting.org/reference/generated/csep.core.binomial_evaluations.negative_binomial_number_test.html); the two-tail construction is the same as the N-test in [Zechar et al., 2010](https://doi.org/10.1785/0120090192)). Here the variance is the sample variance of the saved catalog sizes, with one degree of freedom. The test is undefined when that variance is not larger than the mean, so those windows have no negative-binomial interval.
+The negative-binomial number test replaces the Poisson with a distribution whose variance can exceed its mean ([pyCSEP `negative_binomial_number_test`](https://docs.cseptesting.org/reference/generated/csep.core.binomial_evaluations.negative_binomial_number_test.html); the two-tail construction is the same as the N-test in [Zechar et al., 2010](https://doi.org/10.1785/0120090192)). The mean of that distribution is the forecast count. The variance is estimated from the saved catalogs, not from the forecast.
 
-A window **passes the NBD 95% number test** when both negative-binomial tails are at least 0.025. On the cumulative number figure, the mean is the sum of $N_{\mathrm{fore}}$ over windows and the variance is the variance of the total event count of each saved catalog over the whole test.
+For one window, let $c_1,\ldots,c_S$ be the event counts of the $S$ saved catalogs in that window, and write $\bar c$ for their average. With $S \ge 2$,
+
+$$
+s^2 = \frac{1}{S-1}\sum_{i=1}^{S}(c_i - \bar c)^2.
+$$
+
+This is `numpy.var(..., ddof=1)` in `etas/rolling_analysis.py`. The negative binomial is then fit by the method of moments to $\mu = N_{\mathrm{fore}}$ and variance $s^2$ (pyCSEP `_nbd_number_test_ndarray`; the same map is `negative_binomial_interval` in `etas/bayona_evaluations.py`):
+
+$$
+\upsilon = \frac{\mu}{s^2}, \qquad \tau = \frac{\mu^2}{s^2 - \mu}.
+$$
+
+$\upsilon$ is the success probability and $\tau$ is the number of successes in `scipy.stats.nbinom`. $\tau$ is not required to be an integer. The random variable $N$ is the number of failures before $\tau$ successes,
+
+$$
+P(N = k) = \binom{k+\tau-1}{k}\,\upsilon^{\tau}\,(1-\upsilon)^{k}, \qquad k = 0,1,2,\ldots.
+$$
+
+These parameters recover the two moments that were supplied: $\mathbb{E}[N] = \tau(1-\upsilon)/\upsilon = \mu$ and $\mathrm{Var}(N) = \tau(1-\upsilon)/\upsilon^{2} = s^2$. The fit needs $s^2 > \mu$, so that $0 < \upsilon < 1$ and $\tau > 0$. When the saved catalogs are not overdispersed, or when fewer than two catalogs are available, both tails are left undefined and the window has no negative-binomial interval.
+
+Let $F$ be the cumulative distribution function of this law. pyCSEP evaluates it $\varepsilon = 10^{-6}$ off the observed count, which places the point mass at an integer $N_{\mathrm{obs}}$ into only one of the two tails:
+
+$$
+\delta_1 = 1 - F(N_{\mathrm{obs}} - \varepsilon) = P(N \ge N_{\mathrm{obs}}), \qquad \delta_2 = F(N_{\mathrm{obs}} + \varepsilon) = P(N \le N_{\mathrm{obs}}).
+$$
+
+$\delta_1$ small means the forecast, with this extra variance, still produced too few events. $\delta_2$ small means it produced too many. A window **passes the NBD 95% number test** when $\delta_1 \ge 0.025$ and $\delta_2 \ge 0.025$. **Windows passing NBD 95% number test** is the fraction of windows that meet both inequalities. A window whose tails are undefined fails the comparison, so it is not counted as a pass.
+
+The interval drawn on the cumulative number figure is the central 95% range of the same distribution, the 0.025 and 0.975 quantiles from `scipy.stats.nbinom.ppf`:
+
+$$
+\big[F^{-1}(0.025),\; F^{-1}(0.975)\big].
+$$
+
+There the mean is $\mu = \sum N_{\mathrm{fore}}$, the sum of the seed-averaged expected counts over windows, and $s^2$ is the one-degree-of-freedom variance of the total event count of each saved catalog over the whole test.
 
 ### Simulated-count interval and histogram
 
@@ -147,20 +181,105 @@ where $c$ is the scaled catalog and $u$ is the scaled mean of the simulations. T
 
 **M-test $\kappa$** is the fraction of simulated distances at most the observed distance (Zechar et al., 2010, equation 19). $\kappa$ near 0 means the observation is closer to the forecast than almost every simulation. $\kappa$ near 1 means it is farther than almost every simulation. Windows with no observed events, and simulated catalogs with no events, are omitted.
 
-## Tests on the concatenated catalogs
+## Tests on the full test interval
 
-These curves are also computed only when `COMPUTE_HEAVY_ACROSS` is true. Every saved catalog for a horizon is joined into one catalog forecast covering the whole test, and the observed test catalog is scored once. A small quantile means the observation is in the lower tail of the simulations. The reference line on each quantile plot is the rejection threshold used for that score.
+These curves are computed only when `COMPUTE_HEAVY_ACROSS` is true, except the N-test, M-test, S-test, and binary-$\zeta$ figures, which are summarized from per-window scores. For the PL figures, each saved catalog is restricted to the whole test interval, from the first forecast start through the last forecast end, filtered to the forecast region, and scored once. One point is one horizon.
 
-| Figure | Definition | Source |
-| --- | --- | --- |
-| PL-test $\delta_2$ | Fraction of simulated spatial pseudolikelihoods at most the observed one. The pseudolikelihood conditions on the total number of events, so this is a catalog spatial score. | [Zechar et al., 2010](https://doi.org/10.1785/0120090192); pyCSEP `pseudolikelihood_test` |
-| N-test $\min(\delta_1, \delta_2)$ | Smaller of the two catalog-count tails. The forecast is rejected at 5% when this is below 0.05. | [Schorlemmer et al., 2007](https://doi.org/10.1785/gssrl.78.1.17); [Zechar et al., 2010](https://doi.org/10.1785/0120090192) |
-| N-test $\delta_2$ | Fraction of simulated catalogs with at most $N_{\mathrm{obs}}$ events. | Same |
-| M-test $\delta_2$ | Fraction of simulated magnitude distances at most the observed distance. | Zechar et al. (2010), equation 19; pyCSEP `magnitude_test` |
-| S-test $\delta_2$ | Fraction of simulated spatial log-likelihoods at most the observed one. | Zechar et al. (2010), equation 23; pyCSEP `spatial_test` |
-| Poisson L-test $\gamma$ | Fraction of joint Poisson log-likelihoods, from catalogs drawn bin by bin, that are at most the observed joint log-likelihood. | Zechar et al. (2010), §5.2.1, equation 17 |
+The PL pseudolikelihood figure is **not** a quantile. pyCSEP also computes the quantile of the observed catalog against those same full catalogs (`L_delta2` in `csep_molchan.csv`, stored as `PL_delta`). That column is the PL-test $\gamma_L$ figure: one value per horizon, so it has no standard-deviation band. The pseudolikelihood figure’s marker is the mean of the raw per-catalog statistic, and its band is that statistic’s sample standard deviation, drawn separately for ETAS and FINE (`fig_metric_mean_std_vs_horizon`). The N-test, M-test, and S-test figures are the exceptions: each summarizes a per-window quantile, as described below. The binary-$\zeta$ figure is the same kind of summary for the Bayona binary spatial quantile.
 
-The per-window S-test $\zeta$ and this concatenated S-test $\delta_2$ use the same Zechar spatial statistic. One is computed inside each forecast window; the other is computed once on the joined catalogs.
+Let $X_1,\ldots,X_R$ be the finite values of the statistic on the $R$ realizations that pyCSEP keeps for that test. The plotted mean and band are
+
+$$
+\bar X = \frac{1}{R}\sum_{r=1}^{R} X_r, \qquad
+s_X = \sqrt{\frac{1}{R-1}\sum_{r=1}^{R}(X_r-\bar X)^2}
+$$
+
+when $R\ge 2$, and $s_X = 0$ when only one finite value remains. The band is $\bar X \pm s_X$.
+
+For the PL statistic the reference rate is the average space–magnitude histogram of these same catalogs, not the seed-averaged intensity grid used for $N_{\mathrm{fore}}$. In bin $(i,k)$,
+
+$$
+\lambda_{i,k} = \frac{1}{R}\sum_{r=1}^{R}\omega^{(r)}_{i,k}.
+$$
+
+The spatial rate is $\lambda_i = \sum_k \lambda_{i,k}$, and $\Lambda = \sum_i \lambda_i$.
+
+### PL-test mean pseudolikelihood
+
+For a catalog with spatial counts $\omega_i$ and total $n = \sum_i \omega_i$, pyCSEP’s `pseudolikelihood_test` returns the Poisson log-likelihood of those counts with the $\log(\omega!)$ term omitted ([Zechar et al., 2010](https://doi.org/10.1785/0120090192); [Savran et al., 2020](https://doi.org/10.1785/0120200026); pyCSEP `_compute_likelihood`):
+
+$$
+\mathrm{PL} =
+\begin{cases}
+-\Lambda & \text{if } n = 0,\\[4pt]
+\sum_{i:\,\omega_i \neq 0} \omega_i \log \lambda_i \;-\; \Lambda & \text{if } n > 0.
+\end{cases}
+$$
+
+A realization with no events in the test region is kept and scores $-\Lambda$. Higher PL means the catalog’s locations sit in higher-rate cells. The figure is the mean and standard deviation of these PL values.
+
+### PL-test \(\gamma_L\)
+
+This figure is the quantile of the same pseudolikelihood, Savran et al. (2020) equation 18 (pyCSEP `pseudolikelihood_test`). It uses the full catalogs for that horizon, the same scores whose mean and standard deviation are `PL_mean` and `PL_std`. It is stored as `PL_delta` in `csep_molchan.csv`. There is one value per horizon, so the figure has no band.
+
+Let \(\widehat L_{\mathrm{obs}}\) be the observed pseudolikelihood on the whole test interval, and let \(\widehat L_j\) be the same score for saved catalog \(j\). With \(R\) catalogs (about 30 per horizon),
+
+$$
+\gamma_L = \frac{\#\{\widehat L_j \le \widehat L_{\mathrm{obs}}\}}{R}.
+$$
+
+A value near 0 means the observation is more likely than almost every simulation. A value near 1 means it is less likely.
+
+### N-test mean \(\min(\delta_1,\delta_2)\)
+
+This figure is the catalog number test of Zechar et al. (2010), equations (8a) and (8b), with the Poisson CDF replaced by the empirical distribution of the saved catalogs (pyCSEP `number_test` and `get_quantiles`). It is computed **per window**, then summarized per horizon. It does not use the single full-test pair stored as `N_delta1` and `N_delta2`.
+
+For window \(w\), let \(N_{r,w}\) be the event count of saved catalog \(r\) inside that window, and let \(N_{\mathrm{obs},w}\) be the observed count. With \(R\) catalogs,
+
+$$
+\delta_{1,w} = \frac{\#\{N_{r,w} \ge N_{\mathrm{obs},w}\}}{R}, \qquad
+\delta_{2,w} = \frac{\#\{N_{r,w} \le N_{\mathrm{obs},w}\}}{R}, \qquad
+t_w = \min(\delta_{1,w}, \delta_{2,w}).
+$$
+
+\(\delta_1\) small means the catalogs produced too few events. \(\delta_2\) small means they produced too many. \(t_w\) is the smaller tail, which is the score Zechar et al. compare with 0.025. Over the \(W\) windows of one horizon,
+
+$$
+\bar t = \frac{1}{W}\sum_{w=1}^{W} t_w, \qquad
+s_t = \sqrt{\frac{1}{W-1}\sum_{w=1}^{W}(t_w - \bar t)^2}.
+$$
+
+The marker is \(\bar t\) and the band is \(\bar t \pm s_t\), drawn separately for ETAS and FINE. The counts come from `window_realization_counts.csv`.
+
+### M-test mean $\kappa$
+
+For each window, $\kappa$ is the catalog magnitude-test quantile: the fraction of saved catalogs whose magnitude distance is at most the observed distance. That is the same $\delta_2$ returned by pyCSEP’s `magnitude_test`. The per-window values are in `presentation_tables/m_deltas.csv`. Over the $W$ windows of one horizon,
+
+$$
+\bar\kappa = \frac{1}{W}\sum_{w=1}^{W}\kappa_w, \qquad
+s_\kappa = \sqrt{\frac{1}{W-1}\sum_{w=1}^{W}(\kappa_w-\bar\kappa)^2}.
+$$
+
+The marker is $\bar\kappa$ and the band is $\bar\kappa \pm s_\kappa$. $\kappa$ near 0 means the observed magnitudes in that window are closer to the forecast than almost every simulation. $\kappa$ near 1 means they are farther than almost every simulation. The single full-test value `M_delta` is not drawn.
+
+### S-test mean $\zeta$
+
+For each window, S-test $\zeta$ is the fraction of simulated spatial log-likelihoods at most the observed one (Zechar et al., 2010, equation 23; pyCSEP `spatial_test`). The per-window values are the `zeta` column of `presentation_tables/s_deltas.csv`. Over the $W$ finite window scores of one horizon,
+
+$$
+\bar\zeta = \frac{1}{W}\sum_{w=1}^{W}\zeta_w, \qquad
+s_\zeta = \sqrt{\frac{1}{W-1}\sum_{w=1}^{W}(\zeta_w-\bar\zeta)^2}.
+$$
+
+The marker is $\bar\zeta$ and the band is $\bar\zeta \pm s_\zeta$. A small $\zeta$ means the observed locations are less likely than almost every simulation. Windows with no finite $\zeta$ are omitted. The mean of the raw spatial log-likelihoods is not drawn.
+
+### Binary $\zeta$
+
+Binary $\zeta$ is the fraction of simulated active-cell catalogs whose joint binary log-likelihood is at most the observed one. The per-window values are the `binary_zeta` column of the same table, copied from `scores.csv` column `zeta`. The figure is the mean and sample standard deviation of those values across windows of one horizon, with the same band $\bar\zeta \pm s_\zeta$.
+
+### Poisson L-test $\gamma$
+
+This curve is still a quantile. It is the fraction of joint Poisson log-likelihoods, from catalogs drawn bin by bin, that are at most the observed joint log-likelihood (Zechar et al., 2010, §5.2.1, equation 17). The reference line is $0.025$.
 
 ### Molchan area
 
@@ -190,6 +309,8 @@ Kolmogorov, A. N. (1933). Sulla determinazione empirica di una legge di distribu
 Molchan, G. M. (1990). Strategies in strong earthquake prediction. *Physics of the Earth and Planetary Interiors, 61*(1–2), 84–98. https://doi.org/10.1016/0031-9201(90)90097-G
 
 Rhoades, D. A., Schorlemmer, D., Gerstenberger, M. C., Christophersen, A., Zechar, J. D., & Imoto, M. (2011). Efficient testing of earthquake forecasting models. *Acta Geophysica, 59*(4), 728–747. https://doi.org/10.2478/s11600-011-0013-5
+
+Savran, W. H., Werner, M. J., Marzocchi, W., Rhoades, D. A., Jackson, D. D., Milner, K. R., Field, E. H., & Michael, A. J. (2020). Pseudoprospective evaluation of UCERF3-ETAS forecasts during the 2019 Ridgecrest sequence. *Bulletin of the Seismological Society of America, 110*(4), 1799–1817. https://doi.org/10.1785/0120200026
 
 Savran, W. H., Werner, M. J., Schorlemmer, D., Maechling, P. J., Rhoades, D. A., Jackson, D. D., … Marzocchi, W. (2022). pyCSEP: A Python toolkit for earthquake forecast developers. *Seismological Research Letters, 93*(5), 2858–2870. https://doi.org/10.1785/0220220033
 
