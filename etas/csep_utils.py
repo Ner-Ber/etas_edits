@@ -264,8 +264,7 @@ def build_catalog_forecast_from_dataframes(
         filtered = filter_to_csep_region(
             raw_df, region=region, m_ref=m_ref, study_poly=study_poly
         )
-        if filtered.empty:
-            continue
+        # An empty realization still counts: its number-test score is zero events.
         simulated_catalogs.append(
             dataframe_to_csep_catalog(filtered, catalog_id=i, region=region)
         )
