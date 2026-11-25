@@ -111,6 +111,7 @@ def _run_seed(
     output_root: Path | None,
     methods: str | None,
     force_rerun: bool,
+    start_step: int,
     env: dict[str, str],
     log_path: Path,
     dry_run: bool,
@@ -133,6 +134,8 @@ def _run_seed(
         cmd.extend(["--output-root", str(output_root)])
     if methods:
         cmd.extend(["--methods", methods])
+    if start_step > 0:
+        cmd.extend(["--start-step", str(int(start_step))])
     if force_rerun:
         cmd.append("--force-rerun")
 
@@ -213,6 +216,15 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_MAGNET,
         help="eq_mag_prediction tree with FeatureState modules.",
     )
+    p.add_argument(
+        "--start-step",
+        type=int,
+        default=0,
+        help=(
+            "Skip simulating steps with step_index < N (single horizon only; "
+            "forwarded to run_rolling_continuation.py)."
+        ),
+    )
     p.add_argument("--force-rerun", action="store_true")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument(
@@ -225,6 +237,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.max_workers < 1:
         raise SystemExit("--max-workers must be >= 1")
+    if args.start_step < 0:
+        raise SystemExit("--start-step must be >= 0")
+    horizons_list = [h.strip() for h in args.horizon_days.split(",") if h.strip()]
+    if args.start_step > 0 and len(horizons_list) > 1:
+        raise SystemExit(
+            f"--start-step ({args.start_step}) requires a single horizon; "
+            f"got --horizon-days={args.horizon_days!r}"
+        )
     config_path = args.config.expanduser().resolve()
     if not config_path.is_file():
         raise SystemExit(f"Config not found: {config_path}")
@@ -291,6 +311,7 @@ def main(argv: list[str] | None = None) -> int:
                 output_root=output_root,
                 methods=args.methods,
                 force_rerun=args.force_rerun,
+                start_step=args.start_step,
                 env=env,
                 log_path=log_dir / f"seed_{seed}.log",
                 dry_run=args.dry_run,

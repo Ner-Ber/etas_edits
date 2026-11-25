@@ -151,6 +151,16 @@ def main(argv: list[str] | None = None) -> int:
         help="Re-run ETAS parameter inversion per step.",
     )
     parser.add_argument(
+        "--start-step",
+        type=int,
+        default=0,
+        help=(
+            "Skip simulating steps with step_index < N (single horizon only; "
+            "assumes prefix steps and any required prior anchor inversions are "
+            "already seeded on disk)."
+        ),
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -212,6 +222,14 @@ def main(argv: list[str] | None = None) -> int:
                 )
 
     horizons = parse_horizons(args.horizon_days)
+    start_step = int(args.start_step)
+    if start_step < 0:
+        raise ValueError(f"--start-step must be non-negative, got {start_step}")
+    if start_step > 0 and len(horizons) > 1:
+        raise ValueError(
+            f"--start-step ({start_step}) can only be used with a single horizon; "
+            f"got horizons={horizons}"
+        )
     schedule = rolling.normalize_schedule_mode(
         args.schedule if args.schedule is not None else cfg.get("schedule")
     )
@@ -231,6 +249,7 @@ def main(argv: list[str] | None = None) -> int:
     if len(horizons) == 1:
         rolling.run_walk_forward_for_horizon(
             horizon_days=horizons[0],
+            start_step=start_step,
             **walk_kwargs,
         )
     else:

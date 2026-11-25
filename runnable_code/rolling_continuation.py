@@ -216,6 +216,14 @@ def horizon_dir_name(horizon_days: float | int) -> str:
     return f"{_HORIZON_DIR_PREFIX}{h_float:.1f}d"
 
 
+def _atomic_write_text(path: pathlib.Path, content: str) -> None:
+    """Write ``content`` to ``path`` via a PID-scoped temp file + replace."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / f".{path.name}.{os.getpid()}.tmp"
+    tmp.write_text(content, encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def extract_observed_events(
     catalog_df: pd.DataFrame,
     start_time: pd.Timestamp,
@@ -223,11 +231,14 @@ def extract_observed_events(
     mc: float,
 ) -> pd.DataFrame:
     """Extract true observed earthquakes in [start_time, end_time] with magnitude >= mc."""
-    df = catalog_df.copy()
-    if not pd.api.types.is_datetime64_any_dtype(df["time"]):
-        df["time"] = pd.to_datetime(df["time"], utc=True, format="mixed").dt.tz_convert(None)
-    mask = (df["time"] >= start_time) & (df["time"] <= end_time) & (df["magnitude"] >= mc)
-    return df.loc[mask].sort_values("time").reset_index(drop=True)
+    times = catalog_df["time"]
+    if not pd.api.types.is_datetime64_any_dtype(times):
+        times = pd.to_datetime(times, utc=True, format="mixed").dt.tz_convert(None)
+    mask = (times >= start_time) & (times <= end_time) & (catalog_df["magnitude"] >= mc)
+    out = catalog_df.loc[mask].copy()
+    if not out.empty and not pd.api.types.is_datetime64_any_dtype(out["time"]):
+        out["time"] = times.loc[mask]
+    return out.sort_values("time").reset_index(drop=True)
 
 
 def collect_realizations_for_step(
@@ -258,6 +269,20 @@ def collect_realizations_for_step(
     return realizations_by_method
 
 
+def _load_parsed_catalog(base_cfg: dict, repo_root: pathlib.Path) -> pd.DataFrame | None:
+    """Load and parse the observed catalog once for rolling step finalization."""
+    raw_path = base_cfg.get("fn_catalog")
+    if not raw_path:
+        return None
+    catalog_path = compare._resolve_path(repo_root, raw_path)
+    if not catalog_path.is_file():
+        return None
+    df = pd.read_csv(catalog_path)
+    if "time" in df.columns and not pd.api.types.is_datetime64_any_dtype(df["time"]):
+        df["time"] = pd.to_datetime(df["time"], utc=True, format="mixed").dt.tz_convert(None)
+    return df
+
+
 def finalize_rolling_step(
     *,
     base_cfg: dict,
@@ -265,10 +290,12 @@ def finalize_rolling_step(
     step_output_dir: pathlib.Path,
     repo_root: pathlib.Path,
     methods: Sequence[str],
+    raw_catalog: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     """Aggregate all seed catalogs for a step and write step_summary.json."""
-    catalog_path = compare._resolve_path(repo_root, base_cfg["fn_catalog"])
-    raw_catalog = pd.read_csv(catalog_path)
+    if raw_catalog is None:
+        catalog_path = compare._resolve_path(repo_root, base_cfg["fn_catalog"])
+        raw_catalog = pd.read_csv(catalog_path)
     mc = float(base_cfg.get("mc", 3.0))
     obs_events = extract_observed_events(
         raw_catalog,
@@ -290,9 +317,9 @@ def finalize_rolling_step(
         "windows": step_window.to_dict(),
         "metrics": metrics,
     }
-    (step_output_dir / "step_summary.json").write_text(
+    _atomic_write_text(
+        step_output_dir / "step_summary.json",
         json.dumps(step_meta, indent=2),
-        encoding="utf-8",
     )
     return step_meta
 
@@ -446,10 +473,10 @@ def execute_rolling_step(
     else:
         step_cfg_path = step_output_dir / "step_config.json"
     payload = json.dumps(step_cfg, indent=2)
-    step_cfg_path.write_text(payload, encoding="utf-8")
+    _atomic_write_text(step_cfg_path, payload)
     shared_cfg = step_output_dir / "step_config.json"
     if step_cfg_path != shared_cfg:
-        shared_cfg.write_text(payload, encoding="utf-8")
+        _atomic_write_text(shared_cfg, payload)
 
     runner_args = [
         "--config",
@@ -496,6 +523,7 @@ def run_walk_forward_for_horizon(
     force_rerun: bool = False,
     finetuning_time_days: float | None = None,
     schedule: ScheduleMode = "by_step",
+    start_step: int = 0,
 ) -> dict[str, Any]:
     """
     Run the full sequential walk-forward forecast for a fixed horizon T.
@@ -503,6 +531,11 @@ def run_walk_forward_for_horizon(
     schedule:
       by_step — for each time window, run all realizations (default).
       by_realization — finish all windows for seed 0, then seed 1, etc.
+    start_step:
+      Skip simulating steps with ``step_index < start_step`` while preserving
+      full-horizon step numbering, per-step RNG seed derivation, and inversion
+      anchor indices (expects prefix steps and any required prior anchor
+      inversions to be seeded under ``output_root``).
     """
     steps = compute_rolling_steps(
         timewindow_start=base_cfg["timewindow_start"],
@@ -512,6 +545,12 @@ def run_walk_forward_for_horizon(
         auxiliary_start=base_cfg.get("auxiliary_start"),
         finetuning_time_days=finetuning_time_days,
     )
+
+    start_step_idx = int(start_step)
+    if start_step_idx < 0 or start_step_idx > len(steps):
+        raise ValueError(
+            f"start_step must be in [0, {len(steps)}], got {start_step_idx}"
+        )
 
     h_dir = output_root / horizon_dir_name(horizon_days)
     h_dir.mkdir(parents=True, exist_ok=True)
@@ -535,16 +574,44 @@ def run_walk_forward_for_horizon(
             return None
         return h_dir / step_dir_name(anchor)
 
+    steps_to_run = [step for step in steps if step.step_index >= start_step_idx]
+    if start_step_idx > 0 and not force_inversion:
+        required_prior_anchors = sorted(
+            {
+                anchor_of[step.step_index]
+                for step in steps_to_run
+                if anchor_of[step.step_index] < start_step_idx
+            }
+        )
+        missing_anchors = [
+            h_dir / step_dir_name(anchor) / "active_inversion.json"
+            for anchor in required_prior_anchors
+            if not (h_dir / step_dir_name(anchor) / "active_inversion.json").is_file()
+        ]
+        if missing_anchors:
+            joined = ", ".join(str(p) for p in missing_anchors)
+            raise FileNotFoundError(
+                f"start_step={start_step_idx} requires pre-seeded anchor "
+                f"inversions before step_{start_step_idx:03d}, missing: {joined}"
+            )
+
     interval_note = (
         f"Inversion interval: {interval}\n"
         if interval is not None
         else "Inversion interval: every window\n"
+    )
+    start_note = (
+        f"Start step: {start_step_idx} "
+        f"(skipping {start_step_idx} prefix steps; running {len(steps_to_run)} steps)\n"
+        if start_step_idx > 0
+        else ""
     )
     print(
         f"\n========================================\n"
         f"Starting walk-forward for T = {horizon_days:g} days ({len(steps)} steps)\n"
         f"Schedule: {schedule} | realizations: {n_runs} (seeds {seed_start}..{seed_start + n_runs - 1})\n"
         f"{interval_note}"
+        f"{start_note}"
         f"Output: {h_dir}\n"
         f"========================================",
         flush=True,
@@ -553,13 +620,30 @@ def run_walk_forward_for_horizon(
     step_summaries: list[dict[str, Any]] = []
     rows_for_csv: list[dict[str, Any]] = []
 
+    def _load_or_finalize_step(
+        step: RollingStepWindows,
+        s_dir: pathlib.Path,
+        cached_catalog: pd.DataFrame | None,
+    ) -> dict[str, Any]:
+        summary_file = s_dir / "step_summary.json"
+        if step.step_index < start_step_idx and summary_file.is_file():
+            return json.loads(summary_file.read_text(encoding="utf-8"))
+        return finalize_rolling_step(
+            base_cfg=base_cfg,
+            step_window=step,
+            step_output_dir=s_dir,
+            repo_root=repo_root,
+            methods=methods,
+            raw_catalog=cached_catalog,
+        )
+
     if schedule == "by_realization":
         for run_idx, seed in enumerate(range(seed_start, seed_start + n_runs), start=1):
             print(
                 f"\n=== Realization {run_idx}/{n_runs} (seed={seed}) ===",
                 flush=True,
             )
-            for step in steps:
+            for step in steps_to_run:
                 s_dir = h_dir / step_dir_name(step.step_index)
                 reuse_dir = reuse_dir_for(step)
                 fit_note = (
@@ -588,15 +672,10 @@ def run_walk_forward_for_horizon(
                     reuse_inversion_from_step=reuse_dir,
                 )
 
+        cached_catalog = _load_parsed_catalog(base_cfg, repo_root)
         for step in steps:
             s_dir = h_dir / step_dir_name(step.step_index)
-            step_meta = finalize_rolling_step(
-                base_cfg=base_cfg,
-                step_window=step,
-                step_output_dir=s_dir,
-                repo_root=repo_root,
-                methods=methods,
-            )
+            step_meta = _load_or_finalize_step(step, s_dir, cached_catalog)
             step_summaries.append(step_meta)
             rows_for_csv.append(
                 _step_summary_row(
@@ -606,8 +685,22 @@ def run_walk_forward_for_horizon(
                 )
             )
     else:
+        cached_catalog = (
+            _load_parsed_catalog(base_cfg, repo_root) if start_step_idx > 0 else None
+        )
         for step in steps:
             s_dir = h_dir / step_dir_name(step.step_index)
+            if step.step_index < start_step_idx:
+                step_meta = _load_or_finalize_step(step, s_dir, cached_catalog)
+                step_summaries.append(step_meta)
+                rows_for_csv.append(
+                    _step_summary_row(
+                        horizon_days=horizon_days,
+                        step_window=step,
+                        step_meta=step_meta,
+                    )
+                )
+                continue
             reuse_dir = reuse_dir_for(step)
             fit_note = (
                 "new inversion"
@@ -644,7 +737,7 @@ def run_walk_forward_for_horizon(
 
     summary_df = pd.DataFrame(rows_for_csv)
     summary_csv_path = h_dir / "rolling_summary.csv"
-    summary_df.to_csv(summary_csv_path, index=False)
+    _atomic_write_text(summary_csv_path, summary_df.to_csv(index=False))
 
     horizon_meta = {
         "horizon_days": horizon_days,
@@ -654,9 +747,9 @@ def run_walk_forward_for_horizon(
         "methods": list(methods),
         "steps": step_summaries,
     }
-    (h_dir / "horizon_summary.json").write_text(
+    _atomic_write_text(
+        h_dir / "horizon_summary.json",
         json.dumps(horizon_meta, indent=2),
-        encoding="utf-8",
     )
     return horizon_meta
 

@@ -1,4 +1,6 @@
+import importlib.util
 import json
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -7,6 +9,7 @@ import pandas as pd
 import pytest
 
 import etas.utility_functions as utility_functions
+import launch_rolling_seed_pool as pool
 import rolling_continuation as rolling
 import run_rolling_continuation as run_rolling
 
@@ -484,6 +487,424 @@ def test_execute_rolling_step_writes_step_index(tmp_path: Path) -> None:
     shared_cfg = json.loads((step_dir / "step_config.json").read_text(encoding="utf-8"))
     assert seed_cfg["step_index"] == 7
     assert shared_cfg["step_index"] == 7
+
+
+def test_run_walk_forward_start_step_skips_prefix_and_preserves_anchors(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    out_root = tmp_path / "start_step_out"
+    h_dir = out_root / "horizon_1d"
+    # Pre-seed anchor step_000 and prefix step_001 summaries
+    for idx in (0, 1):
+        s_dir = h_dir / f"step_{idx:03d}"
+        s_dir.mkdir(parents=True, exist_ok=True)
+        (s_dir / "active_inversion.json").write_text(
+            json.dumps({"inv_id": "abc", "parameters_json": str(s_dir / "params.json")}),
+            encoding="utf-8",
+        )
+        (s_dir / "step_summary.json").write_text(
+            json.dumps(
+                {
+                    "step_index": idx,
+                    "windows": {
+                        "step_index": idx,
+                        "train_start": "2018-01-01 00:00:00",
+                        "train_end": f"2018-01-0{idx + 1} 00:00:00",
+                        "forecast_start": f"2018-01-0{idx + 1} 00:00:00",
+                        "forecast_end": f"2018-01-0{idx + 2} 00:00:00",
+                        "horizon_days": 1.0,
+                    },
+                    "metrics": _metrics_stub(),
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    cfg = {
+        "fn_catalog": "input_data/example_catalog.csv",
+        "timewindow_start": "2018-01-01 00:00:00",
+        "timewindow_end": "2018-01-01 00:00:00",
+        "testwindow_end": "2018-01-05 00:00:00",
+        "mc": 3.6,
+        "seed": 0,
+        "n_runs": 1,
+        "inversion_interval": 2,
+    }
+    executed: list[tuple[int, Path | None]] = []
+
+    def fake_execute_step(**kwargs):
+        sw = kwargs["step_window"]
+        executed.append((sw.step_index, kwargs["reuse_inversion_from_step"]))
+        kwargs["step_output_dir"].mkdir(parents=True, exist_ok=True)
+        return None
+
+    def fake_finalize(**kwargs):
+        sw = kwargs["step_window"]
+        return {
+            "step_index": sw.step_index,
+            "windows": sw.to_dict(),
+            "metrics": _metrics_stub(),
+        }
+
+    with patch("rolling_continuation.execute_rolling_step", side_effect=fake_execute_step):
+        with patch("rolling_continuation.finalize_rolling_step", side_effect=fake_finalize):
+            rolling.run_walk_forward_for_horizon(
+                base_cfg=cfg,
+                horizon_days=1,
+                output_root=out_root,
+                repo_root=repo_root,
+                methods=["etas"],
+                schedule="by_realization",
+                start_step=2,
+            )
+
+    # Steps 0 and 1 were skipped; step 2 still reuses step_000, step 3 fits a new anchor.
+    assert executed == [(2, h_dir / "step_000"), (3, None)]
+    summary_df = pd.read_csv(h_dir / "rolling_summary.csv")
+    assert list(summary_df["step_index"]) == [0, 1, 2, 3]
+
+
+def test_run_walk_forward_start_step_fails_if_prior_anchor_missing(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    cfg = {
+        "fn_catalog": "input_data/example_catalog.csv",
+        "timewindow_start": "2018-01-01 00:00:00",
+        "timewindow_end": "2018-01-01 00:00:00",
+        "testwindow_end": "2018-01-05 00:00:00",
+        "mc": 3.6,
+        "seed": 0,
+        "n_runs": 1,
+        "inversion_interval": 2,
+    }
+    with pytest.raises(FileNotFoundError, match="pre-seeded anchor"):
+        rolling.run_walk_forward_for_horizon(
+            base_cfg=cfg,
+            horizon_days=1,
+            output_root=tmp_path / "missing_anchor",
+            repo_root=repo_root,
+            methods=["etas"],
+            schedule="by_realization",
+            start_step=2,
+        )
+
+
+def test_run_rolling_cli_start_step_validation_and_forwarding(tmp_path: Path) -> None:
+    config_file = tmp_path / "cfg.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "fn_catalog": "input_data/example_catalog.csv",
+                "timewindow_start": "2017-01-01 00:00:00",
+                "timewindow_end": "2018-01-01 00:00:00",
+                "testwindow_end": "2018-03-01 00:00:00",
+                "mc": 3.6,
+                "methods": ["etas"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="single horizon"):
+        run_rolling.main(
+            [
+                "--config",
+                str(config_file),
+                "--horizon-days",
+                "7,30",
+                "--start-step",
+                "5",
+                "--output-root",
+                str(tmp_path / "out"),
+            ]
+        )
+
+    with patch("rolling_continuation.run_walk_forward_for_horizon") as mock_run:
+        rc = run_rolling.main(
+            [
+                "--config",
+                str(config_file),
+                "--horizon-days",
+                "30",
+                "--start-step",
+                "1",
+                "--output-root",
+                str(tmp_path / "out"),
+            ]
+        )
+        assert rc == 0
+        assert mock_run.call_args.kwargs["start_step"] == 1
+
+    with pytest.raises(SystemExit, match="single horizon"):
+        pool.main(
+            [
+                "--config",
+                str(config_file),
+                "--horizon-days",
+                "7,30",
+                "--start-step",
+                "2",
+                "--seeds",
+                "0,1",
+                "--max-workers",
+                "1",
+                "--output-root",
+                str(tmp_path / "out_pool"),
+                "--log-dir",
+                str(tmp_path / "logs_pool"),
+            ]
+        )
+
+    captured_cmds: list[list[str]] = []
+
+    class _FakeCompleted:
+        def __init__(self, cmd):
+            captured_cmds.append(list(cmd))
+            self.returncode = 0
+
+    with patch.object(
+        pool.subprocess,
+        "run",
+        side_effect=lambda cmd, **kw: _FakeCompleted(cmd),
+    ):
+        rc = pool.main(
+            [
+                "--config",
+                str(config_file),
+                "--horizon-days",
+                "30",
+                "--start-step",
+                "3",
+                "--seeds",
+                "0,1",
+                "--max-workers",
+                "1",
+                "--output-root",
+                str(tmp_path / "out_pool"),
+                "--log-dir",
+                str(tmp_path / "logs_pool"),
+            ]
+        )
+    assert rc == 0
+    assert len(captured_cmds) == 2
+    for cmd in captured_cmds:
+        idx = cmd.index("--start-step")
+        assert cmd[idx + 1] == "3"
+
+
+def test_seed_full_v3_from_prerc_and_audit(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+
+    def _load(rel: str):
+        mod_name = f"_test_loaded_{Path(rel).stem}"
+        spec = importlib.util.spec_from_file_location(mod_name, repo_root / rel)
+        assert spec and spec.loader
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[mod_name] = mod
+        try:
+            spec.loader.exec_module(mod)
+        except Exception:
+            sys.modules.pop(mod_name, None)
+            raise
+        return mod
+
+    seeder = _load("scripts/seed_hauksson_full_v3_from_prerc.py")
+    auditor = _load("scripts/audit_hauksson_full_v3_horizon.py")
+
+    prerc_cfg = {
+        "methods": ["etas", "FINE"],
+        "fn_catalog": "input_data/example_catalog.csv",
+        "auxiliary_start": "2017-01-01 00:00:00",
+        "timewindow_start": "2017-01-01 00:00:00",
+        "timewindow_end": "2018-01-01 00:00:00",
+        "testwindow_end": "2018-01-03 12:00:00",  # 3 steps for H=1d; step 2 clipped at 12:00
+        "mc": 3.6,
+        "seed": 0,
+        "n_runs": 2,
+        "inversion_interval": 2,
+    }
+    full_cfg = {
+        **prerc_cfg,
+        "testwindow_end": "2018-01-05 00:00:00",  # 4 steps for H=1d; step 2 extends to 01-04, step 3 is 01-04..01-05 (new anchor)
+    }
+
+    src_h = tmp_path / "prerc_h1d" / "horizon_1d"
+    dst_root = tmp_path / "full_h1d"
+    dst_h = dst_root / "horizon_1d"
+
+    steps_pre = rolling.compute_rolling_steps(
+        timewindow_start=prerc_cfg["timewindow_start"],
+        timewindow_end=prerc_cfg["timewindow_end"],
+        testwindow_end=prerc_cfg["testwindow_end"],
+        horizon_days=1.0,
+    )
+    inv_id_0 = "aaaa1111bbbb2222"
+    inv_dir_0 = src_h / "step_000" / "inversions" / f"inv_{inv_id_0}"
+    inv_dir_0.mkdir(parents=True, exist_ok=True)
+    src_csv = inv_dir_0 / f"sources_{inv_id_0}.csv"
+    ip_csv = inv_dir_0 / f"trig_and_bg_probs_{inv_id_0}.csv"
+    src_csv.write_text("id,m\n1,4.0\n", encoding="utf-8")
+    ip_csv.write_text("id,p\n1,0.5\n", encoding="utf-8")
+    orig_params = {
+        "id": inv_id_0,
+        "inversion_done": True,
+        "final_parameters": {"log10_mu": -6.0},
+        "fn_catalog": "/old/path/cat.csv",
+        "fn_src": str(src_csv),
+        "fn_ip": str(ip_csv),
+    }
+    params_0 = inv_dir_0 / f"parameters_{inv_id_0}.json"
+    params_0.write_text(json.dumps(orig_params), encoding="utf-8")
+    orig_params_ino = params_0.stat().st_ino
+
+    for step in steps_pre:
+        s_dir = src_h / f"step_{step.step_index:03d}"
+        s_dir.mkdir(parents=True, exist_ok=True)
+        (s_dir / "active_inversion.json").write_text(
+            json.dumps({"inv_id": inv_id_0, "parameters_json": str(params_0)}),
+            encoding="utf-8",
+        )
+        scfg = {
+            "output_root": str(s_dir),
+            "timewindow_end": str(step.forecast_start),
+            "testwindow_end": str(step.forecast_end),
+            "step_index": step.step_index,
+        }
+        if step.step_index > 0:
+            scfg["reuse_inversion_from_step"] = str(src_h / "step_000")
+        (s_dir / "step_config.json").write_text(json.dumps(scfg), encoding="utf-8")
+        for method in ("etas", "FINE"):
+            for seed in (0, 1):
+                r_dir = s_dir / method / f"inv_{inv_id_0}" / f"seed_{seed}"
+                r_dir.mkdir(parents=True, exist_ok=True)
+                (r_dir / "forecast_catalog.csv").write_text("latitude,longitude,time,magnitude\n", encoding="utf-8")
+                (r_dir / "realization_meta.json").write_text(
+                    json.dumps(
+                        {
+                            "seed": seed,
+                            "rng_seed": utility_functions.derive_step_rng_seed(seed, step.step_index),
+                            "step_index": step.step_index,
+                            "inversion_id": inv_id_0,
+                            "continuation_method": method,
+                            "timewindow_end": str(step.forecast_start),
+                            "testwindow_end": str(step.forecast_end),
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+    plan = seeder.compute_horizon_plan(
+        prerc_cfg=prerc_cfg,
+        full_cfg=full_cfg,
+        horizon_days=1.0,
+        src_horizon_dir=src_h,
+        dst_output_root=dst_root,
+        dst_horizon_dir=dst_h,
+    )
+    assert plan.n_pre_steps == 3
+    assert plan.n_full_steps == 4
+    assert plan.n_prefix == 2
+    assert plan.start_step == 2
+    assert plan.reused_anchors == (0,)
+    assert plan.new_anchors == (3,)
+
+    res = seeder.seed_horizon_prefix(
+        plan,
+        full_cfg=full_cfg,
+        repo_root=repo_root,
+        methods=("etas", "FINE"),
+        seeds=(0, 1),
+    )
+    assert res["n_prefix_seeded"] == 2
+    assert (dst_h / "step_000").is_dir()
+    assert (dst_h / "step_001").is_dir()
+    assert not (dst_h / "step_002").exists()  # clipped step omitted
+
+    # Source files must NOT be mutated and default copy mode must share ZERO inodes.
+    dst_params_0 = dst_h / "step_000" / "inversions" / f"inv_{inv_id_0}" / f"parameters_{inv_id_0}.json"
+    assert dst_params_0.stat().st_ino != orig_params_ino
+    assert json.loads(params_0.read_text(encoding="utf-8"))["fn_src"] == str(src_csv)
+    dst_loaded = json.loads(dst_params_0.read_text(encoding="utf-8"))
+    assert dst_loaded["fn_src"] == str(dst_params_0.parent / f"sources_{inv_id_0}.csv")
+    assert Path(dst_loaded["fn_src"]).is_file()
+    assert Path(dst_loaded["fn_src"]).stat().st_ino != src_csv.stat().st_ino
+    dst_cat_0 = dst_h / "step_000" / "etas" / f"inv_{inv_id_0}" / "seed_0" / "forecast_catalog.csv"
+    src_cat_0 = src_h / "step_000" / "etas" / f"inv_{inv_id_0}" / "seed_0" / "forecast_catalog.csv"
+    assert dst_cat_0.stat().st_ino != src_cat_0.stat().st_ino
+
+    ptr_1 = json.loads((dst_h / "step_001" / "active_inversion.json").read_text(encoding="utf-8"))
+    assert ptr_1["parameters_json"] == str(dst_params_0.resolve())
+    cfg_1 = json.loads((dst_h / "step_001" / "step_config.json").read_text(encoding="utf-8"))
+    assert cfg_1["reuse_inversion_from_step"] == str((dst_h / "step_000").resolve())
+
+    # Idempotent second run succeeds and preserves distinct inodes.
+    seeder.seed_horizon_prefix(
+        plan,
+        full_cfg=full_cfg,
+        repo_root=repo_root,
+        methods=("etas", "FINE"),
+        seeds=(0, 1),
+    )
+    assert dst_cat_0.stat().st_ino != src_cat_0.stat().st_ino
+
+    # Complete steps 2 and 3 in dst_h and verify audit passes.
+    steps_full = rolling.compute_rolling_steps(
+        timewindow_start=full_cfg["timewindow_start"],
+        timewindow_end=full_cfg["timewindow_end"],
+        testwindow_end=full_cfg["testwindow_end"],
+        horizon_days=1.0,
+    )
+    inv_id_3 = "cccc3333dddd4444"
+    inv_dir_3 = dst_h / "step_003" / "inversions" / f"inv_{inv_id_3}"
+    inv_dir_3.mkdir(parents=True, exist_ok=True)
+    params_3 = inv_dir_3 / f"parameters_{inv_id_3}.json"
+    params_3.write_text(
+        json.dumps({"id": inv_id_3, "inversion_done": True, "final_parameters": {"log10_mu": -6.0}}),
+        encoding="utf-8",
+    )
+    for step, inv_id, pjson in ((steps_full[2], inv_id_0, dst_params_0), (steps_full[3], inv_id_3, params_3)):
+        s_dir = dst_h / f"step_{step.step_index:03d}"
+        s_dir.mkdir(parents=True, exist_ok=True)
+        (s_dir / "active_inversion.json").write_text(
+            json.dumps({"inv_id": inv_id, "parameters_json": str(pjson)}),
+            encoding="utf-8",
+        )
+        (s_dir / "step_config.json").write_text(
+            json.dumps(
+                {
+                    "timewindow_end": str(step.forecast_start),
+                    "testwindow_end": str(step.forecast_end),
+                    "step_index": step.step_index,
+                }
+            ),
+            encoding="utf-8",
+        )
+        for method in ("etas", "FINE"):
+            for seed in (0, 1):
+                r_dir = s_dir / method / f"inv_{inv_id}" / f"seed_{seed}"
+                r_dir.mkdir(parents=True, exist_ok=True)
+                (r_dir / "forecast_catalog.csv").write_text("latitude,longitude,time,magnitude\n", encoding="utf-8")
+                (r_dir / "realization_meta.json").write_text(
+                    json.dumps(
+                        {
+                            "seed": seed,
+                            "rng_seed": utility_functions.derive_step_rng_seed(seed, step.step_index),
+                            "step_index": step.step_index,
+                            "timewindow_end": str(step.forecast_start),
+                            "testwindow_end": str(step.forecast_end),
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+    summary = auditor.audit_horizon_completeness(
+        horizon_dir=dst_h,
+        cfg=full_cfg,
+        horizon_days=1.0,
+        methods=("etas", "FINE"),
+        seeds=(0, 1),
+    )
+    assert summary["n_steps"] == 4
+    assert summary["n_realizations"] == 16
+    assert summary["last_forecast_end"] == "2018-01-05 00:00:00"
+
 
 
 
