@@ -67,8 +67,7 @@ BAYONA_N_SIM = 200
 ORIGIN = pd.Timestamp("1970-01-01")
 HORIZON_NAME = re.compile(r"^horizon_(\d+(?:\.\d+)?)d$")
 OUTPUT_ROOTS = (
-    "outputs/rolling_continuation_hauksson_pre_ridgecrest",
-    "outputs/rolling_continuation_hauksson_pre_ridgecrest_short",
+    "outputs/rolling_continuation_hauksson_pre_ridgecrest_v3",
 )
 INTERVAL_COLUMNS = ["forecast_start", "n_observed", "low", "high", "observed"]
 
